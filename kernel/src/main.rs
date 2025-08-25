@@ -10,19 +10,13 @@ pub mod util;
 use bootloader_api::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 
-use crate::{
-    arch::{
-        api::{ArchDevice, ArchPlatform},
-        Arch,
-    },
-    device::char::CharDevice,
-};
+use crate::arch::{api::ArchPlatform, Arch};
 
 entry_point!(kernel_main);
 
 fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
     Arch::init();
-    CharDevice::write(Arch::console(), b"Hello, world!\n");
+    println!("Hello, world!");
     loop {
         core::hint::spin_loop()
     }
@@ -30,7 +24,7 @@ fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    CharDevice::write(Arch::console(), b"panic!\n");
+    println!("panic!");
     loop {
         core::hint::spin_loop()
     }
