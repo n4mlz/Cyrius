@@ -3,14 +3,13 @@
 #![feature(trait_alias)]
 
 pub mod arch;
-pub mod bus;
 pub mod device;
 pub mod util;
 
-use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 
-use crate::arch::{api::ArchPlatform, Arch};
+use crate::arch::{Arch, api::ArchPlatform};
 
 entry_point!(kernel_main);
 

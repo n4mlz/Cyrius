@@ -1,8 +1,8 @@
 use core::marker::PhantomData;
 
 use super::Uart;
-use crate::bus::reg::{RegBus, RegSizeBound};
 use crate::cast;
+use crate::device::bus::reg::{RegBus, RegSizeBound};
 use crate::device::char::CharDevice;
 use crate::device::{Device, DeviceType};
 

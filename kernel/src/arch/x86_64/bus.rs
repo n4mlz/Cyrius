@@ -1,4 +1,4 @@
-use crate::bus::reg::RegBus;
+use crate::device::bus::reg::RegBus;
 
 pub struct Pio {
     base: u16,
