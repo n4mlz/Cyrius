@@ -34,6 +34,7 @@ macro_rules! impl_addr {
             }
 
             fn align_up(&self, align: usize) -> Self {
+                debug_assert!(align.is_power_of_two());
                 let offset = self.as_ptr().align_offset(align);
                 $name::from_ptr(unsafe { self.as_ptr().add(offset) })
             }

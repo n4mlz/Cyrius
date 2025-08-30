@@ -1,7 +1,4 @@
-use crate::mem::{
-    addr::{MemPerm, Page, PhysAddr, VirtAddr},
-    bootinfo::KernelBootInfo,
-};
+use crate::mem::addr::{MemPerm, Page, PhysAddr, VirtAddr};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MapError {
@@ -42,7 +39,7 @@ pub trait AddressSpace {
     fn flush_tlb(&self);
 }
 
-pub trait ArchMmu {
+pub trait Mmu {
     type Mapper: PageMapper;
 
     type Space: AddressSpace;
@@ -56,7 +53,7 @@ pub trait ArchMmu {
     /// 2. Map kernel text/rodata/data/bss/stack to appropriate virtual addresses
     /// 3. Exception handlers are reachable
     /// 4. Returned Space/Mapper are already valid
-    unsafe fn create_kernel_space(kbi: &KernelBootInfo) -> (Self::Space, Self::Mapper);
+    unsafe fn create_kernel_space() -> (Self::Space, Self::Mapper);
 
     /// Create user address space (with kernel template)
     ///
