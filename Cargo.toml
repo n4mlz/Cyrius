@@ -3,6 +3,7 @@ members = ["kernel", "xtask"]
 
 [workspace.dependencies]
 anyhow = "1.0"
+bitflags = "2.9"
 bootloader = "0.11"
 bootloader_api = "0.11"
 clap = { version = "4.5", features = ["derive"] }

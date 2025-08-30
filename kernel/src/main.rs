@@ -1,9 +1,10 @@
 #![no_std]
 #![no_main]
-#![feature(trait_alias)]
+#![feature(trait_alias, pointer_is_aligned_to)]
 
 pub mod arch;
 pub mod device;
+pub mod mem;
 pub mod util;
 
 use bootloader_api::{BootInfo, entry_point};
