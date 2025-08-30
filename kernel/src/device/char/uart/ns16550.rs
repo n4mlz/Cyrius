@@ -1,9 +1,9 @@
 use core::marker::PhantomData;
 
-use super::Uart;
 use crate::cast;
 use crate::device::bus::reg::{RegBus, RegSizeBound};
 use crate::device::char::CharDevice;
+use crate::device::char::uart::Uart;
 use crate::device::{Device, DeviceType};
 
 const RBR: usize = 0;
@@ -55,12 +55,11 @@ impl<RegSize: RegSizeBound, R: RegBus<RegSize>> CharDevice for Ns16550<RegSize, 
     fn read(&self, buf: &mut [u8]) -> usize {
         let mut i = 0;
         while i < buf.len() {
-            match Uart::read(self) {
-                Ok(c) => {
-                    buf[i] = c;
-                    i += 1;
-                }
-                Err(_) => break,
+            if self.rx_ready() {
+                buf[i] = cast!(self.rbr());
+                i += 1;
+            } else {
+                break;
             }
         }
         i
@@ -68,10 +67,9 @@ impl<RegSize: RegSizeBound, R: RegBus<RegSize>> CharDevice for Ns16550<RegSize, 
     fn write(&self, buf: &[u8]) -> usize {
         let mut i = 0;
         while i < buf.len() {
-            match Uart::write(self, buf[i]) {
-                Ok(()) => i += 1,
-                Err(_) => break,
-            }
+            while !self.tx_ready() {}
+            self.out(THR, cast!(buf[i]));
+            i += 1;
         }
         i
     }
@@ -96,19 +94,5 @@ impl<RegSize: RegSizeBound, R: RegBus<RegSize>> Uart for Ns16550<RegSize, R> {
 
     fn rx_ready(&self) -> bool {
         (self.lsr() & cast!(0x01)) != cast!(0)
-    }
-
-    fn read(&self) -> Result<u8, Self::Error> {
-        if self.rx_ready() {
-            Ok(cast!(self.rbr()))
-        } else {
-            Err(())
-        }
-    }
-
-    fn write(&self, c: u8) -> Result<(), Self::Error> {
-        while !self.tx_ready() {}
-        self.out(THR, cast!(c));
-        Ok(())
     }
 }

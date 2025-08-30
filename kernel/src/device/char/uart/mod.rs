@@ -8,6 +8,4 @@ pub trait Uart: CharDevice {
     fn init(&self);
     fn tx_ready(&self) -> bool;
     fn rx_ready(&self) -> bool;
-    fn read(&self) -> Result<u8, Self::Error>;
-    fn write(&self, c: u8) -> Result<(), Self::Error>;
 }

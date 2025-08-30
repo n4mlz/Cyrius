@@ -1,7 +1,4 @@
-use crate::{
-    arch::{api::ArchDevice, Arch},
-    device::char::CharDevice,
-};
+use crate::arch::{Arch, api::ArchDevice};
 
 #[macro_export]
 macro_rules! cast {
@@ -14,7 +11,7 @@ pub struct Writer;
 
 impl core::fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        CharDevice::write(Arch::console(), s.as_bytes());
+        Arch::console().write(s.as_bytes());
         Ok(())
     }
 }
