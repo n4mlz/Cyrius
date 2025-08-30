@@ -1,3 +1,5 @@
+pub mod lock;
+
 use crate::arch::{Arch, api::ArchDevice};
 
 #[macro_export]
