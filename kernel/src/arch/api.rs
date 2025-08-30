@@ -1,4 +1,4 @@
-use crate::mem::segment::KernelSegments;
+use crate::mem::bootinfo::KernelSegments;
 
 pub trait ArchPlatform {
     fn name() -> &'static str;
