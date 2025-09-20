@@ -1,4 +1,5 @@
-pub mod lock;
+pub mod lazylock;
+pub mod spinlock;
 
 use crate::arch::{Arch, api::ArchDevice};
 
