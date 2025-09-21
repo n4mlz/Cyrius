@@ -75,7 +75,7 @@ pub enum PageSize {
 impl PageSize {
     pub fn bytes(&self) -> usize {
         match self {
-            PageSize::Size4K => 4096,
+            PageSize::Size4K => 4 * 1024,
             PageSize::Size2M => 2 * 1024 * 1024,
             PageSize::Size1G => 1024 * 1024 * 1024,
         }
