@@ -1,7 +1,10 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
-use crate::arch::{Arch, api::ArchPlatform};
+use crate::arch::{
+    Arch,
+    api::{ArchMmu, ArchPlatform},
+};
 use crate::boot::{BootInfo, MemoryMap, PhysicalRegionKind};
 use crate::mem::addr::{Addr, AddrRange, PhysAddr, VirtAddr};
 use crate::util::align_up;
@@ -11,8 +14,8 @@ const HEAP_ALIGNMENT: usize = 0x1000;
 
 #[derive(Copy, Clone, Debug)]
 pub struct HeapStats {
-    pub start: VirtAddr,
-    pub end: VirtAddr,
+    pub phys: AddrRange<PhysAddr>,
+    pub virt: AddrRange<VirtAddr>,
     pub next: VirtAddr,
 }
 
@@ -44,7 +47,7 @@ impl BumpAllocator {
         self.initialized = true;
     }
 
-    fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
         if !self.initialized {
             return None;
         }
@@ -66,44 +69,74 @@ impl BumpAllocator {
         // bump allocator does not support free
     }
 
-    fn stats(&self) -> Option<HeapStats> {
+    fn cursor(&self) -> Option<VirtAddr> {
         if !self.initialized {
             return None;
         }
 
-        Some(HeapStats {
-            start: VirtAddr::from_usize(self.start),
-            end: VirtAddr::from_usize(self.end),
-            next: VirtAddr::from_usize(self.next),
-        })
+        Some(VirtAddr::from_usize(self.next))
+    }
+
+    fn is_initialized(&self) -> bool {
+        self.initialized
     }
 }
 
 pub struct KernelHeap {
     allocator: SpinLock<BumpAllocator>,
+    mapping: SpinLock<Option<HeapMapping>>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct HeapMapping {
+    phys: AddrRange<PhysAddr>,
+    virt: AddrRange<VirtAddr>,
 }
 
 impl KernelHeap {
     pub const fn new() -> Self {
         Self {
             allocator: SpinLock::new(BumpAllocator::new()),
+            mapping: SpinLock::new(None),
         }
     }
 
+    pub fn global() -> &'static Self {
+        &GLOBAL_ALLOCATOR
+    }
+
     pub fn init(&self, boot_info: &BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) {
-        let phys_range = self.select_region(boot_info.memory_map);
-        let virt_range =
-            Arch::map_kernel_heap(boot_info, phys_range).expect("failed to map kernel heap");
-        self.install(virt_range);
+        if self.mapping.lock().is_some() {
+            return;
+        }
+
+        let phys_range = Self::select_region(boot_info.memory_map);
+        let virt_range = Arch::mmu()
+            .map_heap(boot_info, phys_range)
+            .expect("failed to map kernel heap");
+        self.install(phys_range, virt_range);
     }
 
     pub fn stats(&self) -> Option<HeapStats> {
+        let mapping = *self.mapping.lock();
+        let mapping = mapping?;
+
         let guard = self.allocator.lock();
-        guard.stats()
+        if !guard.is_initialized() {
+            return None;
+        }
+
+        let next = guard.cursor()?;
+
+        Some(HeapStats {
+            phys: mapping.phys,
+            virt: mapping.virt,
+            next,
+        })
     }
 
     // Selects a suitable physical memory region for the kernel heap.
-    fn select_region(&self, map: MemoryMap<'_>) -> AddrRange<PhysAddr> {
+    fn select_region(map: MemoryMap<'_>) -> AddrRange<PhysAddr> {
         debug_assert!(HEAP_ALIGNMENT.is_power_of_two());
 
         map.iter()
@@ -137,15 +170,23 @@ impl KernelHeap {
             .expect("no suitable usable memory region found for heap")
     }
 
-    fn install(&self, range: AddrRange<VirtAddr>) {
+    fn install(&self, phys: AddrRange<PhysAddr>, virt: AddrRange<VirtAddr>) {
         assert!(
-            range.end.as_usize() > range.start.as_usize(),
+            virt.end.as_usize() > virt.start.as_usize(),
             "heap range must be non-empty"
         );
 
+        {
+            let mut mapping = self.mapping.lock();
+            if mapping.is_some() {
+                panic!("kernel heap already initialized");
+            }
+            *mapping = Some(HeapMapping { phys, virt });
+        }
+
         let mut guard = self.allocator.lock();
         unsafe {
-            guard.init(range);
+            guard.init(virt);
         }
     }
 }
@@ -154,7 +195,7 @@ unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut guard = self.allocator.lock();
         guard
-            .alloc(layout)
+            .allocate(layout)
             .map(NonNull::as_ptr)
             .unwrap_or(ptr::null_mut())
     }
@@ -168,7 +209,7 @@ unsafe impl GlobalAlloc for KernelHeap {
 }
 
 #[global_allocator]
-pub static HEAP: KernelHeap = KernelHeap::new();
+static GLOBAL_ALLOCATOR: KernelHeap = KernelHeap::new();
 
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {

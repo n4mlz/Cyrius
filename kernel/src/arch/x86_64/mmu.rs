@@ -1,11 +1,13 @@
 use core::arch::asm;
 use core::ptr;
 
+use crate::arch::api::ArchMmu;
 use crate::boot::BootInfo;
 use crate::mem::addr::{Addr, AddrRange, PageSize, PhysAddr, VirtAddr};
 use crate::mem::frame::{BootFrameAllocator, FrameAllocator};
 use crate::mem::paging::MapError;
 use crate::util::align_up;
+use crate::util::spinlock::SpinLock;
 
 use super::X86BootInfo;
 
@@ -17,52 +19,117 @@ const ENTRY_PRESENT: u64 = 1;
 const ENTRY_WRITABLE: u64 = 1 << 1;
 const ENTRY_NO_EXECUTE: u64 = 1 << 63;
 
-pub fn map_kernel_heap(
-    boot_info: &BootInfo<X86BootInfo>,
-    phys_range: AddrRange<PhysAddr>,
-) -> Result<AddrRange<VirtAddr>, MapError> {
-    let recursive_index = boot_info
-        .arch_data
-        .recursive_index
-        .ok_or(MapError::Unsupported)? as usize;
+#[derive(Copy, Clone, Debug)]
+struct HeapMapping {
+    phys: AddrRange<PhysAddr>,
+    virt: AddrRange<VirtAddr>,
+}
 
-    let start = align_up(phys_range.start.as_usize(), PAGE_SIZE).ok_or(MapError::InvalidAddress)?;
-    let end = phys_range.end.as_usize() & !(PAGE_SIZE - 1);
+pub struct X86Mmu {
+    recursive_index: SpinLock<Option<usize>>,
+    heap_mapping: SpinLock<Option<HeapMapping>>,
+}
 
-    if start >= end {
-        return Err(MapError::InvalidAddress);
-    }
+static MMU: X86Mmu = X86Mmu::new();
 
-    let aligned_range = AddrRange {
-        start: PhysAddr::from_usize(start),
-        end: PhysAddr::from_usize(end),
-    };
-
-    let length = end - start;
-    let virt_start = HEAP_VIRT_START;
-    let virt_end = virt_start
-        .checked_add(length)
-        .ok_or(MapError::InvalidAddress)?;
-
-    let mut frame_allocator =
-        BootFrameAllocator::with_reservation_from_boot_info(boot_info, aligned_range);
-
-    let mapper = RecursiveMapper::new(recursive_index);
-
-    let mut offset = 0usize;
-    while offset < length {
-        let virt = virt_start + offset;
-        let phys = start + offset;
-        unsafe {
-            mapper.map_page(virt, phys, &mut frame_allocator)?;
+impl X86Mmu {
+    pub const fn new() -> Self {
+        Self {
+            recursive_index: SpinLock::new(None),
+            heap_mapping: SpinLock::new(None),
         }
-        offset += PAGE_SIZE;
     }
 
-    Ok(AddrRange {
-        start: VirtAddr::from_usize(virt_start),
-        end: VirtAddr::from_usize(virt_end),
-    })
+    pub fn instance() -> &'static Self {
+        &MMU
+    }
+
+    fn recursive_index(&self) -> Result<usize, MapError> {
+        let guard = self.recursive_index.lock();
+        guard.ok_or(MapError::Unsupported)
+    }
+
+    fn record_heap_mapping(&self, mapping: HeapMapping) {
+        let mut guard = self.heap_mapping.lock();
+        *guard = Some(mapping);
+    }
+
+    fn current_heap_mapping(&self) -> Option<HeapMapping> {
+        *self.heap_mapping.lock()
+    }
+}
+
+impl ArchMmu<X86BootInfo> for X86Mmu {
+    fn init(&self, boot_info: &BootInfo<X86BootInfo>) {
+        let mut guard = self.recursive_index.lock();
+        if guard.is_none() {
+            *guard = boot_info.arch_data.recursive_index.map(|idx| idx as usize);
+        }
+    }
+
+    fn map_heap(
+        &self,
+        boot_info: &BootInfo<X86BootInfo>,
+        phys_range: AddrRange<PhysAddr>,
+    ) -> Result<AddrRange<VirtAddr>, MapError> {
+        let recursive_index = self.recursive_index()?;
+
+        let start =
+            align_up(phys_range.start.as_usize(), PAGE_SIZE).ok_or(MapError::InvalidAddress)?;
+        let end = phys_range.end.as_usize() & !(PAGE_SIZE - 1);
+
+        if start >= end {
+            return Err(MapError::InvalidAddress);
+        }
+
+        let aligned_phys = AddrRange {
+            start: PhysAddr::from_usize(start),
+            end: PhysAddr::from_usize(end),
+        };
+
+        let length = end - start;
+        let virt_start = HEAP_VIRT_START;
+        let virt_end = virt_start
+            .checked_add(length)
+            .ok_or(MapError::InvalidAddress)?;
+        let virt_range = AddrRange {
+            start: VirtAddr::from_usize(virt_start),
+            end: VirtAddr::from_usize(virt_end),
+        };
+
+        let mut frame_allocator =
+            BootFrameAllocator::with_reservation_from_boot_info(boot_info, aligned_phys);
+        let mapper = RecursiveMapper::new(recursive_index);
+
+        let mut offset = 0usize;
+        while offset < length {
+            let virt = virt_start + offset;
+            let phys = start + offset;
+            unsafe {
+                mapper.map_page(virt, phys, &mut frame_allocator)?;
+            }
+            offset += PAGE_SIZE;
+        }
+
+        self.record_heap_mapping(HeapMapping {
+            phys: aligned_phys,
+            virt: virt_range,
+        });
+
+        Ok(virt_range)
+    }
+
+    fn phys_to_virt(&self, phys: PhysAddr) -> Option<VirtAddr> {
+        let mapping = self.current_heap_mapping()?;
+        let phys_addr = phys.as_usize();
+        let start = mapping.phys.start.as_usize();
+        let end = mapping.phys.end.as_usize();
+        if phys_addr < start || phys_addr >= end {
+            return None;
+        }
+        let offset = phys_addr - start;
+        Some(VirtAddr::from_usize(mapping.virt.start.as_usize() + offset))
+    }
 }
 
 struct RecursiveMapper {

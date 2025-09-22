@@ -1,16 +1,15 @@
 pub mod boot;
 pub mod bus;
-pub mod mm;
+pub mod mmu;
 
 use bootloader_api::BootInfo as X86EarlyInput;
 
-use crate::arch::api::{ArchDevice, ArchPlatform};
+use crate::arch::api::{ArchDevice, ArchMmu, ArchPlatform};
 use crate::boot::BootInfo;
 use crate::device::char::uart::ns16550::Ns16550;
-use crate::mem::addr::{AddrRange, PhysAddr, VirtAddr};
-use crate::mem::paging::MapError;
 
 use self::bus::Pio;
+use self::mmu::X86Mmu;
 
 pub struct X86_64;
 
@@ -22,6 +21,7 @@ pub struct X86BootInfo {
 impl ArchPlatform for X86_64 {
     type ArchEarlyInput = &'static mut X86EarlyInput;
     type ArchBootInfo = X86BootInfo;
+    type ArchMmu = X86Mmu;
 
     fn name() -> &'static str {
         "x86_64"
@@ -31,15 +31,13 @@ impl ArchPlatform for X86_64 {
         unsafe { boot::build_boot_info(input) }
     }
 
-    fn init(_boot_info: &BootInfo<Self::ArchBootInfo>) {
+    fn init(boot_info: &BootInfo<Self::ArchBootInfo>) {
+        X86Mmu::instance().init(boot_info);
         X86_64::console().init();
     }
 
-    fn map_kernel_heap(
-        boot_info: &BootInfo<Self::ArchBootInfo>,
-        region: AddrRange<PhysAddr>,
-    ) -> Result<AddrRange<VirtAddr>, MapError> {
-        mm::map_kernel_heap(boot_info, region)
+    fn mmu() -> &'static Self::ArchMmu {
+        X86Mmu::instance()
     }
 }
 
