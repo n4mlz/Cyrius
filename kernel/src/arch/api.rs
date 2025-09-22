@@ -8,14 +8,14 @@ pub trait ArchPlatform {
 
     fn name() -> &'static str;
 
-    /// Performs architecture specific early initialization.
+    /// build a BootInfo object that abstracts away architecture-specific boot information.
     ///
     /// # Safety
-    /// arch_early_init runs before Rust global invariants are established and may access raw pointers.
-    unsafe fn arch_early_init(input: Self::ArchEarlyInput) -> BootInfo<Self::ArchBootInfo>;
+    /// This function runs before Rust global invariants are established and may access raw pointers.
+    unsafe fn build_boot_info(input: Self::ArchEarlyInput) -> BootInfo<Self::ArchBootInfo>;
 
-    /// Completes initialization once the portable kernel has taken over.
-    fn late_init(boot_info: &BootInfo<Self::ArchBootInfo>);
+    /// Called after the portable kernel has started to perform architecture-specific initialization.
+    fn init(boot_info: &BootInfo<Self::ArchBootInfo>);
 }
 
 pub trait ArchDevice {

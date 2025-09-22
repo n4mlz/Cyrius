@@ -16,7 +16,7 @@ use crate::boot::BootInfo;
 /// The main entry point for the kernel after architecture specific initialization is complete.
 /// This function should be called after constructing the architecture-abstracted BootInfo structure.
 fn kernel_main(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! {
-    Arch::late_init(&boot_info);
+    Arch::init(&boot_info);
     println!("Hello, world!");
     loop {
         core::hint::spin_loop()

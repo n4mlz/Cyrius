@@ -21,9 +21,9 @@ static REGION_STORAGE: SyncUnsafeCell<[MaybeUninit<PhysicalRegion>; MAX_MEMORY_R
 
 entry_point!(arch_early_entry);
 
-fn arch_early_entry(boot_info: &'static mut X86EarlyInput) -> ! {
+fn arch_early_entry(early_input: &'static mut X86EarlyInput) -> ! {
     unsafe {
-        let boot_info = X86_64::arch_early_init(boot_info);
+        let boot_info = X86_64::build_boot_info(early_input);
         boot::enter_kernel(boot_info);
     }
 }
