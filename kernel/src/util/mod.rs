@@ -33,3 +33,13 @@ macro_rules! println {
         print!("{}\n", format_args!($($arg)*));
     });
 }
+
+pub fn align_up(num: usize, align: usize) -> Option<usize> {
+    debug_assert!(align.is_power_of_two());
+    if !align.is_power_of_two() {
+        return None;
+    }
+    let mask = align - 1;
+    let sum = num.checked_add(mask)?;
+    Some(sum & !mask)
+}

@@ -1,11 +1,14 @@
 pub mod boot;
 pub mod bus;
+pub mod mm;
 
 use bootloader_api::BootInfo as X86EarlyInput;
 
 use crate::arch::api::{ArchDevice, ArchPlatform};
 use crate::boot::BootInfo;
 use crate::device::char::uart::ns16550::Ns16550;
+use crate::mem::addr::{AddrRange, PhysAddr, VirtAddr};
+use crate::mem::paging::MapError;
 
 use self::bus::Pio;
 
@@ -30,6 +33,13 @@ impl ArchPlatform for X86_64 {
 
     fn init(_boot_info: &BootInfo<Self::ArchBootInfo>) {
         X86_64::console().init();
+    }
+
+    fn map_kernel_heap(
+        boot_info: &BootInfo<Self::ArchBootInfo>,
+        region: AddrRange<PhysAddr>,
+    ) -> Result<AddrRange<VirtAddr>, MapError> {
+        mm::map_kernel_heap(boot_info, region)
     }
 }
 

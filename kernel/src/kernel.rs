@@ -19,12 +19,14 @@ use core::panic::PanicInfo;
 
 use crate::arch::{Arch, api::ArchPlatform};
 use crate::boot::BootInfo;
+use crate::mem::alloc::KernelHeap;
 
 /// The main entry point for the kernel after architecture specific initialization is complete.
 /// This function should be called after constructing the architecture-abstracted BootInfo structure.
 fn kernel_main(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! {
+    // Contract: architecture-specific bootstrap must install an identity map that covers the kernel-visible physical memory before invoking kernel_main().
     Arch::init(&boot_info);
-    mem::alloc::init_default_heap();
+    KernelHeap::init(&boot_info);
     heap_allocation_test();
     println!("Hello, world!");
     loop {
@@ -53,7 +55,7 @@ fn heap_allocation_test() {
 
     println!("heap test checksum={} boxed={:?}", checksum, boxed);
 
-    match mem::alloc::heap_stats() {
+    match KernelHeap::stats() {
         Some(stats) => println!(
             "start={:?} next={:?} end={:?}",
             stats.start, stats.next, stats.end

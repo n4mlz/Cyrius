@@ -3,6 +3,8 @@ use core::mem::MaybeUninit;
 use core::slice;
 
 use bootloader_api::BootInfo as X86EarlyInput;
+use bootloader_api::BootloaderConfig;
+use bootloader_api::config::{Mapping, Mappings};
 use bootloader_api::entry_point;
 use bootloader_api::info::MemoryRegionKind;
 
@@ -19,7 +21,17 @@ const MAX_MEMORY_REGIONS: usize = 128;
 static REGION_STORAGE: SyncUnsafeCell<[MaybeUninit<PhysicalRegion>; MAX_MEMORY_REGIONS]> =
     SyncUnsafeCell::new([MaybeUninit::uninit(); MAX_MEMORY_REGIONS]);
 
-entry_point!(arch_early_entry);
+const BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings = {
+        let mut mappings = Mappings::new_default();
+        mappings.page_table_recursive = Some(Mapping::Dynamic);
+        mappings
+    };
+    config
+};
+
+entry_point!(arch_early_entry, config = &BOOTLOADER_CONFIG);
 
 fn arch_early_entry(early_input: &'static mut X86EarlyInput) -> ! {
     unsafe {
@@ -77,20 +89,9 @@ pub(crate) unsafe fn build_boot_info(
         virtual_offset: boot_info.kernel_image_offset as isize,
     };
 
-    let physical_memory_offset = boot_info
-        .physical_memory_offset
-        .into_option()
-        .map(|offset| (offset as usize) as isize);
-
     let arch_data = X86BootInfo {
         recursive_index: boot_info.recursive_index.into_option(),
     };
 
-    BootInfo::new(
-        memory_map,
-        kernel_image,
-        CpuId::BOOT,
-        physical_memory_offset,
-        arch_data,
-    )
+    BootInfo::new(memory_map, kernel_image, CpuId::BOOT, arch_data)
 }

@@ -1,12 +1,13 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
-use crate::mem::addr::{Addr, AddrRange, VirtAddr};
+use crate::arch::{Arch, api::ArchPlatform};
+use crate::boot::{BootInfo, MemoryMap, PhysicalRegionKind};
+use crate::mem::addr::{Addr, AddrRange, PhysAddr, VirtAddr};
+use crate::util::align_up;
 use crate::util::spinlock::SpinLock;
 
-const DEFAULT_HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
-
-static mut HEAP_SPACE: [u8; DEFAULT_HEAP_SIZE] = [0; DEFAULT_HEAP_SIZE];
+const HEAP_ALIGNMENT: usize = 0x1000;
 
 #[derive(Copy, Clone, Debug)]
 pub struct HeapStats {
@@ -78,13 +79,6 @@ impl BumpAllocator {
     }
 }
 
-fn align_up(addr: usize, align: usize) -> Option<usize> {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    let sum = addr.checked_add(mask)?;
-    Some(sum & !mask)
-}
-
 struct KernelAllocator;
 
 static ALLOCATOR: SpinLock<BumpAllocator> = SpinLock::new(BumpAllocator::new());
@@ -109,29 +103,67 @@ unsafe impl GlobalAlloc for KernelAllocator {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: KernelAllocator = KernelAllocator;
 
-pub fn init_default_heap() {
-    unsafe {
-        let start_ptr = ptr::addr_of_mut!(HEAP_SPACE) as *mut u8;
-        let start = VirtAddr::from_ptr(start_ptr);
-        let end = VirtAddr::from_ptr(start_ptr.add(DEFAULT_HEAP_SIZE));
-        init_heap(AddrRange { start, end });
-    }
-}
+pub struct KernelHeap;
 
-pub fn init_heap(range: AddrRange<VirtAddr>) {
-    assert!(
-        range.end.as_usize() > range.start.as_usize(),
-        "heap range must be non-empty"
-    );
-    let mut guard = ALLOCATOR.lock();
-    unsafe {
-        guard.init(range);
+impl KernelHeap {
+    pub fn init(boot_info: &BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) {
+        let phys_range = Self::select_region(boot_info.memory_map);
+        let virt_range =
+            Arch::map_kernel_heap(boot_info, phys_range).expect("failed to map kernel heap");
+        Self::install(virt_range);
     }
-}
 
-pub fn heap_stats() -> Option<HeapStats> {
-    let guard = ALLOCATOR.lock();
-    guard.stats()
+    pub fn stats() -> Option<HeapStats> {
+        let guard = ALLOCATOR.lock();
+        guard.stats()
+    }
+
+    // Selects a suitable physical memory region for the kernel heap.
+    fn select_region(map: MemoryMap<'_>) -> AddrRange<PhysAddr> {
+        debug_assert!(HEAP_ALIGNMENT.is_power_of_two());
+
+        map.iter()
+            .filter(|region| region.kind == PhysicalRegionKind::Usable)
+            .filter_map(|region| {
+                let aligned_start = region.range.start.align_up(HEAP_ALIGNMENT);
+                let region_end = region.range.end.as_usize();
+                let start = aligned_start.as_usize();
+                if start >= region_end {
+                    return None;
+                }
+
+                let available = region_end - start;
+                let usable = available & !(HEAP_ALIGNMENT - 1);
+                if usable == 0 {
+                    return None;
+                }
+
+                let end = start.checked_add(usable)?;
+
+                Some((
+                    usable,
+                    AddrRange {
+                        start: aligned_start,
+                        end: PhysAddr::from_usize(end),
+                    },
+                ))
+            })
+            .max_by_key(|(usable, _)| *usable)
+            .map(|(_, range)| range)
+            .expect("no suitable usable memory region found for heap")
+    }
+
+    fn install(range: AddrRange<VirtAddr>) {
+        assert!(
+            range.end.as_usize() > range.start.as_usize(),
+            "heap range must be non-empty"
+        );
+
+        let mut guard = ALLOCATOR.lock();
+        unsafe {
+            guard.init(range);
+        }
+    }
 }
 
 #[alloc_error_handler]

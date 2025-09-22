@@ -1,4 +1,6 @@
 use crate::boot::BootInfo;
+use crate::mem::addr::{AddrRange, PhysAddr, VirtAddr};
+use crate::mem::paging::MapError;
 
 pub trait ArchPlatform {
     /// Information received from the bootloader
@@ -16,6 +18,12 @@ pub trait ArchPlatform {
 
     /// Called after the portable kernel has started to perform architecture-specific initialization.
     fn init(boot_info: &BootInfo<Self::ArchBootInfo>);
+
+    /// Map the physical range selected for the kernel heap into the virtual address space.
+    fn map_kernel_heap(
+        boot_info: &BootInfo<Self::ArchBootInfo>,
+        region: AddrRange<PhysAddr>,
+    ) -> Result<AddrRange<VirtAddr>, MapError>;
 }
 
 pub trait ArchDevice {
