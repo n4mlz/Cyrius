@@ -26,13 +26,13 @@ impl ArchPlatform for X86_64 {
         "x86_64"
     }
 
-    unsafe fn arch_early_init(
-        input: Self::ArchEarlyInput,
-    ) -> BootInfo<'static, Self::ArchBootInfo> {
+    /// Performs architecture specific early initialization.
+    unsafe fn arch_early_init(input: Self::ArchEarlyInput) -> BootInfo<Self::ArchBootInfo> {
         unsafe { boot::build_boot_info(input) }
     }
 
-    fn late_init(_boot_info: &BootInfo<'static, Self::ArchBootInfo>) {
+    /// Completes initialization once the portable kernel has taken over.
+    fn late_init(_boot_info: &BootInfo<Self::ArchBootInfo>) {
         X86_64::console().init();
     }
 }

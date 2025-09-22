@@ -23,7 +23,7 @@ impl<'a> BootFrameAllocator<'a> {
         allocator
     }
 
-    pub fn from_boot_info<ArchData>(boot_info: &'a BootInfo<'a, ArchData>) -> Self {
+    pub fn from_boot_info<ArchData>(boot_info: &BootInfo<ArchData>) -> Self {
         Self::new(boot_info.memory_map)
     }
 

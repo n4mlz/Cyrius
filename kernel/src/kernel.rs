@@ -13,7 +13,9 @@ use core::panic::PanicInfo;
 use crate::arch::{Arch, api::ArchPlatform};
 use crate::boot::BootInfo;
 
-fn kernel_main(boot_info: BootInfo<'static, <Arch as ArchPlatform>::ArchBootInfo>) -> ! {
+/// The main entry point for the kernel after architecture specific initialization is complete.
+/// This function should be called after constructing the architecture-abstracted BootInfo structure.
+fn kernel_main(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! {
     Arch::late_init(&boot_info);
     println!("Hello, world!");
     loop {

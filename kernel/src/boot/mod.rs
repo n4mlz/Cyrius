@@ -60,16 +60,16 @@ pub struct KernelImage {
 }
 
 /// Fully prepared data passed from architecture specific initialization to the portable kernel core.
-pub struct BootInfo<'a, ArchData> {
-    pub memory_map: MemoryMap<'a>,
+pub struct BootInfo<ArchData> {
+    pub memory_map: MemoryMap<'static>,
     pub kernel_image: KernelImage,
     pub boot_cpu: CpuId,
     pub arch_data: ArchData,
 }
 
-impl<'a, ArchData> BootInfo<'a, ArchData> {
+impl<ArchData> BootInfo<ArchData> {
     pub fn new(
-        memory_map: MemoryMap<'a>,
+        memory_map: MemoryMap<'static>,
         kernel_image: KernelImage,
         boot_cpu: CpuId,
         arch_data: ArchData,
@@ -84,6 +84,6 @@ impl<'a, ArchData> BootInfo<'a, ArchData> {
 }
 
 /// Transfers control to the architecture independent kernel core.
-pub fn enter_kernel(boot_info: BootInfo<'static, <Arch as ArchPlatform>::ArchBootInfo>) -> ! {
+pub fn enter_kernel(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! {
     crate::kernel_main(boot_info)
 }

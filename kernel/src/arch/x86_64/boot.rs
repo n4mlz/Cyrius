@@ -30,7 +30,7 @@ fn arch_early_entry(boot_info: &'static mut X86EarlyInput) -> ! {
 
 pub(crate) unsafe fn build_boot_info(
     boot_info: &'static mut X86EarlyInput,
-) -> BootInfo<'static, X86BootInfo> {
+) -> BootInfo<X86BootInfo> {
     let mut count = 0;
     let storage_ptr = {
         let storage = unsafe { &mut *REGION_STORAGE.get() };

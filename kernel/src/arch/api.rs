@@ -12,11 +12,10 @@ pub trait ArchPlatform {
     ///
     /// # Safety
     /// arch_early_init runs before Rust global invariants are established and may access raw pointers.
-    unsafe fn arch_early_init(input: Self::ArchEarlyInput)
-    -> BootInfo<'static, Self::ArchBootInfo>;
+    unsafe fn arch_early_init(input: Self::ArchEarlyInput) -> BootInfo<Self::ArchBootInfo>;
 
     /// Completes initialization once the portable kernel has taken over.
-    fn late_init(boot_info: &BootInfo<'static, Self::ArchBootInfo>);
+    fn late_init(boot_info: &BootInfo<Self::ArchBootInfo>);
 }
 
 pub trait ArchDevice {
