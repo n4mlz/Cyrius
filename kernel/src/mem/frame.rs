@@ -6,6 +6,11 @@ pub trait FrameAllocator {
     fn free(&mut self, page: Page<PhysAddr>);
 }
 
+/// Boot-time frame allocator used before the kernel heap is available.
+///
+/// The allocator scans the bootloader-provided memory map and hands out
+/// unused physical frames. We rely on it to provision new page tables while
+/// establishing the initial kernel virtual memory layout.
 pub struct BootFrameAllocator<'a> {
     regions: &'a [crate::boot::PhysicalRegion],
     region_idx: usize,

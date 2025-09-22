@@ -32,7 +32,9 @@ impl ArchPlatform for X86_64 {
     }
 
     fn init(boot_info: &BootInfo<Self::ArchBootInfo>) {
-        X86Mmu::instance().init(boot_info);
+        X86Mmu::instance()
+            .early_init(boot_info)
+            .expect("failed to initialize MMU");
         X86_64::console().init();
     }
 

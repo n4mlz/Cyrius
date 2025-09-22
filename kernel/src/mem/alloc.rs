@@ -3,7 +3,7 @@ use core::ptr::{self, NonNull};
 
 use crate::arch::{
     Arch,
-    api::{ArchMmu, ArchPlatform},
+    api::{ArchMmu, ArchPlatform, KernelLayoutRequest},
 };
 use crate::boot::{BootInfo, MemoryMap, PhysicalRegionKind};
 use crate::mem::addr::{Addr, AddrRange, PhysAddr, VirtAddr};
@@ -111,10 +111,10 @@ impl KernelHeap {
         }
 
         let phys_range = Self::select_region(boot_info.memory_map);
-        let virt_range = Arch::mmu()
-            .map_heap(boot_info, phys_range)
-            .expect("failed to map kernel heap");
-        self.install(phys_range, virt_range);
+        let layout = Arch::mmu()
+            .prepare_kernel_layout(boot_info, KernelLayoutRequest::new(phys_range, true))
+            .expect("failed to prepare kernel memory layout");
+        self.install(phys_range, layout.heap);
     }
 
     pub fn stats(&self) -> Option<HeapStats> {
