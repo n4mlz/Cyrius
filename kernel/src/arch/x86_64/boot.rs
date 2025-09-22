@@ -12,7 +12,7 @@ use crate::boot::{
     self, BootInfo, CpuId, FirmwareRegion, KernelImage, MemoryMap, PhysicalRegion,
     PhysicalRegionKind,
 };
-use crate::mem::addr::{Addr, AddrRange, PhysAddr, VirtAddr};
+use crate::mem::addr::{Addr, AddrRange, PhysAddr};
 
 const MAX_MEMORY_REGIONS: usize = 128;
 
@@ -77,13 +77,20 @@ pub(crate) unsafe fn build_boot_info(
         virtual_offset: boot_info.kernel_image_offset as isize,
     };
 
+    let physical_memory_offset = boot_info
+        .physical_memory_offset
+        .into_option()
+        .map(|offset| (offset as usize) as isize);
+
     let arch_data = X86BootInfo {
-        physical_memory_offset: boot_info
-            .physical_memory_offset
-            .into_option()
-            .map(|offset| VirtAddr::from_usize(offset as usize)),
         recursive_index: boot_info.recursive_index.into_option(),
     };
 
-    BootInfo::new(memory_map, kernel_image, CpuId::BOOT, arch_data)
+    BootInfo::new(
+        memory_map,
+        kernel_image,
+        CpuId::BOOT,
+        physical_memory_offset,
+        arch_data,
+    )
 }

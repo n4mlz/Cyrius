@@ -64,6 +64,7 @@ pub struct BootInfo<ArchData> {
     pub memory_map: MemoryMap<'static>,
     pub kernel_image: KernelImage,
     pub boot_cpu: CpuId,
+    pub physical_memory_offset: Option<isize>,
     pub arch_data: ArchData,
 }
 
@@ -72,12 +73,14 @@ impl<ArchData> BootInfo<ArchData> {
         memory_map: MemoryMap<'static>,
         kernel_image: KernelImage,
         boot_cpu: CpuId,
+        physical_memory_offset: Option<isize>,
         arch_data: ArchData,
     ) -> Self {
         Self {
             memory_map,
             kernel_image,
             boot_cpu,
+            physical_memory_offset,
             arch_data,
         }
     }

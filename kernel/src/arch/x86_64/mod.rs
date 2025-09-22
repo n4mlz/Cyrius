@@ -6,7 +6,6 @@ use bootloader_api::BootInfo as X86EarlyInput;
 use crate::arch::api::{ArchDevice, ArchPlatform};
 use crate::boot::BootInfo;
 use crate::device::char::uart::ns16550::Ns16550;
-use crate::mem::addr::VirtAddr;
 
 use self::bus::Pio;
 
@@ -14,7 +13,6 @@ pub struct X86_64;
 
 #[derive(Copy, Clone, Debug)]
 pub struct X86BootInfo {
-    pub physical_memory_offset: Option<VirtAddr>,
     pub recursive_index: Option<u16>,
 }
 
