@@ -44,8 +44,8 @@ pub fn map_kernel_heap(
         .checked_add(length)
         .ok_or(MapError::InvalidAddress)?;
 
-    let mut allocator =
-        ReservedFrameAllocator::new(BootFrameAllocator::from_boot_info(boot_info), aligned_range);
+    let mut frame_allocator =
+        BootFrameAllocator::with_reservation_from_boot_info(boot_info, aligned_range);
 
     let mapper = RecursiveMapper::new(recursive_index);
 
@@ -54,7 +54,7 @@ pub fn map_kernel_heap(
         let virt = virt_start + offset;
         let phys = start + offset;
         unsafe {
-            mapper.map_page(virt, phys, &mut allocator)?;
+            mapper.map_page(virt, phys, &mut frame_allocator)?;
         }
         offset += PAGE_SIZE;
     }
@@ -63,41 +63,6 @@ pub fn map_kernel_heap(
         start: VirtAddr::from_usize(virt_start),
         end: VirtAddr::from_usize(virt_end),
     })
-}
-
-struct ReservedFrameAllocator<'a> {
-    inner: BootFrameAllocator<'a>,
-    reserved: AddrRange<PhysAddr>,
-}
-
-impl<'a> ReservedFrameAllocator<'a> {
-    fn new(inner: BootFrameAllocator<'a>, reserved: AddrRange<PhysAddr>) -> Self {
-        Self { inner, reserved }
-    }
-
-    fn overlaps_reserved(&self, frame: usize, size: usize) -> bool {
-        let frame_end = frame + size;
-        let reserved_start = self.reserved.start.as_usize();
-        let reserved_end = self.reserved.end.as_usize();
-        !(frame_end <= reserved_start || frame >= reserved_end)
-    }
-}
-
-impl<'a> FrameAllocator for ReservedFrameAllocator<'a> {
-    fn alloc(&mut self, size: PageSize) -> Option<crate::mem::addr::Page<PhysAddr>> {
-        let bytes = size.bytes();
-        loop {
-            let page = self.inner.alloc(size)?;
-            let frame_addr = page.start.as_usize();
-            if !self.overlaps_reserved(frame_addr, bytes) {
-                return Some(page);
-            }
-        }
-    }
-
-    fn free(&mut self, page: crate::mem::addr::Page<PhysAddr>) {
-        self.inner.free(page);
-    }
 }
 
 struct RecursiveMapper {
@@ -113,7 +78,7 @@ impl RecursiveMapper {
         &self,
         virt: usize,
         phys: usize,
-        allocator: &mut ReservedFrameAllocator<'_>,
+        allocator: &mut dyn FrameAllocator,
     ) -> Result<(), MapError> {
         let p4_index = (virt >> 39) & 0x1ff;
         let p3_index = (virt >> 30) & 0x1ff;

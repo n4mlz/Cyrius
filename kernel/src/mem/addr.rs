@@ -49,6 +49,17 @@ macro_rules! impl_addr {
 impl_addr!(PhysAddr);
 impl_addr!(VirtAddr);
 
+impl PhysAddr {
+    /// Translate this physical address into a virtual address using the given offset.
+    pub fn to_virt(self, offset: usize) -> VirtAddr {
+        let base = self.as_usize();
+        let virt = base
+            .checked_add(offset)
+            .expect("physical to virtual translation overflow");
+        VirtAddr::from_usize(virt)
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct AddrRange<T: Addr> {
     pub start: T,
