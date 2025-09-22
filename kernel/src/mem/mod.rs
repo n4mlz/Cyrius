@@ -1,2 +1,3 @@
 pub mod addr;
-pub mod mmu;
+pub mod frame;
+pub mod paging;
