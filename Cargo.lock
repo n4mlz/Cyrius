@@ -296,6 +296,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.9.3",
  "bootloader_api",
  "num-traits",
 ]

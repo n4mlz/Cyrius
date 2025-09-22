@@ -1,3 +1,4 @@
+pub mod bus;
 pub mod char;
 
 pub enum DeviceType {

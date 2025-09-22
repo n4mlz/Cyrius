@@ -1,8 +1,10 @@
 [workspace]
 members = ["kernel", "xtask"]
+resolver = "3"
 
 [workspace.dependencies]
 anyhow = "1.0"
+bitflags = { version = "2.9", default-features = false }
 bootloader = "0.11"
 bootloader_api = "0.11"
 clap = { version = "4.5", features = ["derive"] }

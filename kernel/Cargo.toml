@@ -1,8 +1,13 @@
 [package]
 name = "kernel"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+
+[[bin]]
+name = "kernel"
+path = "src/kernel.rs"
 
 [dependencies]
+bitflags.workspace = true
 bootloader_api.workspace = true
 num-traits.workspace = true
