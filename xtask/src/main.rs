@@ -34,7 +34,7 @@ fn build_kernel(release: bool) -> Result<PathBuf> {
         "--target",
         "x86_64-unknown-none",
         "-Z",
-        "build-std=core,compiler_builtins",
+        "build-std=core,alloc,compiler_builtins",
         "-Z",
         "build-std-features=compiler-builtins-mem",
     ]);
