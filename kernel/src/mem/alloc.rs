@@ -1,16 +1,12 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
-use crate::arch::{
-    Arch,
-    api::{ArchMmu, ArchPlatform, KernelLayoutRequest},
-};
-use crate::boot::{BootInfo, MemoryMap, PhysicalRegionKind};
+use crate::arch::{Arch, api::ArchPlatform};
+use crate::boot::BootInfo;
 use crate::mem::addr::{Addr, AddrRange, PhysAddr, VirtAddr};
+use crate::mem::planner::KernelMemoryPlanner;
 use crate::util::align_up;
 use crate::util::spinlock::SpinLock;
-
-const HEAP_ALIGNMENT: usize = 0x1000;
 
 #[derive(Copy, Clone, Debug)]
 pub struct HeapStats {
@@ -105,16 +101,19 @@ impl KernelHeap {
         &GLOBAL_ALLOCATOR
     }
 
-    pub fn init(&self, boot_info: &BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) {
+    pub fn init(&self, _boot_info: &BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) {
         if self.mapping.lock().is_some() {
             return;
         }
 
-        let phys_range = Self::select_region(boot_info.memory_map);
-        let layout = Arch::mmu()
-            .prepare_kernel_layout(boot_info, KernelLayoutRequest::new(phys_range, true))
-            .expect("failed to prepare kernel memory layout");
-        self.install(phys_range, layout.heap);
+        let planner = KernelMemoryPlanner::global();
+        let phys_range = planner
+            .heap_phys()
+            .expect("kernel heap physical range unavailable");
+        let layout = planner
+            .layout()
+            .expect("kernel memory layout unavailable");
+        self.apply_layout(phys_range, layout.heap);
     }
 
     pub fn stats(&self) -> Option<HeapStats> {
@@ -135,42 +134,7 @@ impl KernelHeap {
         })
     }
 
-    // Selects a suitable physical memory region for the kernel heap.
-    fn select_region(map: MemoryMap<'_>) -> AddrRange<PhysAddr> {
-        debug_assert!(HEAP_ALIGNMENT.is_power_of_two());
-
-        map.iter()
-            .filter(|region| region.kind == PhysicalRegionKind::Usable)
-            .filter_map(|region| {
-                let aligned_start = region.range.start.align_up(HEAP_ALIGNMENT);
-                let region_end = region.range.end.as_usize();
-                let start = aligned_start.as_usize();
-                if start >= region_end {
-                    return None;
-                }
-
-                let available = region_end - start;
-                let usable = available & !(HEAP_ALIGNMENT - 1);
-                if usable == 0 {
-                    return None;
-                }
-
-                let end = start.checked_add(usable)?;
-
-                Some((
-                    usable,
-                    AddrRange {
-                        start: aligned_start,
-                        end: PhysAddr::from_usize(end),
-                    },
-                ))
-            })
-            .max_by_key(|(usable, _)| *usable)
-            .map(|(_, range)| range)
-            .expect("no suitable usable memory region found for heap")
-    }
-
-    fn install(&self, phys: AddrRange<PhysAddr>, virt: AddrRange<VirtAddr>) {
+    fn apply_layout(&self, phys: AddrRange<PhysAddr>, virt: AddrRange<VirtAddr>) {
         assert!(
             virt.end.as_usize() > virt.start.as_usize(),
             "heap range must be non-empty"

@@ -1,6 +1,6 @@
 use crate::arch::{Arch, api::ArchPlatform};
 use crate::mem::addr::{AddrRange, PhysAddr};
-use crate::mem::alloc::KernelHeap;
+use crate::mem::{alloc::KernelHeap, planner::KernelMemoryPlanner};
 
 /// Identifier of the CPU that invoked the kernel entry point.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -87,6 +87,9 @@ impl<ArchData> BootInfo<ArchData> {
 /// Transfers control to the architecture independent kernel core.
 pub fn enter_kernel(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! {
     Arch::init(&boot_info);
+    KernelMemoryPlanner::global()
+        .plan(&boot_info)
+        .expect("failed to plan kernel memory layout");
     KernelHeap::global().init(&boot_info);
     crate::kernel_main(boot_info)
 }
