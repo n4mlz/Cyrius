@@ -3,6 +3,69 @@ use crate::mem::addr::{Addr, AddrRange, MemPerm, PhysAddr, VirtAddr};
 use crate::mem::frame::FrameAllocator;
 use crate::mem::paging::{MapError, UnmapError};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TrapOrigin {
+    Exception,
+    Interrupt,
+    Nmi,
+    Software,
+    Unknown,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TrapKind {
+    Fault,
+    Abort,
+    Interrupt,
+    Syscall,
+    Debug,
+    Other,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct TrapInfo {
+    pub vector: u16,
+    pub origin: TrapOrigin,
+    pub kind: TrapKind,
+    pub description: &'static str,
+    pub error_code: Option<u64>,
+    pub fault_address: Option<VirtAddr>,
+}
+
+impl TrapInfo {
+    pub const fn new(
+        vector: u16,
+        origin: TrapOrigin,
+        kind: TrapKind,
+        description: &'static str,
+        error_code: Option<u64>,
+        fault_address: Option<VirtAddr>,
+    ) -> Self {
+        Self {
+            vector,
+            origin,
+            kind,
+            description,
+            error_code,
+            fault_address,
+        }
+    }
+}
+
+pub trait TrapFrame: core::fmt::Debug {}
+
+pub trait TrapHandler: Sync {
+    type Frame: TrapFrame;
+
+    fn handle_trap(&self, frame: &mut Self::Frame, info: TrapInfo);
+}
+
+pub trait ArchTrapController {
+    type Frame: TrapFrame;
+
+    fn init(&self, handler: &'static dyn TrapHandler<Frame = Self::Frame>);
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct KernelLayoutRequest {
     pub heap_phys: AddrRange<PhysAddr>,
@@ -90,6 +153,10 @@ pub trait ArchPlatform {
     type ArchBootInfo;
     /// Architecture-specific MMU provider
     type ArchMmu: ArchMmu<Self::ArchBootInfo>;
+    /// Architecture-specific trap frame representation
+    type TrapFrame: TrapFrame;
+    /// Trap controller responsible for routing hardware traps into the portable core
+    type TrapController: ArchTrapController<Frame = Self::TrapFrame>;
 
     fn name() -> &'static str;
 
@@ -104,6 +171,9 @@ pub trait ArchPlatform {
 
     /// Returns the architecture-specific MMU abstraction.
     fn mmu() -> &'static Self::ArchMmu;
+
+    /// Returns the architecture-specific trap controller.
+    fn traps() -> &'static Self::TrapController;
 }
 
 pub trait ArchDevice {

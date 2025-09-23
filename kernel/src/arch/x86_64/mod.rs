@@ -1,6 +1,7 @@
 pub mod boot;
 pub mod bus;
 pub mod mmu;
+pub mod trap;
 
 use bootloader_api::BootInfo as X86EarlyInput;
 
@@ -10,6 +11,7 @@ use crate::device::char::uart::ns16550::Ns16550;
 
 use self::bus::Pio;
 use self::mmu::X86Mmu;
+use self::trap::{X86TrapController, X86TrapFrame, controller as trap_controller};
 
 pub struct X86_64;
 
@@ -22,6 +24,8 @@ impl ArchPlatform for X86_64 {
     type ArchEarlyInput = &'static mut X86EarlyInput;
     type ArchBootInfo = X86BootInfo;
     type ArchMmu = X86Mmu;
+    type TrapFrame = X86TrapFrame;
+    type TrapController = X86TrapController;
 
     fn name() -> &'static str {
         "x86_64"
@@ -40,6 +44,10 @@ impl ArchPlatform for X86_64 {
 
     fn mmu() -> &'static Self::ArchMmu {
         X86Mmu::instance()
+    }
+
+    fn traps() -> &'static Self::TrapController {
+        trap_controller()
     }
 }
 

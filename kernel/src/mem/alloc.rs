@@ -110,9 +110,7 @@ impl KernelHeap {
         let phys_range = planner
             .heap_phys()
             .expect("kernel heap physical range unavailable");
-        let layout = planner
-            .layout()
-            .expect("kernel memory layout unavailable");
+        let layout = planner.layout().expect("kernel memory layout unavailable");
         self.apply_layout(phys_range, layout.heap);
     }
 

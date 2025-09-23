@@ -11,6 +11,7 @@ pub mod arch;
 pub mod boot;
 pub mod device;
 pub mod mem;
+pub mod trap;
 pub mod util;
 
 extern crate alloc;

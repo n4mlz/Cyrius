@@ -91,5 +91,6 @@ pub fn enter_kernel(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -
         .plan(&boot_info)
         .expect("failed to plan kernel memory layout");
     KernelHeap::global().init(&boot_info);
+    crate::trap::init();
     crate::kernel_main(boot_info)
 }
