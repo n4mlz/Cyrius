@@ -18,6 +18,7 @@ pub struct X86_64;
 #[derive(Copy, Clone, Debug)]
 pub struct X86BootInfo {
     pub recursive_index: Option<u16>,
+    pub physical_memory_offset: Option<u64>,
 }
 
 impl ArchPlatform for X86_64 {

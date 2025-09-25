@@ -37,8 +37,8 @@ fn kernel_main(_boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! 
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    println!("panic!");
+fn panic(info: &PanicInfo) -> ! {
+    println!("panic! {info}");
     loop {
         core::hint::spin_loop()
     }

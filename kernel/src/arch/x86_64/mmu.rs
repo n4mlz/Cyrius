@@ -47,6 +47,27 @@ impl X86Mmu {
         guard.ok_or(MapError::Unsupported)
     }
 
+    fn detect_recursive_index_from_offset(offset: usize) -> Option<usize> {
+        let p4_phys = Self::current_p4_phys();
+        let virt = PhysAddr::from_usize(p4_phys).to_virt(offset);
+        let table = unsafe { &*(virt.as_ptr() as *const PageTable) };
+
+        table
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.is_present() && entry.frame_addr() == p4_phys)
+            .map(|(idx, _)| idx)
+    }
+
+    fn current_p4_phys() -> usize {
+        let value: usize;
+        unsafe {
+            asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
+        }
+        value & ENTRY_ADDR_MASK as usize
+    }
+
     fn current_layout(&self) -> Option<KernelVirtLayout> {
         *self.layout.lock()
     }
@@ -148,6 +169,51 @@ impl X86Mmu {
             length: max_end,
         }))
     }
+
+    fn select_heap_range(
+        mapper: &RecursiveMapper,
+        length: usize,
+    ) -> Result<AddrRange<VirtAddr>, MapError> {
+        if length == 0 {
+            return Err(MapError::InvalidAddress);
+        }
+
+        const LEVEL4_SPAN: usize =
+            PAGE_SIZE * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE * ENTRIES_PER_TABLE;
+        let entries_needed = (length + LEVEL4_SPAN - 1) / LEVEL4_SPAN;
+        let recursive = mapper.recursive_index;
+
+        // Try the canonical heap slot first if it provides enough free entries.
+        let preferred_index = ((HEAP_VIRT_START >> 39) & 0x1ff) as usize;
+        if mapper.has_free_level4_range(preferred_index, entries_needed, recursive) {
+            let start = canonical_address(preferred_index, 0, 0, 0);
+            let end = start.checked_add(length).ok_or(MapError::InvalidAddress)?;
+            return Ok(AddrRange {
+                start: VirtAddr::from_usize(start),
+                end: VirtAddr::from_usize(end),
+            });
+        }
+
+        // Search the higher half of the canonical address space for consecutive free entries.
+        let min_index = 256usize;
+        let max_index = ENTRIES_PER_TABLE - 1;
+        if entries_needed > max_index - min_index + 1 {
+            return Err(MapError::OutOfMemory);
+        }
+
+        for base in (min_index..=max_index - entries_needed + 1).rev() {
+            if mapper.has_free_level4_range(base, entries_needed, recursive) {
+                let start = canonical_address(base, 0, 0, 0);
+                let end = start.checked_add(length).ok_or(MapError::InvalidAddress)?;
+                return Ok(AddrRange {
+                    start: VirtAddr::from_usize(start),
+                    end: VirtAddr::from_usize(end),
+                });
+            }
+        }
+
+        Err(MapError::OutOfMemory)
+    }
 }
 
 impl ArchMmu<X86BootInfo> for X86Mmu {
@@ -155,6 +221,15 @@ impl ArchMmu<X86BootInfo> for X86Mmu {
         let mut guard = self.recursive_index.lock();
         if guard.is_none() {
             *guard = boot_info.arch_data.recursive_index.map(|idx| idx as usize);
+            if guard.is_none() {
+                if let Some(offset) = boot_info
+                    .arch_data
+                    .physical_memory_offset
+                    .map(|off| off as usize)
+                {
+                    *guard = Self::detect_recursive_index_from_offset(offset);
+                }
+            }
         }
         guard.ok_or(MapError::Unsupported).map(|_| ())
     }
@@ -172,23 +247,16 @@ impl ArchMmu<X86BootInfo> for X86Mmu {
         let aligned_heap = self.align_heap_region(request.heap_phys)?;
         let heap_length = aligned_heap.len();
 
-        let heap_virt_start = HEAP_VIRT_START;
-        let heap_virt_end = heap_virt_start
-            .checked_add(heap_length)
-            .ok_or(MapError::InvalidAddress)?;
-        let heap_virt = AddrRange {
-            start: VirtAddr::from_usize(heap_virt_start),
-            end: VirtAddr::from_usize(heap_virt_end),
-        };
+        let mapper = RecursiveMapper::new(recursive_index);
+        let heap_virt = Self::select_heap_range(&mapper, heap_length)?;
 
         let mut allocator =
             BootFrameAllocator::with_reservation_from_boot_info(boot_info, aligned_heap);
-        let mapper = RecursiveMapper::new(recursive_index);
 
         Self::map_range(
             &mapper,
             &mut allocator,
-            heap_virt_start,
+            heap_virt.start.as_usize(),
             aligned_heap.start.as_usize(),
             heap_length,
             MemPerm::KERNEL_RW,
@@ -307,6 +375,28 @@ struct RecursiveMapper {
 impl RecursiveMapper {
     fn new(recursive_index: usize) -> Self {
         Self { recursive_index }
+    }
+
+    fn has_free_level4_range(&self, start_index: usize, len: usize, recursive: usize) -> bool {
+        if start_index + len > ENTRIES_PER_TABLE {
+            return false;
+        }
+
+        for idx in start_index..start_index + len {
+            if idx == recursive {
+                return false;
+            }
+            if self.level4_entry(idx).is_present() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn level4_entry(&self, index: usize) -> PageTableEntry {
+        assert!(index < ENTRIES_PER_TABLE);
+        let p4 = self.p4_table();
+        unsafe { (*p4).entries[index] }
     }
 
     unsafe fn map_page(

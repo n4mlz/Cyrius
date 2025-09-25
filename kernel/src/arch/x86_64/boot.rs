@@ -21,11 +21,14 @@ const MAX_MEMORY_REGIONS: usize = 128;
 static REGION_STORAGE: SyncUnsafeCell<[MaybeUninit<PhysicalRegion>; MAX_MEMORY_REGIONS]> =
     SyncUnsafeCell::new([MaybeUninit::uninit(); MAX_MEMORY_REGIONS]);
 
+const PHYS_MEM_BOOT_BASE: u64 = 0xffff_8800_0000_0000;
+
 const BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings = {
         let mut mappings = Mappings::new_default();
         mappings.page_table_recursive = Some(Mapping::Dynamic);
+        mappings.physical_memory = Some(Mapping::FixedAddress(PHYS_MEM_BOOT_BASE));
         mappings
     };
     config
@@ -91,6 +94,7 @@ pub(crate) unsafe fn build_boot_info(
 
     let arch_data = X86BootInfo {
         recursive_index: boot_info.recursive_index.into_option(),
+        physical_memory_offset: boot_info.physical_memory_offset.into_option(),
     };
 
     BootInfo::new(memory_map, kernel_image, CpuId::BOOT, arch_data)
