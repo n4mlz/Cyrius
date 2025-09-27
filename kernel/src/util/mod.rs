@@ -1,3 +1,4 @@
+pub mod boot_display;
 pub mod lazylock;
 pub mod spinlock;
 
