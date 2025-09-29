@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-#![feature(trait_alias, pointer_is_aligned_to, sync_unsafe_cell)]
+#![feature(trait_alias, sync_unsafe_cell)]
 
 pub mod arch;
 pub mod device;

@@ -1,53 +1,95 @@
-pub trait Addr {
+use core::convert::TryInto;
+
+pub trait Addr: Copy + core::fmt::Debug + Eq + Ord {
+    type Raw: Copy + Ord + core::ops::Sub<Output = Self::Raw> + TryInto<usize>;
+
     const NULL: Self;
-    fn from_usize(addr: usize) -> Self;
-    fn from_ptr(addr: *const u8) -> Self;
-    fn as_usize(&self) -> usize;
-    fn as_ptr(&self) -> *const u8 {
-        self.as_usize() as *const u8
-    }
-    fn as_ptr_mut(&self) -> *mut u8 {
-        self.as_usize() as *mut u8
-    }
+
+    fn from_raw(addr: Self::Raw) -> Self;
+    fn as_raw(&self) -> Self::Raw;
     fn align_up(&self, align: usize) -> Self;
     fn is_aligned(&self, align: usize) -> bool;
+    fn checked_add(&self, value: usize) -> Option<Self>;
 }
 
 macro_rules! impl_addr {
-    ($name:ident) => {
+    ($name:ident, $raw:ty) => {
         #[repr(transparent)]
-        #[derive(Copy, Clone, PartialEq, Debug)]
-        pub struct $name(usize);
+        #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+        pub struct $name($raw);
+
+        impl $name {
+            pub const fn new(raw: $raw) -> Self {
+                Self(raw)
+            }
+
+            pub const fn as_raw(&self) -> $raw {
+                self.0
+            }
+        }
+
         impl Addr for $name {
-            const NULL: Self = $name(0);
+            type Raw = $raw;
 
-            fn from_usize(addr: usize) -> Self {
-                $name(addr)
+            const NULL: Self = Self(0);
+
+            fn from_raw(addr: Self::Raw) -> Self {
+                Self(addr)
             }
 
-            fn from_ptr(addr: *const u8) -> Self {
-                $name(addr as usize)
-            }
-
-            fn as_usize(&self) -> usize {
+            fn as_raw(&self) -> Self::Raw {
                 self.0
             }
 
             fn align_up(&self, align: usize) -> Self {
-                debug_assert!(align.is_power_of_two());
-                let offset = self.as_ptr().align_offset(align);
-                $name::from_ptr(unsafe { self.as_ptr().add(offset) })
+                assert!(align.is_power_of_two(), "alignment must be a power of two");
+                let align_raw = align as $raw;
+                let mask = align_raw - 1;
+                let raw = self.0;
+                if raw & mask == 0 {
+                    return Self(raw);
+                }
+                let add = align_raw - (raw & mask);
+                let aligned = raw.checked_add(add).expect("align_up overflow");
+                Self(aligned)
             }
 
             fn is_aligned(&self, align: usize) -> bool {
-                self.as_ptr().is_aligned_to(align)
+                assert!(align.is_power_of_two(), "alignment must be a power of two");
+                let mask = (align as $raw) - 1;
+                (self.0 & mask) == 0
+            }
+
+            fn checked_add(&self, value: usize) -> Option<Self> {
+                let value_raw = value as $raw;
+                self.0.checked_add(value_raw).map(Self)
             }
         }
     };
 }
 
-impl_addr!(PhysAddr);
-impl_addr!(VirtAddr);
+impl_addr!(PhysAddr, u64);
+impl_addr!(VirtAddr, usize);
+
+pub trait VirtIntoPtr {
+    fn into_ptr(self) -> *const u8;
+    fn into_mut_ptr(self) -> *mut u8;
+    fn from_ptr(ptr: *const u8) -> Self;
+}
+
+impl VirtIntoPtr for VirtAddr {
+    fn into_ptr(self) -> *const u8 {
+        self.as_raw() as *const u8
+    }
+
+    fn into_mut_ptr(self) -> *mut u8 {
+        self.as_raw() as *mut u8
+    }
+
+    fn from_ptr(ptr: *const u8) -> Self {
+        Self::from_raw(ptr as usize)
+    }
+}
 
 #[derive(Copy, Clone, Debug)]
 pub struct AddrRange<T: Addr> {
@@ -56,29 +98,35 @@ pub struct AddrRange<T: Addr> {
 }
 
 impl<T: Addr> AddrRange<T> {
-    pub fn len(&self) -> usize {
-        self.end.as_usize() - self.start.as_usize()
+    pub fn len_checked(&self) -> Option<usize> {
+        let start = self.start.as_raw();
+        let end = self.end.as_raw();
+        if end < start {
+            return None;
+        }
+        let diff = end - start;
+        diff.try_into().ok()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        matches!(self.len_checked(), Some(0))
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum PageSize {
-    Size4K,
-    Size2M,
-    Size1G,
-}
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PageSize(pub usize);
 
 impl PageSize {
-    pub fn bytes(&self) -> usize {
-        match self {
-            PageSize::Size4K => 4 * 1024,
-            PageSize::Size2M => 2 * 1024 * 1024,
-            PageSize::Size1G => 1024 * 1024 * 1024,
-        }
+    pub const SIZE_4K: Self = Self(4 * 1024);
+    pub const SIZE_2M: Self = Self(2 * 1024 * 1024);
+    pub const SIZE_1G: Self = Self(1024 * 1024 * 1024);
+
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+
+    pub const fn is_power_of_two(self) -> bool {
+        self.0.is_power_of_two()
     }
 }
 
@@ -91,21 +139,30 @@ pub struct Page<T: Addr> {
 impl<T: Addr> Page<T> {
     pub fn new(start: T, size: PageSize) -> Self {
         assert!(
+            size.is_power_of_two(),
+            "Page size {} must be a power of two",
+            size.bytes()
+        );
+        assert!(
             start.is_aligned(size.bytes()),
             "Page start address {:?} is not aligned to {} bytes",
-            start.as_usize(),
+            start,
             size.bytes()
         );
         Self { start, size }
     }
 
     pub fn end(&self) -> T {
-        T::from_usize(self.start.as_usize() + self.size.bytes())
+        self.start
+            .checked_add(self.size.bytes())
+            .expect("page end overflow")
     }
 
     pub fn contains(&self, addr: T) -> bool {
-        let addr_val = addr.as_usize();
-        addr_val >= self.start.as_usize() && addr_val < self.end().as_usize()
+        let addr_val = addr.as_raw();
+        let start = self.start.as_raw();
+        let end = self.end().as_raw();
+        addr_val >= start && addr_val < end
     }
 }
 
