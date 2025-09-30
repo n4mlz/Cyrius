@@ -14,4 +14,4 @@ rustup target add x86_64-unknown-none
 - `cargo xtask test --name foo`: Runs tests whose names contain `foo` (function name or module name).
 - `cargo xtask test --no-run`: Only generates the test binary.
 
-All commands can be combined with --release.
+All commands can be combined with `--release`.
