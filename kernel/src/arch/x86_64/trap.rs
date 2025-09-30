@@ -24,9 +24,12 @@ const IST_INDEX_MACHINE_CHECK: u16 = 3;
 
 struct GdtSelectors {
     code: SegmentSelector,
-    data: SegmentSelector,
+    _data: SegmentSelector,
     tss: SegmentSelector,
 }
+
+type GdtInit = (GlobalDescriptorTable, GdtSelectors);
+type GdtBuilder = fn() -> GdtInit;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -104,10 +107,7 @@ static IST_STACKS: LazyLock<
 
 static TSS: LazyLock<TaskStateSegment, fn() -> TaskStateSegment> = LazyLock::new_const(build_tss);
 
-static GDT: LazyLock<
-    (GlobalDescriptorTable, GdtSelectors),
-    fn() -> (GlobalDescriptorTable, GdtSelectors),
-> = LazyLock::new_const(build_gdt);
+static GDT: LazyLock<GdtInit, GdtBuilder> = LazyLock::new_const(build_gdt);
 
 static IDT: LazyLock<InterruptDescriptorTable, fn() -> InterruptDescriptorTable> =
     LazyLock::new_const(build_idt);
@@ -334,20 +334,20 @@ fn build_tss() -> TaskStateSegment {
     // Set up IST stacks
     tss.interrupt_stack_table[IST_INDEX_NMI as usize - 1] = {
         let stack_start = VirtAddr::new(stacks.as_ptr() as u64);
-        let stack_end = stack_start + IST_STACK_SIZE as u64;
-        stack_end
+
+        stack_start + IST_STACK_SIZE as u64
     };
 
     tss.interrupt_stack_table[IST_INDEX_DOUBLE_FAULT as usize - 1] = {
         let stack_start = VirtAddr::new(stacks.as_ptr() as u64) + IST_STACK_SIZE as u64;
-        let stack_end = stack_start + IST_STACK_SIZE as u64;
-        stack_end
+
+        stack_start + IST_STACK_SIZE as u64
     };
 
     tss.interrupt_stack_table[IST_INDEX_MACHINE_CHECK as usize - 1] = {
         let stack_start = VirtAddr::new(stacks.as_ptr() as u64) + (IST_STACK_SIZE * 2) as u64;
-        let stack_end = stack_start + IST_STACK_SIZE as u64;
-        stack_end
+
+        stack_start + IST_STACK_SIZE as u64
     };
 
     tss
@@ -366,7 +366,7 @@ fn build_gdt() -> (GlobalDescriptorTable, GdtSelectors) {
         gdt,
         GdtSelectors {
             code,
-            data,
+            _data: data,
             tss: tss_sel,
         },
     )
@@ -453,7 +453,7 @@ fn origin_for(vector: u8) -> TrapOrigin {
     match vector {
         2 => TrapOrigin::NonMaskable,
         v if v < 32 => TrapOrigin::Exception,
-        v if v >= 32 && v < 240 => TrapOrigin::Interrupt,
+        v if (32..240).contains(&v) => TrapOrigin::Interrupt,
         _ => TrapOrigin::Unknown,
     }
 }
