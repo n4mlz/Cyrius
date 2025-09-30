@@ -1,5 +1,10 @@
 use x86_64::{
-    VirtAddr, structures::idt::InterruptDescriptorTable, structures::tss::TaskStateSegment,
+    VirtAddr,
+    instructions::tables::load_tss,
+    registers::segmentation::{CS, Segment},
+    structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
+    structures::idt::InterruptDescriptorTable,
+    structures::tss::TaskStateSegment,
 };
 
 use crate::trap::{TrapFrame as TrapFrameTrait, TrapInfo, TrapOrigin};
@@ -16,6 +21,12 @@ const IST_STACK_COUNT: usize = 3; // For NMI, Double Fault, and Machine Check
 const IST_INDEX_NMI: u16 = 1;
 const IST_INDEX_DOUBLE_FAULT: u16 = 2;
 const IST_INDEX_MACHINE_CHECK: u16 = 3;
+
+struct GdtSelectors {
+    code: SegmentSelector,
+    data: SegmentSelector,
+    tss: SegmentSelector,
+}
 
 #[repr(C)]
 #[derive(Debug)]
@@ -92,6 +103,11 @@ static IST_STACKS: LazyLock<
 > = LazyLock::new_const(|| [0u8; IST_STACK_SIZE * IST_STACK_COUNT]);
 
 static TSS: LazyLock<TaskStateSegment, fn() -> TaskStateSegment> = LazyLock::new_const(build_tss);
+
+static GDT: LazyLock<
+    (GlobalDescriptorTable, GdtSelectors),
+    fn() -> (GlobalDescriptorTable, GdtSelectors),
+> = LazyLock::new_const(build_gdt);
 
 static IDT: LazyLock<InterruptDescriptorTable, fn() -> InterruptDescriptorTable> =
     LazyLock::new_const(build_idt);
@@ -296,9 +312,15 @@ const EXCEPTION_DESCRIPTIONS: [&str; 32] = [
 ];
 
 pub(super) fn init() {
-    // Note: TSS needs to be loaded into GDT first, but for now we'll skip that
-    // and just load the IDT. The IST functionality will work once TSS is properly
-    // set up in the GDT.
+    // Load GDT with kernel segments and TSS
+    let (gdt, selectors) = &*GDT;
+    gdt.load();
+
+    // Set CS to kernel code segment (0x8 equivalent)
+    unsafe { CS::set_reg(selectors.code) };
+
+    // Load TSS to enable IST functionality
+    unsafe { load_tss(selectors.tss) };
 
     // Load IDT
     let idt: &InterruptDescriptorTable = &IDT;
@@ -329,6 +351,25 @@ fn build_tss() -> TaskStateSegment {
     };
 
     tss
+}
+
+fn build_gdt() -> (GlobalDescriptorTable, GdtSelectors) {
+    let mut gdt = GlobalDescriptorTable::new();
+    let tss = &TSS;
+
+    // Add kernel segments and TSS to GDT
+    let code = gdt.append(Descriptor::kernel_code_segment());
+    let data = gdt.append(Descriptor::kernel_data_segment());
+    let tss_sel = gdt.append(Descriptor::tss_segment(tss));
+
+    (
+        gdt,
+        GdtSelectors {
+            code,
+            data,
+            tss: tss_sel,
+        },
+    )
 }
 
 fn build_idt() -> InterruptDescriptorTable {
