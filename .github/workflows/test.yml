@@ -8,15 +8,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install packages (QEMU)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Add required rust components
+        run: |
+          rustup component add --toolchain nightly rust-src llvm-tools-preview
+          rustup target add --toolchain nightly x86_64-unknown-uefi
 
       - name: Show rustc version
         run: rustc -Vv && cargo -V
@@ -43,8 +51,7 @@ jobs:
       - name: Build tests (no run)
         run: cargo xtask test --no-run
 
-      - name: Run tests in QEMU
-        run: cargo xtask test
-
-
-
+      - name: Run tests in QEMU (with timeout)
+        run: |
+          set -euo pipefail
+          timeout 5m cargo xtask test
