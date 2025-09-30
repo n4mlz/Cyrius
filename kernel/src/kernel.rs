@@ -1,31 +1,46 @@
 #![no_std]
 #![no_main]
-#![feature(trait_alias, pointer_is_aligned_to, sync_unsafe_cell)]
+#![feature(trait_alias, sync_unsafe_cell)]
 
 pub mod arch;
-pub mod boot;
 pub mod device;
 pub mod mem;
+pub mod trap;
 pub mod util;
 
-use core::panic::PanicInfo;
+use core::{arch::asm, panic::PanicInfo};
 
-use crate::arch::{Arch, api::ArchPlatform};
-use crate::boot::BootInfo;
+use bootloader_api::{BootInfo, entry_point};
 
-/// The main entry point for the kernel after architecture specific initialization is complete.
-/// This function should be called after constructing the architecture-abstracted BootInfo structure.
-fn kernel_main(boot_info: BootInfo<<Arch as ArchPlatform>::ArchBootInfo>) -> ! {
-    Arch::late_init(&boot_info);
+entry_point!(kernel_main);
+
+fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+    trap::init();
     println!("Hello, world!");
+
+    // Trigger a breakpoint exception
+    unsafe {
+        asm!("int3");
+    }
+
     loop {
         core::hint::spin_loop()
     }
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    println!("panic!");
+fn panic(info: &PanicInfo) -> ! {
+    println!("panic: {}", info.message());
+
+    if let Some(location) = info.location() {
+        println!(
+            "at file '{}' line {} column {}",
+            location.file(),
+            location.line(),
+            location.column()
+        );
+    }
+
     loop {
         core::hint::spin_loop()
     }
