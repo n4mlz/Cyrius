@@ -1,10 +1,21 @@
-use x86_64::{VirtAddr, structures::idt::InterruptDescriptorTable};
+use x86_64::{
+    VirtAddr, structures::idt::InterruptDescriptorTable, structures::tss::TaskStateSegment,
+};
 
 use crate::trap::{TrapFrame as TrapFrameTrait, TrapInfo, TrapOrigin};
 use crate::util::lazylock::LazyLock;
 
 const GENERAL_REGS_SIZE: usize = core::mem::size_of::<GeneralRegisters>();
 const ORIGINAL_ERROR_OFFSET: usize = 8 + GENERAL_REGS_SIZE;
+
+// IST stack sizes
+const IST_STACK_SIZE: usize = 4096;
+const IST_STACK_COUNT: usize = 3; // For NMI, Double Fault, and Machine Check
+
+// IST stack indices
+const IST_INDEX_NMI: u16 = 1;
+const IST_INDEX_DOUBLE_FAULT: u16 = 2;
+const IST_INDEX_MACHINE_CHECK: u16 = 3;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -38,11 +49,49 @@ pub struct TrapFrame {
     pub ss: u64,
 }
 
+impl TrapFrame {
+    /// Returns the stack pointer if this trap involved a privilege level change.
+    /// For same-privilege exceptions, this field contains undefined data.
+    pub fn stack_pointer(&self) -> Option<u64> {
+        // Check if this was a privilege level change by examining the CPL in CS
+        let cpl = (self.cs & 3) as u8;
+        if cpl != 0 {
+            // User mode to kernel mode transition - rsp/ss are valid
+            Some(self.rsp)
+        } else {
+            // Kernel mode to kernel mode - rsp/ss are undefined
+            None
+        }
+    }
+
+    /// Returns the stack segment if this trap involved a privilege level change.
+    /// For same-privilege exceptions, this field contains undefined data.
+    pub fn stack_segment(&self) -> Option<u64> {
+        // Check if this was a privilege level change by examining the CPL in CS
+        let cpl = (self.cs & 3) as u8;
+        if cpl != 0 {
+            // User mode to kernel mode transition - rsp/ss are valid
+            Some(self.ss)
+        } else {
+            // Kernel mode to kernel mode - rsp/ss are undefined
+            None
+        }
+    }
+}
+
 impl TrapFrameTrait for TrapFrame {
     fn error_code(&self) -> Option<u64> {
         Some(self.error_code)
     }
 }
+
+// IST stacks for critical exceptions
+static IST_STACKS: LazyLock<
+    [u8; IST_STACK_SIZE * IST_STACK_COUNT],
+    fn() -> [u8; IST_STACK_SIZE * IST_STACK_COUNT],
+> = LazyLock::new_const(|| [0u8; IST_STACK_SIZE * IST_STACK_COUNT]);
+
+static TSS: LazyLock<TaskStateSegment, fn() -> TaskStateSegment> = LazyLock::new_const(build_tss);
 
 static IDT: LazyLock<InterruptDescriptorTable, fn() -> InterruptDescriptorTable> =
     LazyLock::new_const(build_idt);
@@ -53,6 +102,7 @@ macro_rules! define_trap_stub_no_error {
         unsafe extern "C" fn $name() -> ! {
             core::arch::naked_asm!(
                 r#"
+                    // Save all general purpose registers
                     push r15
                     push r14
                     push r13
@@ -68,14 +118,24 @@ macro_rules! define_trap_stub_no_error {
                     push rcx
                     push rbx
                     push rax
+                    
+                    // Push fake error code (0) for consistency with error-code exceptions
                     push 0
-                    mov rsi, rsp
-                    sub rsp, 8
-                    mov edi, {vector}
-                    xor edx, edx
+                    
+                    // Set up arguments for dispatch_trap:
+                    // RDI = vector, RSI = frame pointer, RDX = has_error (0)
+                    mov rsi, rsp          // RSI = frame pointer (keep this)
+                    sub rsp, 8            // Align stack to 16-byte boundary for ABI compliance
+                    mov edi, {vector}     // RDI = vector number
+                    xor edx, edx          // RDX = has_error (0 for no-error exceptions)
+                    
                     call {dispatch}
-                    add rsp, 8
-                    add rsp, 8
+                    
+                    // Restore stack alignment and remove fake error code
+                    add rsp, 8            // Remove stack alignment padding
+                    add rsp, 8            // Remove fake error code
+                    
+                    // Restore all general purpose registers
                     pop rax
                     pop rbx
                     pop rcx
@@ -91,6 +151,8 @@ macro_rules! define_trap_stub_no_error {
                     pop r13
                     pop r14
                     pop r15
+                    
+                    // Return from interrupt/exception
                     iretq
                 "#,
                 vector = const $vector,
@@ -106,6 +168,7 @@ macro_rules! define_trap_stub_with_error {
         unsafe extern "C" fn $name() -> ! {
             core::arch::naked_asm!(
                 r#"
+                    // Save all general purpose registers
                     push r15
                     push r14
                     push r13
@@ -121,16 +184,28 @@ macro_rules! define_trap_stub_with_error {
                     push rcx
                     push rbx
                     push rax
+                    
+                    // Push placeholder for error code (will be replaced with real one)
                     push 0
-                    mov rsi, rsp
-                    mov rdx, [rsi + {orig_error_offset}]
-                    mov [rsi], rdx
-                    sub rsp, 8
-                    mov edi, {vector}
-                    mov edx, 1
+                    
+                    // Replace placeholder with actual error code from CPU
+                    mov rsi, rsp                              // RSI = frame pointer
+                    mov rax, [rsi + {orig_error_offset}]     // Load original error code
+                    mov [rsi], rax                           // Store it in our frame
+                    
+                    // Set up arguments for dispatch_trap:
+                    // RDI = vector, RSI = frame pointer, RDX = has_error (1)
+                    sub rsp, 8            // Align stack to 16-byte boundary for ABI compliance
+                    mov edi, {vector}     // RDI = vector number
+                    mov edx, 1            // RDX = has_error (1 for error-code exceptions)
+                    
                     call {dispatch}
-                    add rsp, 8
-                    add rsp, 8
+                    
+                    // Restore stack alignment and remove error code
+                    add rsp, 8            // Remove stack alignment padding
+                    add rsp, 8            // Remove error code from our frame
+                    
+                    // Restore all general purpose registers
                     pop rax
                     pop rbx
                     pop rcx
@@ -146,7 +221,11 @@ macro_rules! define_trap_stub_with_error {
                     pop r13
                     pop r14
                     pop r15
-                    add rsp, 8
+                    
+                    // Remove the original error code that CPU pushed before calling us
+                    add rsp, 8            // Skip CPU-pushed error code
+                    
+                    // Return from interrupt/exception
                     iretq
                 "#,
                 vector = const $vector,
@@ -217,8 +296,39 @@ const EXCEPTION_DESCRIPTIONS: [&str; 32] = [
 ];
 
 pub(super) fn init() {
+    // Note: TSS needs to be loaded into GDT first, but for now we'll skip that
+    // and just load the IDT. The IST functionality will work once TSS is properly
+    // set up in the GDT.
+
+    // Load IDT
     let idt: &InterruptDescriptorTable = &IDT;
     idt.load();
+}
+
+fn build_tss() -> TaskStateSegment {
+    let mut tss = TaskStateSegment::new();
+    let stacks = &IST_STACKS;
+
+    // Set up IST stacks
+    tss.interrupt_stack_table[IST_INDEX_NMI as usize - 1] = {
+        let stack_start = VirtAddr::new(stacks.as_ptr() as u64);
+        let stack_end = stack_start + IST_STACK_SIZE as u64;
+        stack_end
+    };
+
+    tss.interrupt_stack_table[IST_INDEX_DOUBLE_FAULT as usize - 1] = {
+        let stack_start = VirtAddr::new(stacks.as_ptr() as u64) + IST_STACK_SIZE as u64;
+        let stack_end = stack_start + IST_STACK_SIZE as u64;
+        stack_end
+    };
+
+    tss.interrupt_stack_table[IST_INDEX_MACHINE_CHECK as usize - 1] = {
+        let stack_start = VirtAddr::new(stacks.as_ptr() as u64) + (IST_STACK_SIZE * 2) as u64;
+        let stack_end = stack_start + IST_STACK_SIZE as u64;
+        stack_end
+    };
+
+    tss
 }
 
 fn build_idt() -> InterruptDescriptorTable {
@@ -229,7 +339,8 @@ fn build_idt() -> InterruptDescriptorTable {
         idt.debug
             .set_handler_addr(VirtAddr::new(exception_1 as u64));
         idt.non_maskable_interrupt
-            .set_handler_addr(VirtAddr::new(exception_2 as u64));
+            .set_handler_addr(VirtAddr::new(exception_2 as u64))
+            .set_stack_index(IST_INDEX_NMI);
         idt.breakpoint
             .set_handler_addr(VirtAddr::new(exception_3 as u64));
         idt.overflow
@@ -241,7 +352,8 @@ fn build_idt() -> InterruptDescriptorTable {
         idt.device_not_available
             .set_handler_addr(VirtAddr::new(exception_7 as u64));
         idt.double_fault
-            .set_handler_addr(VirtAddr::new(exception_8 as u64));
+            .set_handler_addr(VirtAddr::new(exception_8 as u64))
+            .set_stack_index(IST_INDEX_DOUBLE_FAULT);
         idt.invalid_tss
             .set_handler_addr(VirtAddr::new(exception_10 as u64));
         idt.segment_not_present
@@ -257,7 +369,8 @@ fn build_idt() -> InterruptDescriptorTable {
         idt.alignment_check
             .set_handler_addr(VirtAddr::new(exception_17 as u64));
         idt.machine_check
-            .set_handler_addr(VirtAddr::new(exception_18 as u64));
+            .set_handler_addr(VirtAddr::new(exception_18 as u64))
+            .set_stack_index(IST_INDEX_MACHINE_CHECK);
         idt.simd_floating_point
             .set_handler_addr(VirtAddr::new(exception_19 as u64));
         idt.virtualization
@@ -275,7 +388,7 @@ fn build_idt() -> InterruptDescriptorTable {
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn dispatch_trap(vector: u8, has_error: u8, frame: *mut TrapFrame) {
+unsafe extern "C" fn dispatch_trap(vector: u8, frame: *mut TrapFrame, has_error: u8) {
     let frame = unsafe { &mut *frame }; // raw pointer originates from assembly stub
     let description = description_for(vector);
     let origin = origin_for(vector);
