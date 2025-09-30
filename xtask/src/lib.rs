@@ -46,6 +46,7 @@ pub struct TestBuildOptions {
 #[derive(Clone, Debug)]
 pub enum TestSelector {
     CaseIndex(String),
+    NamePattern(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +184,10 @@ fn configure_test_build(cmd: &mut Command, opts: &TestBuildOptions) {
             TestSelector::CaseIndex(index) => {
                 cmd.env("CYRIUS_TEST_FILTER_KIND", "index");
                 cmd.env("CYRIUS_TEST_FILTER_VALUE", index);
+            }
+            TestSelector::NamePattern(pattern) => {
+                cmd.env("CYRIUS_TEST_FILTER_KIND", "name");
+                cmd.env("CYRIUS_TEST_FILTER_VALUE", pattern);
             }
         }
     }

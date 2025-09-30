@@ -43,6 +43,10 @@ struct TestArgs {
     /// Execute only the test case at the given index (0-based)
     #[arg(long, value_name = "INDEX")]
     case: Option<usize>,
+
+    /// Execute only tests whose name contains the provided pattern
+    #[arg(long, conflicts_with = "case", value_name = "PATTERN")]
+    name: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -68,9 +72,12 @@ fn run_kernel(release: bool) -> Result<()> {
 }
 
 fn run_tests(args: TestArgs) -> Result<()> {
-    let selector = args
-        .case
-        .map(|index| TestSelector::CaseIndex(index.to_string()));
+    let selector = match (args.case, args.name) {
+        (Some(index), None) => Some(TestSelector::CaseIndex(index.to_string())),
+        (None, Some(pattern)) => Some(TestSelector::NamePattern(pattern)),
+        (None, None) => None,
+        (Some(_), Some(_)) => None,
+    };
 
     let build_opts = TestBuildOptions {
         release: args.release,

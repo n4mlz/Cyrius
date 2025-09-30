@@ -304,8 +304,18 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.9.3",
  "bootloader_api",
+ "kernel-macros",
  "num-traits",
  "x86_64",
+]
+
+[[package]]
+name = "kernel-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

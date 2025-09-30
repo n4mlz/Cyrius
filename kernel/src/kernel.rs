@@ -75,8 +75,15 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    #[test_case]
-    fn trivial_assertion() {
+    use crate::test::kernel_test_case;
+
+    #[kernel_test_case]
+    fn test1() {
         assert_eq!(1, 1);
+    }
+
+    #[kernel_test_case]
+    fn test2() {
+        assert_eq!(2, 2);
     }
 }
