@@ -1,38 +1,60 @@
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
-use xtask::{ImageKind, build_kernel, build_kernel_tests, image_bios, run_qemu};
+use xtask::{
+    ImageKind, TestBuildOptions, TestSelector, build_kernel, build_kernel_tests, image_bios,
+    run_qemu,
+};
 
 #[derive(Parser)]
-#[command(about = "Build kernel, make BIOS image, and run QEMU")]
+#[command(about = "Build kernel, create boot images, and drive QEMU runs")]
 struct Cli {
-    /// Build release profile
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Run(RunArgs),
+    Test(TestArgs),
+}
+
+#[derive(Args, Default)]
+struct RunArgs {
+    /// Build the release profile instead of dev
+    #[arg(long)]
+    release: bool,
+}
+
+#[derive(Args, Default)]
+struct TestArgs {
+    /// Build the release profile instead of dev
     #[arg(long)]
     release: bool,
 
-    /// Build and run test binary instead of the default kernel flow
+    /// Only build the test binary without running QEMU
     #[arg(long)]
-    test: bool,
-
-    /// Only build the test binary; skip launching QEMU (implies --test)
-    #[arg(long, requires = "test")]
     no_run: bool,
+
+    /// Print the discovered test cases without executing them
+    #[arg(long, conflicts_with = "no_run")]
+    list: bool,
+
+    /// Execute only the test case at the given index (0-based)
+    #[arg(long, value_name = "INDEX")]
+    case: Option<usize>,
 }
 
 fn main() -> Result<()> {
-    let Cli {
-        release,
-        test,
-        no_run,
-    } = Cli::parse();
+    let cli = Cli::parse();
 
-    if test {
-        run_tests(release, no_run)?;
-    } else {
-        run_kernel(release)?;
+    match cli
+        .command
+        .unwrap_or_else(|| Command::Run(RunArgs::default()))
+    {
+        Command::Run(args) => run_kernel(args.release),
+        Command::Test(args) => run_tests(args),
     }
-
-    Ok(())
 }
 
 fn run_kernel(release: bool) -> Result<()> {
@@ -45,10 +67,20 @@ fn run_kernel(release: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_tests(release: bool, no_run: bool) -> Result<()> {
-    let test_binary = build_kernel_tests(release)?;
+fn run_tests(args: TestArgs) -> Result<()> {
+    let selector = args
+        .case
+        .map(|index| TestSelector::CaseIndex(index.to_string()));
 
-    if no_run {
+    let build_opts = TestBuildOptions {
+        release: args.release,
+        selector,
+        list_only: args.list,
+    };
+
+    let test_binary = build_kernel_tests(&build_opts)?;
+
+    if args.no_run {
         return Ok(());
     }
 

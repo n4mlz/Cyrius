@@ -36,6 +36,18 @@ pub fn build_kernel(release: bool) -> Result<PathBuf> {
     Ok(PathBuf::from(dir).join("kernel"))
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct TestBuildOptions {
+    pub release: bool,
+    pub selector: Option<TestSelector>,
+    pub list_only: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum TestSelector {
+    CaseIndex(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageKind {
     Run,
@@ -56,7 +68,7 @@ pub fn image_bios(kernel: &Path, kind: ImageKind) -> Result<PathBuf> {
     Ok(out)
 }
 
-pub fn build_kernel_tests(release: bool) -> Result<PathBuf> {
+pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
     let mut cmd = Command::new("cargo");
     cmd.args([
         "test",
@@ -77,9 +89,11 @@ pub fn build_kernel_tests(release: bool) -> Result<PathBuf> {
 
     cmd.env("CARGO_TERM_COLOR", "never");
 
-    if release {
+    if opts.release {
         cmd.arg("--release");
     }
+
+    configure_test_build(&mut cmd, opts);
 
     let output = cmd
         .output()
@@ -161,4 +175,19 @@ fn parse_executable_from_json(output: &str) -> Option<PathBuf> {
                 .map(PathBuf::from)
         })
         .last()
+}
+
+fn configure_test_build(cmd: &mut Command, opts: &TestBuildOptions) {
+    if let Some(selector) = &opts.selector {
+        match selector {
+            TestSelector::CaseIndex(index) => {
+                cmd.env("CYRIUS_TEST_FILTER_KIND", "index");
+                cmd.env("CYRIUS_TEST_FILTER_VALUE", index);
+            }
+        }
+    }
+
+    if opts.list_only {
+        cmd.env("CYRIUS_TEST_LIST_ONLY", "1");
+    }
 }
