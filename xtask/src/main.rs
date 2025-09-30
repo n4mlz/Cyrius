@@ -85,9 +85,16 @@ fn run_tests(args: TestArgs) -> Result<()> {
     let image = image_bios(&test_binary, ImageKind::Test)?;
     let status = run_qemu(&image, true)?;
 
+    interpret_test_exit(status)
+}
+
+fn interpret_test_exit(status: std::process::ExitStatus) -> Result<()> {
     match status.code() {
-        Some(0x20) => Ok(()),
-        Some(0x22) => bail!("kernel tests reported failure"),
+        Some(code) if code & 1 == 1 => match code >> 1 {
+            0x20 => Ok(()),
+            0x22 => bail!("kernel tests reported failure"),
+            other => bail!("unexpected kernel exit code: 0x{other:x}"),
+        },
         Some(code) => bail!("unexpected QEMU exit status: {code}"),
         None => bail!("QEMU terminated without exit status"),
     }
