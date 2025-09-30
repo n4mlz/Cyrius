@@ -1,8 +1,12 @@
 pub mod bus;
+mod memory;
 mod trap;
 
-use crate::arch::api::{ArchDevice, ArchPlatform, ArchTrap};
+use bootloader_api::BootInfo;
+
+use crate::arch::api::{ArchDevice, ArchMemory, ArchPlatform, ArchTrap};
 use crate::device::char::uart::ns16550::Ns16550;
+use crate::mem::allocator::{HeapRegion, MemoryError};
 
 use self::bus::Pio;
 
@@ -26,5 +30,11 @@ impl ArchTrap for X86_64 {
 
     fn init_traps() {
         trap::init();
+    }
+}
+
+impl ArchMemory for X86_64 {
+    fn heap_region(boot_info: &'static BootInfo) -> Result<HeapRegion, MemoryError> {
+        memory::heap_region(boot_info)
     }
 }

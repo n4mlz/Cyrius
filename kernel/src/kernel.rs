@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
-#![feature(trait_alias, sync_unsafe_cell)]
+#![feature(trait_alias, sync_unsafe_cell, alloc_error_handler)]
 #![cfg_attr(test, feature(custom_test_frameworks))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 #![cfg_attr(test, test_runner(crate::test::run_tests))]
+
+extern crate alloc;
 
 pub mod arch;
 pub mod device;
@@ -24,8 +26,13 @@ entry_point!(kernel_main);
 #[cfg(test)]
 entry_point!(test_kernel_main);
 
-fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     Arch::console().init();
+
+    if let Err(err) = mem::init(boot_info) {
+        panic!("memory init failed: {:?}", err);
+    }
+
     trap::init();
     println!("Hello, world!");
 
@@ -40,8 +47,13 @@ fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 }
 
 #[cfg(test)]
-fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
     Arch::console().init();
+
+    if let Err(err) = mem::init(boot_info) {
+        panic!("memory init failed: {:?}", err);
+    }
+
     trap::init();
     test_main();
     test::exit_qemu(test::QemuExitCode::Success)
