@@ -1,20 +1,31 @@
 #![no_std]
 #![no_main]
 #![feature(trait_alias, sync_unsafe_cell)]
+#![cfg_attr(test, feature(custom_test_frameworks))]
+#![cfg_attr(test, reexport_test_harness_main = "test_main")]
+#![cfg_attr(test, test_runner(crate::test::run_tests))]
 
 pub mod arch;
 pub mod device;
 pub mod mem;
+#[cfg(test)]
+pub mod test;
 pub mod trap;
 pub mod util;
 
 use core::{arch::asm, panic::PanicInfo};
 
+use crate::arch::{Arch, api::ArchDevice};
 use bootloader_api::{BootInfo, entry_point};
 
+#[cfg(not(test))]
 entry_point!(kernel_main);
 
+#[cfg(test)]
+entry_point!(test_kernel_main);
+
 fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+    Arch::console().init();
     trap::init();
     println!("Hello, world!");
 
@@ -28,6 +39,15 @@ fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
     }
 }
 
+#[cfg(test)]
+fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
+    Arch::console().init();
+    trap::init();
+    test_main();
+    test::exit_qemu(test::QemuExitCode::Success)
+}
+
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("panic: {}", info.message());
@@ -43,5 +63,20 @@ fn panic(info: &PanicInfo) -> ! {
 
     loop {
         core::hint::spin_loop()
+    }
+}
+
+#[cfg(test)]
+#[panic_handler]
+fn panic(info: &PanicInfo) -> ! {
+    println!("[test] panic: {}", info);
+    test::exit_qemu(test::QemuExitCode::Failed)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test_case]
+    fn trivial_assertion() {
+        assert_eq!(1, 1);
     }
 }

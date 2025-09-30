@@ -737,4 +737,5 @@ dependencies = [
  "anyhow",
  "bootloader",
  "clap",
+ "serde_json",
 ]

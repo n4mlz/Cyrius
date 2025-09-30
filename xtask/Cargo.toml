@@ -7,3 +7,4 @@ edition = "2024"
 anyhow.workspace = true
 bootloader.workspace = true
 clap.workspace = true
+serde_json.workspace = true

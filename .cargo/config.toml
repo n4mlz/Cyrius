@@ -1,2 +1,2 @@
-[alias]
-xtask = "run -p xtask --"
+[target.x86_64-unknown-none]
+rustflags = ["-C", "panic=abort"]
