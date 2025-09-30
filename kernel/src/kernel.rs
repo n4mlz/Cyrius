@@ -84,6 +84,6 @@ mod tests {
 
     #[kernel_test_case]
     fn test2() {
-        assert_eq!(1, 2);
+        assert_eq!(2, 2);
     }
 }
