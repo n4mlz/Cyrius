@@ -29,8 +29,18 @@ fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    println!("panic!");
+fn panic(info: &PanicInfo) -> ! {
+    println!("panic: {}", info.message());
+
+    if let Some(location) = info.location() {
+        println!(
+            "at file '{}' line {} column {}",
+            location.file(),
+            location.line(),
+            location.column()
+        );
+    }
+
     loop {
         core::hint::spin_loop()
     }
