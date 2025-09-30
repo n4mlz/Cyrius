@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packages (QEMU)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86
+
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Show rustc version
+        run: rustc -Vv && cargo -V
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-target-
+
+      - name: Build xtask tooling
+        run: cargo build -p xtask
+
+      - name: Build tests (no run)
+        run: cargo xtask test --no-run
+
+      - name: Run tests in QEMU
+        run: cargo xtask test
+
+
+
