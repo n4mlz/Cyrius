@@ -130,7 +130,6 @@ pub fn run_qemu(image: &Path, test: bool) -> Result<ExitStatus> {
             "-device",
             "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-no-reboot",
-            "-no-shutdown",
         ]);
     }
 
