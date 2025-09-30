@@ -45,7 +45,6 @@ pub struct TestBuildOptions {
 
 #[derive(Clone, Debug)]
 pub enum TestSelector {
-    CaseIndex(String),
     NamePattern(String),
 }
 
@@ -179,17 +178,9 @@ fn parse_executable_from_json(output: &str) -> Option<PathBuf> {
 }
 
 fn configure_test_build(cmd: &mut Command, opts: &TestBuildOptions) {
-    if let Some(selector) = &opts.selector {
-        match selector {
-            TestSelector::CaseIndex(index) => {
-                cmd.env("CYRIUS_TEST_FILTER_KIND", "index");
-                cmd.env("CYRIUS_TEST_FILTER_VALUE", index);
-            }
-            TestSelector::NamePattern(pattern) => {
-                cmd.env("CYRIUS_TEST_FILTER_KIND", "name");
-                cmd.env("CYRIUS_TEST_FILTER_VALUE", pattern);
-            }
-        }
+    if let Some(TestSelector::NamePattern(pattern)) = &opts.selector {
+        cmd.env("CYRIUS_TEST_FILTER_KIND", "name");
+        cmd.env("CYRIUS_TEST_FILTER_VALUE", pattern);
     }
 
     if opts.list_only {

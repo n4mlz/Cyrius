@@ -21,7 +21,7 @@ pub enum QemuExitCode {
 }
 
 pub fn run_tests(tests: &[&dyn Fn()]) {
-    let filter = selected_filter();
+    let name_filter = selected_name_filter();
     let list_only = option_env!("CYRIUS_TEST_LIST_ONLY").is_some();
 
     let metadata = named_tests();
@@ -43,7 +43,9 @@ pub fn run_tests(tests: &[&dyn Fn()]) {
             .map(|entry| entry.name)
             .unwrap_or("<unnamed>");
 
-        if !filter.matches(index, name) {
+        if let Some(pattern) = name_filter
+            && !name.contains(pattern)
+        {
             continue;
         }
 
@@ -60,39 +62,27 @@ pub fn run_tests(tests: &[&dyn Fn()]) {
     }
 
     if list_only {
-        match filter {
-            TestFilter::ByIndex(target) if matched == 0 => {
-                println!("[test] requested case #{target} not found");
-                exit_qemu(QemuExitCode::Failed);
-            }
-            TestFilter::ByName(pattern) if matched == 0 => {
-                println!("[test] no test matched pattern '{pattern}'");
-                exit_qemu(QemuExitCode::Failed);
-            }
-            _ => {}
+        if let Some(pattern) = name_filter
+            && matched == 0
+        {
+            println!("[test] no test matched pattern '{pattern}'");
+            exit_qemu(QemuExitCode::Failed);
         }
         println!("[test] listed {matched} matching case(s)");
         exit_qemu(QemuExitCode::Success);
     }
 
     if matched == 0 {
-        match filter {
-            TestFilter::ByIndex(target) => {
-                println!("[test] requested case #{target} not found");
-                exit_qemu(QemuExitCode::Failed);
-            }
-            TestFilter::ByName(pattern) => {
-                println!("[test] no test matched pattern '{pattern}'");
-                exit_qemu(QemuExitCode::Failed);
-            }
-            TestFilter::All => {
-                println!("[test] no tests executed");
-                exit_qemu(QemuExitCode::Failed);
-            }
+        if let Some(pattern) = name_filter {
+            println!("[test] no test matched pattern '{pattern}'");
+        } else {
+            println!("[test] no tests executed");
         }
+        exit_qemu(QemuExitCode::Failed);
     }
 
     println!("[test] all {matched} case(s) passed");
+    exit_qemu(QemuExitCode::Success);
 }
 
 pub fn exit_qemu(code: QemuExitCode) -> ! {
@@ -117,32 +107,11 @@ fn named_tests() -> &'static [NamedTest] {
     }
 }
 
-enum TestFilter {
-    All,
-    ByIndex(usize),
-    ByName(&'static str),
-}
-
-impl TestFilter {
-    fn matches(&self, index: usize, name: &str) -> bool {
-        match self {
-            TestFilter::All => true,
-            TestFilter::ByIndex(target) => index == *target,
-            TestFilter::ByName(pattern) => name.contains(pattern),
+fn selected_name_filter() -> Option<&'static str> {
+    match option_env!("CYRIUS_TEST_FILTER_KIND") {
+        Some("name") => {
+            option_env!("CYRIUS_TEST_FILTER_VALUE").filter(|pattern| !pattern.is_empty())
         }
-    }
-}
-
-fn selected_filter() -> TestFilter {
-    match (
-        option_env!("CYRIUS_TEST_FILTER_KIND"),
-        option_env!("CYRIUS_TEST_FILTER_VALUE"),
-    ) {
-        (Some("index"), Some(raw)) => raw
-            .parse()
-            .map(TestFilter::ByIndex)
-            .unwrap_or(TestFilter::All),
-        (Some("name"), Some(pattern)) if !pattern.is_empty() => TestFilter::ByName(pattern),
-        _ => TestFilter::All,
+        _ => None,
     }
 }
