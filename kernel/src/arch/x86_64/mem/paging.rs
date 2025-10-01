@@ -92,6 +92,10 @@ impl<M: PhysMapper> X86PageTable<M> {
         unsafe { &*(self.root_virt.into_ptr() as *const PageTable) }
     }
 
+    fn flush_page(&self, addr: VirtAddr) {
+        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(addr.as_raw() as u64));
+    }
+
     /// # Safety
     ///
     /// Caller must ensure the returned table is not aliased elsewhere and that `phys` points to a
@@ -254,6 +258,7 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
             x86_64::PhysAddr::new(frame.start.as_raw()),
             perm_to_flags(perms),
         );
+        self.flush_page(page.start);
         Ok(())
     }
 
@@ -278,6 +283,7 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
                 }
                 let phys = PhysAddr::new(entry.addr().as_u64());
                 entry.set_unused();
+                self.flush_page(page.start);
                 return Ok(Page::new(phys, PageSize::SIZE_4K));
             }
 
@@ -306,6 +312,7 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
                 | PageTableFlags::USER_ACCESSIBLE
                 | PageTableFlags::NO_EXECUTE);
         entry.set_flags(preserved | perm_to_flags(perms));
+        self.flush_page(page.start);
         Ok(())
     }
 
@@ -321,7 +328,6 @@ mod tests {
         FrameAllocator, MapError, PageTableOps, PhysMapper, TranslationError,
     };
     use crate::test::kernel_test_case;
-    use crate::util::lazylock::LazyLock;
 
     use super::X86PageTable;
     use super::{TABLE_LEVELS, indices_for};
@@ -329,8 +335,19 @@ mod tests {
 
     const FRAME_COUNT: usize = 128;
     const FRAME_SIZE: usize = 4096;
-    static MEMORY: LazyLock<[u8; FRAME_COUNT * FRAME_SIZE]> =
-        LazyLock::new_const(|| [0; FRAME_COUNT * FRAME_SIZE]);
+    #[repr(align(4096))]
+    struct TestMemory([u8; FRAME_COUNT * FRAME_SIZE]);
+
+    /// Backing store for the fake physical memory used in paging tests.
+    ///
+    /// # Safety
+    ///
+    /// Tests run single-threaded, so taking mutable references to this static is safe here.
+    static mut MEMORY: TestMemory = TestMemory([0; FRAME_COUNT * FRAME_SIZE]);
+
+    unsafe fn memory_base() -> usize {
+        unsafe { core::ptr::addr_of!(MEMORY.0) as usize }
+    }
 
     struct TestMapper {
         base: usize,
@@ -338,7 +355,7 @@ mod tests {
 
     impl TestMapper {
         fn new() -> Self {
-            let base = MEMORY.as_ptr() as usize;
+            let base = unsafe { memory_base() };
             Self { base }
         }
     }
@@ -378,9 +395,14 @@ mod tests {
     }
 
     fn setup() -> (X86PageTable<TestMapper>, TestAllocator) {
-        // Initialize memory to zero
-        let _memory = MEMORY.get();
-        // Memory is already initialized to zero by LazyLock
+        // SAFETY: Paging tests do not run concurrently.
+        unsafe {
+            core::ptr::write_bytes(
+                core::ptr::addr_of_mut!(MEMORY.0) as *mut u8,
+                0,
+                FRAME_COUNT * FRAME_SIZE,
+            );
+        }
 
         let mut allocator = TestAllocator::new();
         let root = allocator

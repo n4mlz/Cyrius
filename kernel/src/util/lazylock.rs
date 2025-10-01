@@ -42,8 +42,7 @@ impl<T, F: FnOnce() -> T> LazyLock<T, F> {
         }
 
         let f = guard.take().expect("LazyLock init reentered");
-        let value = f();
-        unsafe { (*self.value.get()).write(value) };
+        unsafe { (*self.value.get()).write(f()) };
         self.ready.store(true, Ordering::Release);
 
         unsafe { self.assume_init_ref() }

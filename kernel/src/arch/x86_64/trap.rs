@@ -14,7 +14,7 @@ const GENERAL_REGS_SIZE: usize = core::mem::size_of::<GeneralRegisters>();
 const ORIGINAL_ERROR_OFFSET: usize = 8 + GENERAL_REGS_SIZE;
 
 // IST stack sizes
-const IST_STACK_SIZE: usize = 4096;
+const IST_STACK_SIZE: usize = 32 * 1024;
 const IST_STACK_COUNT: usize = 3; // For NMI, Double Fault, and Machine Check
 
 // IST stack indices
@@ -100,10 +100,10 @@ impl TrapFrameTrait for TrapFrame {
 }
 
 // IST stacks for critical exceptions
-static IST_STACKS: LazyLock<
-    [u8; IST_STACK_SIZE * IST_STACK_COUNT],
-    fn() -> [u8; IST_STACK_SIZE * IST_STACK_COUNT],
-> = LazyLock::new_const(|| [0u8; IST_STACK_SIZE * IST_STACK_COUNT]);
+#[repr(align(16))]
+struct IstStackArea([u8; IST_STACK_SIZE * IST_STACK_COUNT]);
+
+static mut IST_STACKS: IstStackArea = IstStackArea([0u8; IST_STACK_SIZE * IST_STACK_COUNT]);
 
 static TSS: LazyLock<TaskStateSegment, fn() -> TaskStateSegment> = LazyLock::new_const(build_tss);
 
@@ -141,14 +141,22 @@ macro_rules! define_trap_stub_no_error {
                     // Set up arguments for dispatch_trap:
                     // RDI = vector, RSI = frame pointer, RDX = has_error (0)
                     mov rsi, rsp          // RSI = frame pointer (keep this)
-                    sub rsp, 8            // Align stack to 16-byte boundary for ABI compliance
+                    mov r12, rsp          // Track alignment adjustment (0 or 8)
+                    and r12, 0xF
+                    jz 1f
+                    sub rsp, 8            // Align stack if required
+                    mov r12, 8
+                    jmp 2f
+                1:
+                    xor r12, r12
+                2:
                     mov edi, {vector}     // RDI = vector number
                     xor edx, edx          // RDX = has_error (0 for no-error exceptions)
                     
                     call {dispatch}
                     
                     // Restore stack alignment and remove fake error code
-                    add rsp, 8            // Remove stack alignment padding
+                    add rsp, r12          // Undo optional alignment adjustment
                     add rsp, 8            // Remove fake error code
                     
                     // Restore all general purpose registers
@@ -211,14 +219,22 @@ macro_rules! define_trap_stub_with_error {
                     
                     // Set up arguments for dispatch_trap:
                     // RDI = vector, RSI = frame pointer, RDX = has_error (1)
-                    sub rsp, 8            // Align stack to 16-byte boundary for ABI compliance
+                    mov r12, rsp          // Track alignment adjustment (0 or 8)
+                    and r12, 0xF
+                    jz 1f
+                    sub rsp, 8            // Align stack if required
+                    mov r12, 8
+                    jmp 2f
+                1:
+                    xor r12, r12
+                2:
                     mov edi, {vector}     // RDI = vector number
                     mov edx, 1            // RDX = has_error (1 for error-code exceptions)
                     
                     call {dispatch}
                     
                     // Restore stack alignment and remove error code
-                    add rsp, 8            // Remove stack alignment padding
+                    add rsp, r12          // Undo optional alignment adjustment
                     add rsp, 8            // Remove error code from our frame
                     
                     // Restore all general purpose registers
@@ -329,26 +345,17 @@ pub(super) fn init() {
 
 fn build_tss() -> TaskStateSegment {
     let mut tss = TaskStateSegment::new();
-    let stacks = &IST_STACKS;
+    let stacks_ptr = unsafe { core::ptr::addr_of!(IST_STACKS.0) } as *const u8;
+    let base = VirtAddr::new(stacks_ptr as u64);
 
     // Set up IST stacks
-    tss.interrupt_stack_table[IST_INDEX_NMI as usize - 1] = {
-        let stack_start = VirtAddr::new(stacks.as_ptr() as u64);
+    tss.interrupt_stack_table[IST_INDEX_NMI as usize - 1] = base + IST_STACK_SIZE as u64;
 
-        stack_start + IST_STACK_SIZE as u64
-    };
+    tss.interrupt_stack_table[IST_INDEX_DOUBLE_FAULT as usize - 1] =
+        base + (IST_STACK_SIZE * 2) as u64;
 
-    tss.interrupt_stack_table[IST_INDEX_DOUBLE_FAULT as usize - 1] = {
-        let stack_start = VirtAddr::new(stacks.as_ptr() as u64) + IST_STACK_SIZE as u64;
-
-        stack_start + IST_STACK_SIZE as u64
-    };
-
-    tss.interrupt_stack_table[IST_INDEX_MACHINE_CHECK as usize - 1] = {
-        let stack_start = VirtAddr::new(stacks.as_ptr() as u64) + (IST_STACK_SIZE * 2) as u64;
-
-        stack_start + IST_STACK_SIZE as u64
-    };
+    tss.interrupt_stack_table[IST_INDEX_MACHINE_CHECK as usize - 1] =
+        base + (IST_STACK_SIZE * 3) as u64;
 
     tss
 }
