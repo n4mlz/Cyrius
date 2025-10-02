@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
-#![feature(trait_alias, sync_unsafe_cell)]
+#![feature(trait_alias, sync_unsafe_cell, alloc_error_handler)]
 #![cfg_attr(test, feature(custom_test_frameworks))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 #![cfg_attr(test, test_runner(crate::test::run_tests))]
+
+extern crate alloc;
 
 pub mod arch;
 pub mod device;
@@ -15,18 +17,31 @@ pub mod util;
 
 use core::{arch::asm, panic::PanicInfo};
 
-use crate::arch::{Arch, api::ArchDevice};
-use bootloader_api::{BootInfo, entry_point};
+use crate::arch::{
+    Arch,
+    api::{ArchDevice, ArchMemory},
+};
+use crate::mem::allocator;
+use bootloader_api::{
+    BootInfo,
+    config::{BootloaderConfig, Mapping},
+    entry_point,
+};
+
+const BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config
+};
 
 #[cfg(not(test))]
-entry_point!(kernel_main);
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 #[cfg(test)]
-entry_point!(test_kernel_main);
+entry_point!(test_kernel_main, config = &BOOTLOADER_CONFIG);
 
-fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
-    Arch::console().init();
-    trap::init();
+fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    init_runtime(boot_info);
     println!("Hello, world!");
 
     // Trigger a breakpoint exception
@@ -40,11 +55,25 @@ fn kernel_main(_boot_info: &'static mut BootInfo) -> ! {
 }
 
 #[cfg(test)]
-fn test_kernel_main(_boot_info: &'static mut BootInfo) -> ! {
-    Arch::console().init();
-    trap::init();
+fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    init_runtime(boot_info);
     test_main();
     test::exit_qemu(test::QemuExitCode::Success)
+}
+
+fn init_runtime(boot_info: &'static mut BootInfo) {
+    Arch::console().init();
+
+    let heap_range = {
+        let info: &'static BootInfo = &*boot_info;
+        <Arch as ArchMemory>::locate_kernel_heap(info)
+            .unwrap_or_else(|err| panic!("failed to locate kernel heap: {err:?}"))
+    };
+
+    allocator::init_heap(heap_range)
+        .unwrap_or_else(|err| panic!("failed to initialise kernel heap: {err:?}"));
+
+    trap::init();
 }
 
 #[cfg(not(test))]

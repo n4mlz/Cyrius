@@ -12,6 +12,7 @@ bitflags.workspace = true
 bootloader_api.workspace = true
 num-traits.workspace = true
 x86_64 = { version = "0.15", default-features = false, features = ["instructions"] }
+linked_list_allocator = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 kernel-macros = { path = "../kernel-macros" }
