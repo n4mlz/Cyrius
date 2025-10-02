@@ -9,6 +9,7 @@ pub enum MapError {
     FrameAllocationFailed,
     UnsupportedPageSize(PageSize),
     MisalignedFrame,
+    NonCanonical,
     InternalError,
 }
 
@@ -22,6 +23,7 @@ impl fmt::Display for MapError {
                 write!(f, "unsupported page size {} bytes", size.bytes())
             }
             Self::MisalignedFrame => write!(f, "frame is not aligned to the requested page size"),
+            Self::NonCanonical => write!(f, "virtual address is not canonical"),
             Self::InternalError => write!(f, "internal paging error"),
         }
     }
