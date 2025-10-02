@@ -1,4 +1,5 @@
 pub mod bus;
+pub mod mem;
 mod trap;
 
 use crate::arch::api::{ArchDevice, ArchPlatform, ArchTrap};
