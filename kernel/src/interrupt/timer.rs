@@ -33,6 +33,17 @@ impl InterruptServiceRoutine for DefaultTimerHandler {
 static DEFAULT_TIMER_HANDLER: DefaultTimerHandler = DefaultTimerHandler::new();
 static DEFAULT_HANDLER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
+/// Return the number of timer interrupts observed by the default handler.
+///
+/// # Note
+///
+/// This counter only increases when [`init_system_timer`] registers the default handler for the
+/// architecture timer. Calling this before initialisation, or after replacing the handler, will
+/// always return zero.
+pub fn observed_ticks() -> u64 {
+    DEFAULT_TIMER_HANDLER.ticks.load(Ordering::Relaxed)
+}
+
 /// Configure the system timer in periodic mode using architecture-specific tick units.
 pub fn init_system_timer(ticks: TimerTicks) -> Result<(), TimerError> {
     ensure_initialised()?;

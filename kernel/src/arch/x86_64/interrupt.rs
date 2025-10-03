@@ -9,6 +9,9 @@ use crate::device::bus::reg::RegBus;
 use crate::util::spinlock::SpinLock;
 
 use super::bus::Pio;
+use x86_64::VirtAddr as X86VirtAddr;
+use x86_64::registers::control::Cr3;
+use x86_64::structures::paging::{PageTable, PageTableFlags};
 
 pub const TIMER_VECTOR: u8 = 32;
 
@@ -89,6 +92,8 @@ pub fn init(boot_info: &'static BootInfo) -> Result<(), InterruptInitError> {
         .ok_or(InterruptInitError::AddressOverflow)?;
     let base_usize = usize::try_from(virt_base).map_err(|_| InterruptInitError::AddressOverflow)?;
 
+    ensure_lapic_uncacheable(base_usize, phys_offset)?;
+
     LOCAL_APIC_BASE.store(base_usize as u64, Ordering::Release);
 
     mask_8259_pic();
@@ -151,6 +156,54 @@ fn mask_8259_pic() {
 
     let _ = pic1.write(1, 0xFF);
     let _ = pic2.write(1, 0xFF);
+}
+
+fn ensure_lapic_uncacheable(virt_base: usize, phys_offset: u64) -> Result<(), InterruptInitError> {
+    let target = X86VirtAddr::new(virt_base as u64);
+    let (level_4_frame, _) = Cr3::read();
+    let offset = X86VirtAddr::new(phys_offset);
+    let mut table_ptr =
+        (offset + level_4_frame.start_address().as_u64()).as_u64() as *mut PageTable;
+    let indices = [
+        usize::from(target.p4_index()),
+        usize::from(target.p3_index()),
+        usize::from(target.p2_index()),
+        usize::from(target.p1_index()),
+    ];
+
+    for (level, &idx) in indices.iter().enumerate() {
+        let table = unsafe { &mut *table_ptr };
+        let entry = &mut table[idx];
+        if !entry.flags().contains(PageTableFlags::PRESENT) {
+            return Err(InterruptInitError::ApicUnavailable);
+        }
+
+        let is_huge = entry.flags().contains(PageTableFlags::HUGE_PAGE);
+        let is_leaf = level == indices.len() - 1 || is_huge;
+
+        if is_leaf {
+            let mut flags = entry.flags();
+            let desired = PageTableFlags::NO_CACHE | PageTableFlags::WRITE_THROUGH;
+            if !flags.contains(PageTableFlags::NO_CACHE)
+                || !flags.contains(PageTableFlags::WRITE_THROUGH)
+            {
+                flags.insert(desired);
+                entry.set_flags(flags);
+
+                if is_huge {
+                    x86_64::instructions::tlb::flush_all();
+                } else {
+                    x86_64::instructions::tlb::flush(target);
+                }
+            }
+            return Ok(());
+        }
+
+        let next_phys = entry.addr().as_u64();
+        table_ptr = (offset + next_phys).as_u64() as *mut PageTable;
+    }
+
+    Err(InterruptInitError::ApicUnavailable)
 }
 
 impl TimerDriver for LocalApicTimer {
