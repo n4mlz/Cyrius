@@ -1,10 +1,14 @@
 pub mod bus;
+pub mod interrupt;
 pub mod mem;
 mod trap;
 
 use bootloader_api::BootInfo;
 
-use crate::arch::api::{ArchDevice, ArchMemory, ArchPlatform, ArchTrap, HeapRegionError};
+use crate::arch::api::{
+    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchTrap, HeapRegionError,
+    InterruptInitError,
+};
 use crate::device::char::uart::ns16550::Ns16550;
 use crate::mem::addr::{AddrRange, VirtAddr};
 
@@ -38,5 +42,33 @@ impl ArchMemory for X86_64 {
         boot_info: &'static BootInfo,
     ) -> Result<AddrRange<VirtAddr>, HeapRegionError> {
         self::mem::locate_kernel_heap(boot_info)
+    }
+}
+
+impl ArchInterrupt for X86_64 {
+    type Timer = interrupt::LocalApicTimer;
+
+    fn init_interrupts(boot_info: &'static BootInfo) -> Result<(), InterruptInitError> {
+        interrupt::init(boot_info)
+    }
+
+    fn enable_interrupts() {
+        interrupt::enable();
+    }
+
+    fn disable_interrupts() {
+        interrupt::disable();
+    }
+
+    fn end_of_interrupt(vector: u8) {
+        interrupt::end_of_interrupt(vector);
+    }
+
+    fn timer() -> &'static Self::Timer {
+        interrupt::timer()
+    }
+
+    fn timer_vector() -> u8 {
+        interrupt::TIMER_VECTOR
     }
 }

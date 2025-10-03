@@ -9,6 +9,7 @@ extern crate alloc;
 
 pub mod arch;
 pub mod device;
+pub mod interrupt;
 pub mod mem;
 #[cfg(test)]
 pub mod test;
@@ -21,6 +22,7 @@ use crate::arch::{
     Arch,
     api::{ArchDevice, ArchMemory},
 };
+use crate::interrupt::TimerTicks;
 use crate::mem::allocator;
 use bootloader_api::{
     BootInfo,
@@ -33,6 +35,8 @@ const BOOTLOADER_CONFIG: BootloaderConfig = {
     config.mappings.physical_memory = Some(Mapping::Dynamic);
     config
 };
+
+const SYSTEM_TIMER_TICKS: TimerTicks = TimerTicks::new(10_000_000);
 
 #[cfg(not(test))]
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
@@ -73,7 +77,15 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     allocator::init_heap(heap_range)
         .unwrap_or_else(|err| panic!("failed to initialise kernel heap: {err:?}"));
 
+    interrupt::init(boot_info)
+        .unwrap_or_else(|err| panic!("failed to initialise interrupts: {err:?}"));
+
     trap::init();
+
+    interrupt::init_system_timer(SYSTEM_TIMER_TICKS)
+        .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
+
+    interrupt::enable();
 }
 
 #[cfg(not(test))]
