@@ -7,6 +7,7 @@ use x86_64::{
     structures::tss::TaskStateSegment,
 };
 
+use super::interrupt::TIMER_VECTOR;
 use crate::trap::{TrapFrame as TrapFrameTrait, TrapInfo, TrapOrigin};
 use crate::util::lazylock::LazyLock;
 
@@ -291,6 +292,7 @@ define_trap_stub_with_error!(exception_21, 21);
 define_trap_stub_no_error!(exception_28, 28);
 define_trap_stub_no_error!(exception_29, 29);
 define_trap_stub_with_error!(exception_30, 30);
+define_trap_stub_no_error!(interrupt_timer, TIMER_VECTOR);
 
 const EXCEPTION_DESCRIPTIONS: [&str; 32] = [
     "Divide Error",
@@ -431,6 +433,7 @@ fn build_idt() -> InterruptDescriptorTable {
             .set_handler_addr(VirtAddr::new(exception_29 as u64));
         idt.security_exception
             .set_handler_addr(VirtAddr::new(exception_30 as u64));
+        idt[TIMER_VECTOR].set_handler_addr(VirtAddr::new(interrupt_timer as u64));
     }
     idt
 }
