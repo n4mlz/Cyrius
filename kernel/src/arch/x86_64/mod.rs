@@ -51,23 +51,23 @@ impl ArchInterrupt for X86_64 {
     type Timer = interrupt::LocalApicTimer;
 
     fn init_interrupts(boot_info: &'static BootInfo) -> Result<(), InterruptInitError> {
-        interrupt::init(boot_info)
+        interrupt::LOCAL_APIC.init(boot_info)
     }
 
     fn enable_interrupts() {
-        interrupt::enable();
+        interrupt::LOCAL_APIC.enable();
     }
 
     fn disable_interrupts() {
-        interrupt::disable();
+        interrupt::LOCAL_APIC.disable();
     }
 
     fn end_of_interrupt(vector: u8) {
-        interrupt::end_of_interrupt(vector);
+        interrupt::LOCAL_APIC.end_of_interrupt(vector);
     }
 
     fn timer() -> &'static Self::Timer {
-        interrupt::timer()
+        interrupt::LOCAL_APIC.timer()
     }
 
     fn timer_vector() -> u8 {

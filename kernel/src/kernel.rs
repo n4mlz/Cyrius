@@ -23,7 +23,7 @@ use crate::arch::{
     api::{ArchDevice, ArchMemory},
 };
 use crate::device::char::uart::Uart;
-use crate::interrupt::TimerTicks;
+use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
 use crate::mem::allocator;
 use bootloader_api::{
     BootInfo,
@@ -80,13 +80,15 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     allocator::init_heap(heap_range)
         .unwrap_or_else(|err| panic!("failed to initialise kernel heap: {err:?}"));
 
-    interrupt::init(boot_info)
+    INTERRUPTS
+        .init(boot_info)
         .unwrap_or_else(|err| panic!("failed to initialise interrupts: {err:?}"));
 
-    interrupt::init_system_timer(SYSTEM_TIMER_TICKS)
+    SYSTEM_TIMER
+        .start_periodic(SYSTEM_TIMER_TICKS)
         .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
 
-    interrupt::enable();
+    INTERRUPTS.enable();
 }
 
 #[cfg(not(test))]
@@ -131,34 +133,35 @@ mod tests {
 
     #[kernel_test_case]
     fn lapic_timer_fires() {
-        use crate::interrupt::TimerTicks;
-        use crate::interrupt::{self, timer};
+        use crate::interrupt::{SYSTEM_TIMER, TimerTicks};
         use core::arch::x86_64::_rdtsc;
 
         const TSC_TIMEOUT_CYCLES: u64 = 500_000_000; // ~0.1-0.5s depending on host frequency
         const HLT_STRIDE: u32 = 128;
 
-        let _ = interrupt::stop_system_timer();
-        interrupt::init_system_timer(TimerTicks::new(200_000))
+        let _ = SYSTEM_TIMER.stop();
+        SYSTEM_TIMER
+            .start_periodic(TimerTicks::new(200_000))
             .expect("failed to reconfigure timer for test");
 
         x86_64::instructions::interrupts::enable();
 
-        let start_ticks = timer::observed_ticks();
+        let start_ticks = SYSTEM_TIMER.observed_ticks();
         let start_tsc = unsafe { _rdtsc() };
         let mut polls: u32 = 0;
 
         loop {
-            if timer::observed_ticks() > start_ticks {
-                interrupt::stop_system_timer().ok();
-                interrupt::init_system_timer(super::SYSTEM_TIMER_TICKS)
+            if SYSTEM_TIMER.observed_ticks() > start_ticks {
+                SYSTEM_TIMER.stop().ok();
+                SYSTEM_TIMER
+                    .start_periodic(super::SYSTEM_TIMER_TICKS)
                     .expect("failed to restore system timer configuration");
                 return;
             }
 
             let elapsed = unsafe { _rdtsc().wrapping_sub(start_tsc) };
             if elapsed > TSC_TIMEOUT_CYCLES {
-                interrupt::stop_system_timer().ok();
+                SYSTEM_TIMER.stop().ok();
                 panic!("APIC timer did not tick before timeout (elapsed cycles={elapsed})");
             }
 

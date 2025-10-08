@@ -3,7 +3,7 @@ pub mod spinlock;
 pub mod stream;
 
 use crate::arch::{Arch, api::ArchDevice};
-use crate::util::stream::{WriteOps, StreamError};
+use crate::util::stream::{StreamError, WriteOps};
 
 #[macro_export]
 macro_rules! cast {
