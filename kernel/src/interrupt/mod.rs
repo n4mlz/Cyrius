@@ -143,6 +143,12 @@ impl InterruptController {
     }
 }
 
+impl Default for InterruptController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrapHandler for InterruptController {
     fn handle_trap(&self, info: TrapInfo, frame: &mut CurrentTrapFrame) {
         match info.origin {

@@ -205,6 +205,12 @@ impl LocalApic {
     }
 }
 
+impl Default for LocalApic {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct TimerState {
     running: bool,
 }

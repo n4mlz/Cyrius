@@ -68,7 +68,7 @@ macro_rules! impl_addr {
     };
 }
 
-impl_addr!(PhysAddr, u64);
+impl_addr!(PhysAddr, usize);
 impl_addr!(VirtAddr, usize);
 
 pub trait VirtIntoPtr {

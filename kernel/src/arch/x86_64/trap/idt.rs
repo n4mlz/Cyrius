@@ -22,56 +22,56 @@ fn build_idt() -> InterruptDescriptorTable {
     let mut idt = InterruptDescriptorTable::new();
     unsafe {
         idt.divide_error
-            .set_handler_addr(VirtAddr::new(exception_0 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_0 as *const ()));
         idt.debug
-            .set_handler_addr(VirtAddr::new(exception_1 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_1 as *const ()));
         idt.non_maskable_interrupt
-            .set_handler_addr(VirtAddr::new(exception_2 as u64))
+            .set_handler_addr(VirtAddr::from_ptr(exception_2 as *const ()))
             .set_stack_index(IST_INDEX_NMI);
         idt.breakpoint
-            .set_handler_addr(VirtAddr::new(exception_3 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_3 as *const ()));
         idt.overflow
-            .set_handler_addr(VirtAddr::new(exception_4 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_4 as *const ()));
         idt.bound_range_exceeded
-            .set_handler_addr(VirtAddr::new(exception_5 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_5 as *const ()));
         idt.invalid_opcode
-            .set_handler_addr(VirtAddr::new(exception_6 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_6 as *const ()));
         idt.device_not_available
-            .set_handler_addr(VirtAddr::new(exception_7 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_7 as *const ()));
         idt.double_fault
-            .set_handler_addr(VirtAddr::new(exception_8 as u64))
+            .set_handler_addr(VirtAddr::from_ptr(exception_8 as *const ()))
             .set_stack_index(IST_INDEX_DOUBLE_FAULT);
         idt.invalid_tss
-            .set_handler_addr(VirtAddr::new(exception_10 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_10 as *const ()));
         idt.segment_not_present
-            .set_handler_addr(VirtAddr::new(exception_11 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_11 as *const ()));
         idt.stack_segment_fault
-            .set_handler_addr(VirtAddr::new(exception_12 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_12 as *const ()));
         idt.general_protection_fault
-            .set_handler_addr(VirtAddr::new(exception_13 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_13 as *const ()));
         idt.page_fault
-            .set_handler_addr(VirtAddr::new(exception_14 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_14 as *const ()));
         idt.x87_floating_point
-            .set_handler_addr(VirtAddr::new(exception_16 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_16 as *const ()));
         idt.alignment_check
-            .set_handler_addr(VirtAddr::new(exception_17 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_17 as *const ()));
         idt.machine_check
-            .set_handler_addr(VirtAddr::new(exception_18 as u64))
+            .set_handler_addr(VirtAddr::from_ptr(exception_18 as *const ()))
             .set_stack_index(IST_INDEX_MACHINE_CHECK);
         idt.simd_floating_point
-            .set_handler_addr(VirtAddr::new(exception_19 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_19 as *const ()));
         idt.virtualization
-            .set_handler_addr(VirtAddr::new(exception_20 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_20 as *const ()));
         idt.cp_protection_exception
-            .set_handler_addr(VirtAddr::new(exception_21 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_21 as *const ()));
         idt.hv_injection_exception
-            .set_handler_addr(VirtAddr::new(exception_28 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_28 as *const ()));
         idt.vmm_communication_exception
-            .set_handler_addr(VirtAddr::new(exception_29 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_29 as *const ()));
         idt.security_exception
-            .set_handler_addr(VirtAddr::new(exception_30 as u64));
+            .set_handler_addr(VirtAddr::from_ptr(exception_30 as *const ()));
         idt[super::super::interrupt::TIMER_VECTOR]
-            .set_handler_addr(VirtAddr::new(interrupt_timer as u64));
+            .set_handler_addr(VirtAddr::from_ptr(interrupt_timer as *const ()));
     }
     idt
 }

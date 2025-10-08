@@ -35,14 +35,14 @@ pub trait TrapHandler: Sync {
 
 static TRAP_INITIALISED: AtomicBool = AtomicBool::new(false);
 
-const fn handler_slot() -> SpinLock<Option<&'static dyn TrapHandler>> {
+type HandlerSlot = SpinLock<Option<&'static dyn TrapHandler>>;
+type HandlerFactory = fn() -> HandlerSlot;
+
+const fn handler_slot() -> HandlerSlot {
     SpinLock::new(None)
 }
 
-static HANDLER: LazyLock<
-    SpinLock<Option<&'static dyn TrapHandler>>,
-    fn() -> SpinLock<Option<&'static dyn TrapHandler>>,
-> = LazyLock::new_const(handler_slot);
+static HANDLER: LazyLock<HandlerSlot, HandlerFactory> = LazyLock::new_const(handler_slot);
 
 struct LoggingTrapHandler;
 
