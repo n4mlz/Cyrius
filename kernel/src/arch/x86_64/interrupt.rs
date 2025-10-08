@@ -158,6 +158,14 @@ fn mask_8259_pic() {
     let _ = pic2.write(1, 0xFF);
 }
 
+/// Ensure the local APIC MMIO range is mapped with UC/WT attributes.
+///
+/// # Implicit contract
+///
+/// The implementation assumes a direct physical-memory window located at
+/// `phys_offset` such that `phys + phys_offset` yields the virtual address of the
+/// same frame. Boot code must establish that mapping prior to invoking this
+/// routine.
 fn ensure_lapic_uncacheable(virt_base: usize, phys_offset: u64) -> Result<(), InterruptInitError> {
     let target = X86VirtAddr::new(virt_base as u64);
     let (level_4_frame, _) = Cr3::read();

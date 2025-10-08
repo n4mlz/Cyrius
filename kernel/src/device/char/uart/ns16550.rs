@@ -15,6 +15,15 @@ const MCR: usize = 4;
 const LSR: usize = 5;
 const FCR: usize = 2;
 
+/// Minimal 16550-compatible UART driver layered on top of a register bus.
+///
+/// # Implicit contract
+///
+/// The supplied [`RegBus`] implementation is expected to be infallible for the mapped
+/// registers. The driver currently unwraps low-level I/O operations and will panic if
+/// the bus returns an error. Consumers should either provide an infallible bus or wrap
+/// this type in a safer abstraction that converts hardware faults into recoverable
+/// errors.
 pub struct Ns16550<RegSize: RegSizeBound, R: RegBus<RegSize>> {
     pub regs: R,
     pub name: &'static str,
@@ -68,7 +77,9 @@ impl<RegSize: RegSizeBound, R: RegBus<RegSize>> StreamOps for Ns16550<RegSize, R
     fn write(&self, buf: &[u8]) -> Result<usize, StreamError> {
         let mut i = 0;
         while i < buf.len() {
-            while !self.tx_ready() {}
+            while !self.tx_ready() {
+                core::hint::spin_loop();
+            }
             self.out(THR, cast!(buf[i]));
             i += 1;
         }
