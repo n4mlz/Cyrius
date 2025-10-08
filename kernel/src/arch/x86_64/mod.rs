@@ -23,7 +23,9 @@ impl ArchPlatform for X86_64 {
 }
 
 impl ArchDevice for X86_64 {
-    fn console() -> &'static dyn crate::device::char::uart::Uart<Error = ()> {
+    type Console = Ns16550<u8, Pio>;
+
+    fn console() -> &'static Self::Console {
         static UART0: Ns16550<u8, Pio> = Ns16550::new(Pio::new(0x3F8), "kernel-console");
         &UART0
     }

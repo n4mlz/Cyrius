@@ -22,6 +22,7 @@ use crate::arch::{
     Arch,
     api::{ArchDevice, ArchMemory},
 };
+use crate::device::char::uart::Uart;
 use crate::interrupt::TimerTicks;
 use crate::mem::allocator;
 use bootloader_api::{
@@ -66,7 +67,9 @@ fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
 }
 
 fn init_runtime(boot_info: &'static mut BootInfo) {
-    Arch::console().init();
+    Arch::console()
+        .init()
+        .unwrap_or_else(|err| panic!("failed to initialise console: {err:?}"));
 
     let heap_range = {
         let info: &'static BootInfo = &*boot_info;
@@ -79,8 +82,6 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
 
     interrupt::init(boot_info)
         .unwrap_or_else(|err| panic!("failed to initialise interrupts: {err:?}"));
-
-    trap::init();
 
     interrupt::init_system_timer(SYSTEM_TIMER_TICKS)
         .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
@@ -162,7 +163,7 @@ mod tests {
             }
 
             polls = polls.wrapping_add(1);
-            if polls % HLT_STRIDE == 0 {
+            if polls.is_multiple_of(HLT_STRIDE) {
                 x86_64::instructions::hlt();
             } else {
                 core::hint::spin_loop();

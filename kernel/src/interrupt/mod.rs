@@ -44,12 +44,14 @@ pub fn init(boot_info: &'static BootInfo) -> Result<(), InterruptInitError> {
         return Err(InterruptInitError::AlreadyInitialised);
     }
 
-    trap::register_handler(&DISPATCHER);
+    trap::init();
 
     if let Err(err) = <Arch as ArchInterrupt>::init_interrupts(boot_info) {
         INITIALISED.store(false, Ordering::Release);
         return Err(err);
     }
+
+    trap::register_handler(&DISPATCHER);
 
     Ok(())
 }

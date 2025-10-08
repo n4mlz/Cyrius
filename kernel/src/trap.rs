@@ -1,5 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::util::{lazylock::LazyLock, spinlock::SpinLock};
+
 use crate::arch::{Arch, api::ArchTrap};
 use crate::{print, println};
 
@@ -31,54 +33,58 @@ pub trait TrapHandler: Sync {
     fn handle_trap(&self, info: TrapInfo, frame: &mut CurrentTrapFrame);
 }
 
-static HANDLER_SET: AtomicBool = AtomicBool::new(false);
-static mut HANDLER: Option<&'static dyn TrapHandler> = None;
+static TRAP_INITIALISED: AtomicBool = AtomicBool::new(false);
+
+const fn handler_slot() -> SpinLock<Option<&'static dyn TrapHandler>> {
+    SpinLock::new(None)
+}
+
+static HANDLER: LazyLock<
+    SpinLock<Option<&'static dyn TrapHandler>>,
+    fn() -> SpinLock<Option<&'static dyn TrapHandler>>,
+> = LazyLock::new_const(handler_slot);
 
 struct LoggingTrapHandler;
 
 static LOGGING_HANDLER: LoggingTrapHandler = LoggingTrapHandler;
 
+/// Install a global trap handler. Replaces the default logging handler but refuses
+/// to overwrite a previously registered custom handler.
 pub fn register_handler(handler: &'static dyn TrapHandler) {
-    if !try_register(handler) {
-        panic!("trap handler already registered");
+    let mut slot = HANDLER.lock();
+    match slot.as_ref() {
+        Some(current) if core::ptr::eq(*current, handler) => {}
+        Some(current) if core::ptr::eq(*current, &LOGGING_HANDLER) => {
+            *slot = Some(handler);
+        }
+        Some(_) => panic!("trap handler already registered"),
+        None => *slot = Some(handler),
     }
 }
 
+/// Initialise architecture-specific trap tables. Safe to call multiple times.
 pub fn init() {
     ensure_default_handler();
-    Arch::init_traps();
+    if TRAP_INITIALISED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        Arch::init_traps();
+    }
 }
 
 pub(crate) fn dispatch(info: TrapInfo, frame: &mut CurrentTrapFrame) {
-    if let Some(handler) = unsafe { HANDLER } {
-        handler.handle_trap(info, frame);
-    } else {
-        println!(
-            "[trap] vector={} origin={:?} desc={} (no handler)",
-            info.vector, info.origin, info.description
-        );
-        println!("[trap] frame={:#?}", frame);
-    }
+    let handler = {
+        let slot = HANDLER.lock();
+        *slot
+    };
+    handler.unwrap_or(&LOGGING_HANDLER).handle_trap(info, frame);
 }
 
 fn ensure_default_handler() {
-    if HANDLER_SET.load(Ordering::SeqCst) {
-        return;
-    }
-    let _ = try_register(&LOGGING_HANDLER);
-}
-
-fn try_register(handler: &'static dyn TrapHandler) -> bool {
-    if HANDLER_SET
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        unsafe {
-            HANDLER = Some(handler);
-        }
-        true
-    } else {
-        false
+    let mut slot = HANDLER.lock();
+    if slot.is_none() {
+        *slot = Some(&LOGGING_HANDLER);
     }
 }
 

@@ -7,7 +7,9 @@ pub trait ArchPlatform {
 }
 
 pub trait ArchDevice {
-    fn console() -> &'static dyn crate::device::char::uart::Uart<Error = ()>;
+    type Console: crate::device::char::uart::Uart;
+
+    fn console() -> &'static Self::Console;
 }
 
 pub trait ArchTrap {
