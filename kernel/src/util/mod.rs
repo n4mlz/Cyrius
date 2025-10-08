@@ -1,5 +1,6 @@
 pub mod lazylock;
 pub mod spinlock;
+pub mod stream;
 
 use crate::arch::{Arch, api::ArchDevice};
 
@@ -14,7 +15,7 @@ pub struct Writer;
 
 impl core::fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        Arch::console().write(s.as_bytes());
+        let _ = Arch::console().write(s.as_bytes());
         Ok(())
     }
 }

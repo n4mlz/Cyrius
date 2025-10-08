@@ -5,6 +5,7 @@ use crate::device::bus::reg::{RegBus, RegSizeBound};
 use crate::device::char::CharDevice;
 use crate::device::char::uart::Uart;
 use crate::device::{Device, DeviceType};
+use crate::util::stream::{StreamError, StreamOps};
 
 const RBR: usize = 0;
 const THR: usize = 0;
@@ -51,8 +52,8 @@ impl<RegSize: RegSizeBound, R: RegBus<RegSize>> Device for Ns16550<RegSize, R> {
     }
 }
 
-impl<RegSize: RegSizeBound, R: RegBus<RegSize>> CharDevice for Ns16550<RegSize, R> {
-    fn read(&self, buf: &mut [u8]) -> usize {
+impl<RegSize: RegSizeBound, R: RegBus<RegSize>> StreamOps for Ns16550<RegSize, R> {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, StreamError> {
         let mut i = 0;
         while i < buf.len() {
             if self.rx_ready() {
@@ -62,18 +63,20 @@ impl<RegSize: RegSizeBound, R: RegBus<RegSize>> CharDevice for Ns16550<RegSize, 
                 break;
             }
         }
-        i
+        Ok(i)
     }
-    fn write(&self, buf: &[u8]) -> usize {
+    fn write(&self, buf: &[u8]) -> Result<usize, StreamError> {
         let mut i = 0;
         while i < buf.len() {
             while !self.tx_ready() {}
             self.out(THR, cast!(buf[i]));
             i += 1;
         }
-        i
+        Ok(i)
     }
 }
+
+impl<RegSize: RegSizeBound, R: RegBus<RegSize>> CharDevice for Ns16550<RegSize, R> {}
 
 impl<RegSize: RegSizeBound, R: RegBus<RegSize>> Uart for Ns16550<RegSize, R> {
     type Error = ();
