@@ -1,3 +1,4 @@
+use core::convert::TryFrom;
 use core::marker::PhantomData;
 
 use x86_64::structures::paging::{
@@ -20,12 +21,26 @@ const P3_SHIFT: usize = PAGE_SHIFT + 2 * LEVEL_STRIDE;
 const P2_SHIFT: usize = PAGE_SHIFT + LEVEL_STRIDE;
 const P5_SHIFT: usize = PAGE_SHIFT + 4 * LEVEL_STRIDE;
 
+const PHYS_ADDR_RANGE_ERR: &str = "physical address exceeds target width";
+const VIRT_ADDR_RANGE_ERR: &str = "virtual address exceeds u64 range";
+
+fn phys_from_x86(addr: x86_64::PhysAddr) -> PhysAddr {
+    let raw = usize::try_from(addr.as_u64()).expect(PHYS_ADDR_RANGE_ERR);
+    PhysAddr::new(raw)
+}
+
+fn x86_from_phys(addr: PhysAddr) -> x86_64::PhysAddr {
+    let raw = u64::try_from(addr.as_raw()).expect(PHYS_ADDR_RANGE_ERR);
+    x86_64::PhysAddr::new(raw)
+}
+
 /// Page table configuration for different paging modes
 #[derive(Debug, Clone, Copy)]
 enum PagingMode {
     /// 4-level paging (48-bit virtual addresses)
     Level4,
     /// 5-level paging (57-bit virtual addresses, LA57)
+    #[allow(dead_code)] // LA57 support is planned but not yet wired up
     Level5,
 }
 
@@ -123,7 +138,7 @@ fn table_flags(perms: MemPerm) -> PageTableFlags {
 /// For 4-level paging: bits 63:47 must all be the same as bit 47
 /// For 5-level paging: bits 63:56 must all be the same as bit 56
 fn is_canonical(addr: VirtAddr, mode: PagingMode) -> bool {
-    let raw = addr.as_raw() as u64;
+    let raw = u64::try_from(addr.as_raw()).expect(VIRT_ADDR_RANGE_ERR);
 
     match mode {
         PagingMode::Level4 => {
@@ -185,7 +200,8 @@ impl<M: PhysMapper> X86PageTable<M> {
     }
 
     fn flush_page(&self, addr: VirtAddr) {
-        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(addr.as_raw() as u64));
+        let raw = u64::try_from(addr.as_raw()).expect(VIRT_ADDR_RANGE_ERR);
+        x86_64::instructions::tlb::flush(x86_64::VirtAddr::new(raw));
     }
 
     /// Flush TLB entries for all pages that could be affected by changes to intermediate tables.
@@ -198,9 +214,7 @@ impl<M: PhysMapper> X86PageTable<M> {
         // For simplicity and correctness, we flush all TLB entries when intermediate
         // table permissions are changed. In a production system, you might want
         // to track affected pages more precisely or use PCID-based invalidation.
-        unsafe {
-            x86_64::instructions::tlb::flush_all();
-        }
+        x86_64::instructions::tlb::flush_all();
     }
 
     /// Check if a page table is empty (all entries are unused).
@@ -209,7 +223,7 @@ impl<M: PhysMapper> X86PageTable<M> {
     ///
     /// Caller must ensure `phys` points to a valid page table frame.
     unsafe fn is_table_empty(&self, phys: PhysAddr) -> bool {
-        let table = self.table_from_phys(phys);
+        let table = unsafe { self.table_from_phys(phys) };
         for i in 0..512 {
             if !table[i].is_unused() {
                 return false;
@@ -251,10 +265,7 @@ impl<M: PhysMapper> X86PageTable<M> {
                 table.zero();
                 table
             };
-            entry.set_addr(
-                x86_64::PhysAddr::new(frame.start.as_raw()),
-                table_flags(perms),
-            );
+            entry.set_addr(x86_from_phys(frame.start), table_flags(perms));
             Ok(table)
         } else {
             let flags = entry.flags();
@@ -278,7 +289,7 @@ impl<M: PhysMapper> X86PageTable<M> {
                 // bits can affect existing translations.
                 self.flush_all_tlb();
             }
-            let next_phys = PhysAddr::new(entry.addr().as_u64());
+            let next_phys = phys_from_x86(entry.addr());
             Ok(unsafe { self.table_from_phys_mut(next_phys) })
         }
     }
@@ -340,7 +351,7 @@ impl<M: PhysMapper> X86PageTable<M> {
                     return Ok(entry);
                 }
 
-                let next_phys = PhysAddr::new(entry.addr().as_u64());
+                let next_phys = phys_from_x86(entry.addr());
                 table_ptr = self.table_from_phys_mut(next_phys) as *mut PageTable;
             }
         }
@@ -372,7 +383,7 @@ impl<M: PhysMapper> X86PageTable<M> {
                 return Err(TranslationError::HugePage);
             }
 
-            let next_phys = PhysAddr::new(entry.addr().as_u64());
+            let next_phys = phys_from_x86(entry.addr());
             table = unsafe { self.table_from_phys(next_phys) };
         }
 
@@ -402,10 +413,7 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
         if !entry.is_unused() {
             return Err(MapError::AlreadyMapped);
         }
-        entry.set_addr(
-            x86_64::PhysAddr::new(frame.start.as_raw()),
-            perm_to_flags(perms),
-        );
+        entry.set_addr(x86_from_phys(frame.start), perm_to_flags(perms));
         self.flush_page(page.start);
         Ok(())
     }
@@ -422,8 +430,11 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
         let mut parent_chain: [(usize, *mut PageTable); 5] = [(0, core::ptr::null_mut()); 5];
         let mut parent_count = 0;
 
-        for (level, &idx) in indices[..self.paging_mode.table_levels()]
+        let levels = self.paging_mode.table_levels();
+
+        for (level, (&idx, slot)) in indices[..levels]
             .iter()
+            .zip(parent_chain.iter_mut())
             .enumerate()
         {
             let table = unsafe { &mut *table_ptr };
@@ -437,7 +448,7 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
                 if entry.flags().contains(PageTableFlags::HUGE_PAGE) {
                     return Err(UnmapError::HugePage);
                 }
-                let phys = PhysAddr::new(entry.addr().as_u64());
+                let phys = phys_from_x86(entry.addr());
                 entry.set_unused();
                 self.flush_page(page.start);
 
@@ -452,10 +463,10 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
             }
 
             // Store parent information for cleanup
-            parent_chain[parent_count] = (idx, table_ptr);
-            parent_count += 1;
+            *slot = (idx, table_ptr);
+            parent_count = level + 1;
 
-            let next_phys = PhysAddr::new(entry.addr().as_u64());
+            let next_phys = phys_from_x86(entry.addr());
             table_ptr = unsafe { self.table_from_phys_mut(next_phys) } as *mut PageTable;
         }
 
@@ -464,8 +475,11 @@ impl<M: PhysMapper> PageTableOps for X86PageTable<M> {
 
     fn translate(&self, addr: VirtAddr) -> Result<PhysAddr, TranslationError> {
         let (entry, offset) = self.walk_for_translation(addr)?;
-        let base = entry.addr().as_u64();
-        Ok(PhysAddr::new(base + offset as u64))
+        let base = phys_from_x86(entry.addr());
+        let phys = base
+            .checked_add(offset)
+            .expect("physical address overflow during translation");
+        Ok(phys)
     }
 
     fn update_permissions(&mut self, page: Page<VirtAddr>, perms: MemPerm) -> Result<(), MapError> {
@@ -501,7 +515,7 @@ impl<M: PhysMapper> X86PageTable<M> {
             let parent_entry = &mut parent_table[parent_index];
 
             // Check if the child table is now empty
-            let child_phys = PhysAddr::new(parent_entry.addr().as_u64());
+            let child_phys = phys_from_x86(parent_entry.addr());
             if unsafe { self.is_table_empty(child_phys) } {
                 // Mark the parent entry as unused
                 parent_entry.set_unused();
@@ -519,6 +533,9 @@ impl<M: PhysMapper> X86PageTable<M> {
 
 #[cfg(test)]
 mod tests {
+    use core::convert::TryFrom;
+
+    use super::{VIRT_ADDR_RANGE_ERR, phys_from_x86};
     use crate::mem::addr::{MemPerm, Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr};
     use crate::mem::paging::{
         FrameAllocator, MapError, PageTableOps, PhysMapper, TranslationError,
@@ -558,11 +575,15 @@ mod tests {
 
     impl PhysMapper for TestMapper {
         unsafe fn phys_to_virt(&self, addr: PhysAddr) -> VirtAddr {
-            VirtAddr::new(self.base + addr.as_raw() as usize)
+            VirtAddr::new(self.base + addr.as_raw())
         }
 
         fn virt_to_phys(&self, addr: VirtAddr) -> PhysAddr {
-            PhysAddr::new((addr.as_raw() - self.base) as u64)
+            let raw = addr
+                .as_raw()
+                .checked_sub(self.base)
+                .expect("virtual address below mapped range");
+            PhysAddr::new(raw)
         }
     }
 
@@ -584,7 +605,7 @@ mod tests {
             if self.next >= FRAME_COUNT {
                 return None;
             }
-            let phys = PhysAddr::new((self.next * FRAME_SIZE) as u64);
+            let phys = PhysAddr::new(self.next * FRAME_SIZE);
             self.next += 1;
             Some(Page::new(phys, PageSize::SIZE_4K))
         }
@@ -726,7 +747,7 @@ mod tests {
                 break;
             }
 
-            current = PhysAddr::new(entry.addr().as_u64());
+            current = phys_from_x86(entry.addr());
         }
     }
 
@@ -777,7 +798,7 @@ mod tests {
                 assert!(flags.contains(PageTableFlags::WRITABLE));
             }
 
-            current = PhysAddr::new(entry.addr().as_u64());
+            current = phys_from_x86(entry.addr());
         }
     }
 
@@ -828,7 +849,7 @@ mod tests {
                 assert!(flags.contains(PageTableFlags::USER_ACCESSIBLE));
             }
 
-            current = PhysAddr::new(entry.addr().as_u64());
+            current = phys_from_x86(entry.addr());
         }
     }
 
@@ -847,7 +868,8 @@ mod tests {
         ];
 
         for &addr in &non_canonical_addrs {
-            let virt = VirtAddr::new(addr as usize);
+            let raw = usize::try_from(addr).expect(VIRT_ADDR_RANGE_ERR);
+            let virt = VirtAddr::new(raw);
             let page = Page::new(virt, PageSize::SIZE_4K);
             let frame = allocator
                 .allocate(PageSize::SIZE_4K)
@@ -870,7 +892,8 @@ mod tests {
         ];
 
         for &addr in &canonical_addrs {
-            let virt = VirtAddr::new(addr as usize);
+            let raw = usize::try_from(addr).expect(VIRT_ADDR_RANGE_ERR);
+            let virt = VirtAddr::new(raw);
             let page = Page::new(virt, PageSize::SIZE_4K);
             let frame = allocator
                 .allocate(PageSize::SIZE_4K)
@@ -888,7 +911,6 @@ mod tests {
     #[kernel_test_case]
     fn recursive_cleanup_empty_tables() {
         let (mut table, mut allocator) = setup();
-        let mapper = TestMapper::new();
 
         // Map multiple pages that share intermediate tables
         let pages = [

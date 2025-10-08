@@ -55,6 +55,12 @@ impl LockedHeap {
     }
 }
 
+impl Default for LockedHeap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut heap = self.heap.lock();
