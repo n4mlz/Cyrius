@@ -31,6 +31,47 @@ pub trait ArchMemory {
     ) -> Result<AddrRange<VirtAddr>, HeapRegionError>;
 }
 
+/// Architecture-specific process context management.
+pub trait ArchProcess {
+    type Context: Clone;
+    type AddressSpace: Clone;
+
+    /// Capture the CPU context described by the current trap frame.
+    fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context;
+
+    /// Restore CPU state into the provided trap frame so that the next `iret` resumes `ctx`.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that `frame` will be returned to the processor without additional
+    /// modifications (other than the architecture-defined epilogue) and that the referenced
+    /// context is valid and trusted.
+    unsafe fn restore_context(
+        frame: &mut crate::trap::CurrentTrapFrame,
+        ctx: &Self::Context,
+    );
+
+    /// Build an initial kernel-mode context for a fresh thread.
+    ///
+    /// # Implicit contract
+    ///
+    /// The caller must ensure that `stack_top` denotes the first unusable address beyond an owned
+    /// stack region mapped with kernel read/write permissions.
+    fn bootstrap_kernel_context(entry: VirtAddr, stack_top: VirtAddr) -> Self::Context;
+
+    /// Return a handle to the currently active address space.
+    fn current_address_space() -> Self::AddressSpace;
+
+    /// Activate a previously captured address space.
+    ///
+    /// # Safety
+    ///
+    /// Switching address spaces may invalidate existing virtual mappings. The caller must ensure
+    /// that kernel text/data remain accessible and that interrupts are either disabled or handlers
+    /// tolerate the transition.
+    unsafe fn activate_address_space(space: &Self::AddressSpace);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptInitError {
     MissingPhysicalMapping,

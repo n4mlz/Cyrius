@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::util::{lazylock::LazyLock, spinlock::SpinLock};
 
 use crate::arch::{Arch, api::ArchTrap};
-use crate::{print, println};
+use crate::println;
 
 pub trait TrapFrame: core::fmt::Debug {
     fn error_code(&self) -> Option<u64> {

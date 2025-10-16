@@ -1,12 +1,13 @@
 pub mod bus;
 pub mod interrupt;
 pub mod mem;
+mod process;
 mod trap;
 
 use bootloader_api::BootInfo;
 
 use crate::arch::api::{
-    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchTrap, HeapRegionError,
+    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchProcess, ArchTrap, HeapRegionError,
     InterruptInitError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
@@ -72,5 +73,33 @@ impl ArchInterrupt for X86_64 {
 
     fn timer_vector() -> u8 {
         interrupt::TIMER_VECTOR
+    }
+}
+
+impl ArchProcess for X86_64 {
+    type Context = process::Context;
+    type AddressSpace = process::AddressSpace;
+
+    fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context {
+        process::Context::from_trap(frame)
+    }
+
+    unsafe fn restore_context(
+        frame: &mut crate::trap::CurrentTrapFrame,
+        ctx: &Self::Context,
+    ) {
+        process::Context::write_to_trap(ctx, frame);
+    }
+
+    fn bootstrap_kernel_context(entry: VirtAddr, stack_top: VirtAddr) -> Self::Context {
+        process::Context::for_kernel(entry, stack_top)
+    }
+
+    fn current_address_space() -> Self::AddressSpace {
+        process::AddressSpace::current()
+    }
+
+    unsafe fn activate_address_space(space: &Self::AddressSpace) {
+        unsafe { process::AddressSpace::activate(space); }
     }
 }

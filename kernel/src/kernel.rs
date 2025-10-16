@@ -11,12 +11,13 @@ pub mod arch;
 pub mod device;
 pub mod interrupt;
 pub mod mem;
+pub mod process;
 #[cfg(test)]
 pub mod test;
 pub mod trap;
 pub mod util;
 
-use core::{arch::asm, panic::PanicInfo};
+use core::panic::PanicInfo;
 
 use crate::arch::{
     Arch,
@@ -24,6 +25,7 @@ use crate::arch::{
 };
 use crate::device::char::uart::Uart;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
+use crate::process::SCHEDULER;
 use crate::mem::allocator;
 use bootloader_api::{
     BootInfo,
@@ -47,12 +49,9 @@ entry_point!(test_kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_runtime(boot_info);
-    println!("Hello, world!");
+    initialise_scheduler();
 
-    // Trigger a breakpoint exception
-    unsafe {
-        asm!("int3");
-    }
+    println!("[kernel] scheduler started");
 
     loop {
         core::hint::spin_loop()
@@ -91,6 +90,45 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     INTERRUPTS.enable();
 }
 
+fn initialise_scheduler() {
+    SCHEDULER
+        .init()
+        .unwrap_or_else(|err| panic!("failed to initialise scheduler: {err:?}"));
+
+    SCHEDULER
+        .spawn_kernel_thread("worker-a", scheduler_worker_a)
+        .unwrap_or_else(|err| panic!("failed to spawn worker-a: {err:?}"));
+
+    SCHEDULER
+        .spawn_kernel_thread("worker-b", scheduler_worker_b)
+        .unwrap_or_else(|err| panic!("failed to spawn worker-b: {err:?}"));
+
+    SCHEDULER
+        .start()
+        .unwrap_or_else(|err| panic!("failed to start scheduler: {err:?}"));
+}
+
+fn scheduler_worker_a() -> ! {
+    scheduler_worker_loop("worker-a", 'A')
+}
+
+fn scheduler_worker_b() -> ! {
+    scheduler_worker_loop("worker-b", 'B')
+}
+
+fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
+    const PRINT_INTERVAL: u64 = 1_000_000;
+    let mut counter: u64 = 0;
+    loop {
+        if counter % PRINT_INTERVAL == 0 {
+            let epoch = counter / PRINT_INTERVAL;
+            println!("[{name}] heartbeat {token}#{epoch}");
+        }
+        counter = counter.wrapping_add(1);
+        core::hint::spin_loop();
+    }
+}
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -119,7 +157,13 @@ fn panic(info: &PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use crate::test::kernel_test_case;
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::{
+        interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks},
+        process::SCHEDULER,
+        test::kernel_test_case,
+    };
 
     #[kernel_test_case]
     fn test1() {
@@ -133,7 +177,6 @@ mod tests {
 
     #[kernel_test_case]
     fn lapic_timer_fires() {
-        use crate::interrupt::{SYSTEM_TIMER, TimerTicks};
         use core::arch::x86_64::_rdtsc;
 
         const TSC_TIMEOUT_CYCLES: u64 = 500_000_000; // ~0.1-0.5s depending on host frequency
@@ -171,6 +214,65 @@ mod tests {
             } else {
                 core::hint::spin_loop();
             }
+        }
+    }
+
+    static TEST_WORKER_A_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static TEST_WORKER_B_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[kernel_test_case]
+    fn scheduler_switches_tasks() {
+        TEST_WORKER_A_COUNTER.store(0, Ordering::Relaxed);
+        TEST_WORKER_B_COUNTER.store(0, Ordering::Relaxed);
+
+        SCHEDULER
+            .init()
+            .expect("scheduler initialisation failed");
+
+        SCHEDULER
+            .spawn_kernel_thread("test-worker-a", scheduler_test_worker_a)
+            .expect("spawn worker a");
+        SCHEDULER
+            .spawn_kernel_thread("test-worker-b", scheduler_test_worker_b)
+            .expect("spawn worker b");
+
+        SCHEDULER.start().expect("start scheduler");
+
+        const TARGET: u32 = 32;
+        let mut spins: u64 = 0;
+        while (TEST_WORKER_A_COUNTER.load(Ordering::Relaxed) < TARGET
+            || TEST_WORKER_B_COUNTER.load(Ordering::Relaxed) < TARGET)
+            && spins < 5_000_000
+        {
+            spins = spins.wrapping_add(1);
+            core::hint::spin_loop();
+        }
+
+        let worker_a = TEST_WORKER_A_COUNTER.load(Ordering::Relaxed);
+        let worker_b = TEST_WORKER_B_COUNTER.load(Ordering::Relaxed);
+        assert!(worker_a >= TARGET, "worker-a observed {worker_a} iterations");
+        assert!(worker_b >= TARGET, "worker-b observed {worker_b} iterations");
+
+        SCHEDULER.shutdown();
+
+        SYSTEM_TIMER
+            .start_periodic(super::SYSTEM_TIMER_TICKS)
+            .expect("failed to restart system timer after scheduler test");
+        INTERRUPTS.enable();
+    }
+
+    fn scheduler_test_worker_a() -> ! {
+        scheduler_test_worker_loop(&TEST_WORKER_A_COUNTER)
+    }
+
+    fn scheduler_test_worker_b() -> ! {
+        scheduler_test_worker_loop(&TEST_WORKER_B_COUNTER)
+    }
+
+    fn scheduler_test_worker_loop(counter: &'static AtomicU32) -> ! {
+        loop {
+            counter.fetch_add(1, Ordering::Relaxed);
+            core::hint::spin_loop();
         }
     }
 }
