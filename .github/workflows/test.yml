@@ -29,35 +29,35 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: sccache
-
-      - name: Define APT packages
-        run: echo qemu-system-x86 > packages.txt
-
       - name: Week salt
         id: week_salt
         run: echo "value=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare APT cache dir
-        run: mkdir -p .apt-cache
-
-      - name: Restore APT cache
+      - name: Cache APT lists (weekly)
         uses: actions/cache@v4
         with:
-          path: .apt-cache
-          key: apt-${{ runner.os }}-${{ runner.image }}-${{ hashFiles('packages.txt') }}-${{ steps.week_salt.outputs.value }}
+          path: /var/lib/apt/lists
+          key: apt-lists-${{ runner.os }}-${{ steps.week_salt.outputs.value }}
           restore-keys: |
-            apt-${{ runner.os }}-
+            apt-lists-${{ runner.os }}-
 
-      - name: Seed system APT cache
-        run: sudo cp -n .apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
-
-      - name: Install packages (QEMU)
+      - name: Install APT packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          APT_PACKAGES: |
+            # List dependent packages here, one per line
+            qemu-system-x86
+        shell: bash
         run: |
-          sudo apt-get update -yq
-          sudo apt-get install -yq --no-install-recommends $(cat packages.txt)
-
-      - name: Collect downloaded .deb
-        run: sudo cp -n /var/cache/apt/archives/*.deb .apt-cache/ 2>/dev/null || true
+          set -euo pipefail
+          # build space-separated list from multiline
+          pkgs="$(printf '%s\n' "$APT_PACKAGES" | sed '/^\s*#/d;/^\s*$/d' | xargs || true)"
+          [ -n "$pkgs" ] || exit 0
+          # try install without updating
+          if ! sudo apt-get install -yq --no-install-recommends $pkgs; then
+            sudo apt-get update -yq
+            sudo apt-get install -yq --no-install-recommends $pkgs
+          fi
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
