@@ -37,18 +37,27 @@ jobs:
         id: week_salt
         run: echo "value=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache APT .deb archives
+      - name: Prepare APT cache dir
+        run: mkdir -p .apt-cache
+
+      - name: Restore APT cache
         uses: actions/cache@v4
         with:
-          path: /var/cache/apt/archives
+          path: .apt-cache
           key: apt-${{ runner.os }}-${{ runner.image }}-${{ hashFiles('packages.txt') }}-${{ steps.week_salt.outputs.value }}
           restore-keys: |
             apt-${{ runner.os }}-
+
+      - name: Seed system APT cache
+        run: sudo cp -n .apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
 
       - name: Install packages (QEMU)
         run: |
           sudo apt-get update -yq
           sudo apt-get install -yq --no-install-recommends $(cat packages.txt)
+
+      - name: Collect downloaded .deb
+        run: sudo cp -n /var/cache/apt/archives/*.deb .apt-cache/ 2>/dev/null || true
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
