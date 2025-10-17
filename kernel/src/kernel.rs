@@ -11,6 +11,7 @@ pub mod arch;
 pub mod device;
 pub mod interrupt;
 pub mod mem;
+pub mod process;
 pub mod task;
 #[cfg(test)]
 pub mod test;
@@ -161,6 +162,7 @@ mod tests {
 
     use crate::{
         interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks},
+        process::PROCESS_TABLE,
         task::SCHEDULER,
         test::kernel_test_case,
     };
@@ -217,41 +219,58 @@ mod tests {
         }
     }
 
-    static TEST_WORKER_A_COUNTER: AtomicU32 = AtomicU32::new(0);
-    static TEST_WORKER_B_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static TEST_KERNEL_TASK_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static TEST_EXTRA_TASK_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     #[kernel_test_case]
     fn scheduler_switches_tasks() {
-        TEST_WORKER_A_COUNTER.store(0, Ordering::Relaxed);
-        TEST_WORKER_B_COUNTER.store(0, Ordering::Relaxed);
+        TEST_KERNEL_TASK_COUNTER.store(0, Ordering::Relaxed);
+        TEST_EXTRA_TASK_COUNTER.store(0, Ordering::Relaxed);
 
         SCHEDULER
             .init()
             .expect("scheduler initialisation failed");
 
+        let kernel_pid = PROCESS_TABLE
+            .kernel_process_id()
+            .expect("kernel process not initialised");
+
+        let extra_pid = PROCESS_TABLE
+            .create_kernel_process("test-process")
+            .expect("create extra process");
+
         SCHEDULER
-            .spawn_kernel_thread("test-worker-a", scheduler_test_worker_a)
-            .expect("spawn worker a");
+            .spawn_kernel_thread("test-worker-kernel", scheduler_test_kernel_task)
+            .expect("spawn kernel task");
         SCHEDULER
-            .spawn_kernel_thread("test-worker-b", scheduler_test_worker_b)
-            .expect("spawn worker b");
+            .spawn_kernel_thread_for_process(extra_pid, "test-worker-extra", scheduler_test_extra_task)
+            .expect("spawn extra process task");
 
         SCHEDULER.start().expect("start scheduler");
 
         const TARGET: u32 = 32;
         let mut spins: u64 = 0;
-        while (TEST_WORKER_A_COUNTER.load(Ordering::Relaxed) < TARGET
-            || TEST_WORKER_B_COUNTER.load(Ordering::Relaxed) < TARGET)
+        while (TEST_KERNEL_TASK_COUNTER.load(Ordering::Relaxed) < TARGET
+            || TEST_EXTRA_TASK_COUNTER.load(Ordering::Relaxed) < TARGET)
             && spins < 5_000_000
         {
             spins = spins.wrapping_add(1);
             core::hint::spin_loop();
         }
 
-        let worker_a = TEST_WORKER_A_COUNTER.load(Ordering::Relaxed);
-        let worker_b = TEST_WORKER_B_COUNTER.load(Ordering::Relaxed);
-        assert!(worker_a >= TARGET, "worker-a observed {worker_a} iterations");
-        assert!(worker_b >= TARGET, "worker-b observed {worker_b} iterations");
+        let kernel_iters = TEST_KERNEL_TASK_COUNTER.load(Ordering::Relaxed);
+        let extra_iters = TEST_EXTRA_TASK_COUNTER.load(Ordering::Relaxed);
+        assert!(kernel_iters >= TARGET, "kernel task observed {kernel_iters} iterations");
+        assert!(extra_iters >= TARGET, "extra task observed {extra_iters} iterations");
+
+        let kernel_tasks = PROCESS_TABLE
+            .task_count(kernel_pid)
+            .expect("kernel process missing");
+        let extra_tasks = PROCESS_TABLE
+            .task_count(extra_pid)
+            .expect("extra process missing");
+        assert!(kernel_tasks >= 3, "kernel process task count {kernel_tasks} < 3");
+        assert_eq!(extra_tasks, 1, "extra process task count {extra_tasks} != 1");
 
         SCHEDULER.shutdown();
 
@@ -261,12 +280,12 @@ mod tests {
         INTERRUPTS.enable();
     }
 
-    fn scheduler_test_worker_a() -> ! {
-        scheduler_test_worker_loop(&TEST_WORKER_A_COUNTER)
+    fn scheduler_test_kernel_task() -> ! {
+        scheduler_test_worker_loop(&TEST_KERNEL_TASK_COUNTER)
     }
 
-    fn scheduler_test_worker_b() -> ! {
-        scheduler_test_worker_loop(&TEST_WORKER_B_COUNTER)
+    fn scheduler_test_extra_task() -> ! {
+        scheduler_test_worker_loop(&TEST_EXTRA_TASK_COUNTER)
     }
 
     fn scheduler_test_worker_loop(counter: &'static AtomicU32) -> ! {

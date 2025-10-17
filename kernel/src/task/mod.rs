@@ -9,6 +9,7 @@ use crate::arch::{
 };
 use crate::interrupt::{InterruptServiceRoutine, TimerError, SYSTEM_TIMER};
 use crate::mem::addr::VirtAddr;
+use crate::process::{ProcessError, ProcessId, PROCESS_TABLE};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
@@ -44,13 +45,24 @@ impl Scheduler {
             return Ok(());
         }
 
-        let bootstrap = TaskControl::bootstrap(0, "bootstrap");
+        let kernel_pid = PROCESS_TABLE
+            .init_kernel()
+            .map_err(SchedulerError::Process)?;
+        inner.kernel_process = Some(kernel_pid);
+
+        let bootstrap = TaskControl::bootstrap(0, kernel_pid, "bootstrap");
+        PROCESS_TABLE
+            .attach_task(kernel_pid, bootstrap.id)
+            .map_err(SchedulerError::Process)?;
         inner.current = Some(bootstrap.id);
         inner.tasks.push(bootstrap);
 
         let idle_id = inner.next_tid;
-        let idle = TaskControl::idle(idle_id).map_err(SchedulerError::Spawn)?;
-        inner.next_tid += 1;
+        let idle = TaskControl::idle(idle_id, kernel_pid).map_err(SchedulerError::Spawn)?;
+        PROCESS_TABLE
+            .attach_task(kernel_pid, idle_id)
+            .map_err(SchedulerError::Process)?;
+        inner.next_tid = idle_id.checked_add(1).expect("task id overflow");
         inner.idle = Some(idle.id);
         inner.tasks.push(idle);
         inner.initialised = true;
@@ -62,14 +74,44 @@ impl Scheduler {
         name: &'static str,
         entry: KernelTaskEntry,
     ) -> Result<TaskId, SpawnError> {
+        let process = {
+            let inner = self.inner.lock();
+            if !inner.initialised {
+                return Err(SpawnError::SchedulerNotReady);
+            }
+            inner.kernel_process.ok_or(SpawnError::Process(ProcessError::NotInitialised))?
+        };
+
+        self.spawn_kernel_thread_for_process(process, name, entry)
+    }
+
+    pub fn spawn_kernel_thread_for_process(
+        &self,
+        process: ProcessId,
+        name: &'static str,
+        entry: KernelTaskEntry,
+    ) -> Result<TaskId, SpawnError> {
         let mut inner = self.inner.lock();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
 
+        self.spawn_task_locked(&mut inner, process, name, entry)
+    }
+
+    fn spawn_task_locked(
+        &self,
+        inner: &mut SchedulerInner,
+        process: ProcessId,
+        name: &'static str,
+        entry: KernelTaskEntry,
+    ) -> Result<TaskId, SpawnError> {
         let id = inner.next_tid;
-        let task = TaskControl::kernel(id, name, entry)?;
-        inner.next_tid += 1;
+        let task = TaskControl::kernel(id, process, name, entry)?;
+        PROCESS_TABLE
+            .attach_task(process, id)
+            .map_err(SpawnError::Process)?;
+        inner.next_tid = id.checked_add(1).expect("task id overflow");
         inner.ready.push_back(id);
         inner.tasks.push(task);
         Ok(id)
@@ -173,12 +215,14 @@ pub enum SchedulerError {
     AlreadyStarted,
     Timer(TimerError),
     Spawn(SpawnError),
+    Process(ProcessError),
 }
 
 #[derive(Debug)]
 pub enum SpawnError {
     OutOfMemory,
     SchedulerNotReady,
+    Process(ProcessError),
 }
 
 struct SchedulerInner {
@@ -188,6 +232,7 @@ struct SchedulerInner {
     idle: Option<TaskId>,
     next_tid: TaskId,
     initialised: bool,
+    kernel_process: Option<ProcessId>,
 }
 
 impl SchedulerInner {
@@ -199,6 +244,7 @@ impl SchedulerInner {
             idle: None,
             next_tid: 1,
             initialised: false,
+            kernel_process: None,
         }
     }
 
@@ -217,6 +263,7 @@ enum TaskState {
 struct TaskControl {
     id: TaskId,
     _name: &'static str,
+    _process: ProcessId,
     context: <Arch as ArchTask>::Context,
     address_space: <Arch as ArchTask>::AddressSpace,
     _stack: Option<KernelStack>,
@@ -224,7 +271,12 @@ struct TaskControl {
 }
 
 impl TaskControl {
-    fn kernel(id: TaskId, name: &'static str, entry: KernelTaskEntry) -> Result<Self, SpawnError> {
+    fn kernel(
+        id: TaskId,
+        process: ProcessId,
+        name: &'static str,
+        entry: KernelTaskEntry,
+    ) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(entry as usize);
@@ -234,6 +286,7 @@ impl TaskControl {
         Ok(Self {
             id,
             _name: name,
+            _process: process,
             context,
             address_space,
             _stack: Some(stack),
@@ -241,7 +294,7 @@ impl TaskControl {
         })
     }
 
-    fn idle(id: TaskId) -> Result<Self, SpawnError> {
+    fn idle(id: TaskId, process: ProcessId) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(idle_thread as usize);
@@ -251,6 +304,7 @@ impl TaskControl {
         Ok(Self {
             id,
             _name: "idle",
+            _process: process,
             context,
             address_space,
             _stack: Some(stack),
@@ -258,10 +312,11 @@ impl TaskControl {
         })
     }
 
-    fn bootstrap(id: TaskId, name: &'static str) -> Self {
+    fn bootstrap(id: TaskId, process: ProcessId, name: &'static str) -> Self {
         Self {
             id,
             _name: name,
+            _process: process,
             context: <Arch as ArchTask>::Context::default(),
             address_space: <Arch as ArchTask>::current_address_space(),
             _stack: None,
