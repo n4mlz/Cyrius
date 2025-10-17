@@ -9,9 +9,26 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 7.5
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: '2G'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: ${{ runner.os }}-sccache-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-sccache-
+
+      - name: Install sccache
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
 
       - name: Install packages (QEMU)
         run: |
@@ -35,15 +52,19 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Cache target
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-target-
+          key: ${{ runner.os }}-target-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-target-
 
       - name: Build xtask tooling
         run: cargo build -p xtask
