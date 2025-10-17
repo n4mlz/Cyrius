@@ -9,14 +9,55 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 7.5
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: '2G'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install packages (QEMU)
+      - name: Cache sccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: ${{ runner.os }}-sccache-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-sccache-
+
+      - name: Install sccache
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+      - name: Week salt
+        id: week_salt
+        run: echo "value=$(date +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache APT lists (weekly)
+        uses: actions/cache@v4
+        with:
+          path: /var/lib/apt/lists
+          key: apt-lists-${{ runner.os }}-${{ steps.week_salt.outputs.value }}
+          restore-keys: |
+            apt-lists-${{ runner.os }}-
+
+      - name: Install APT packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          APT_PACKAGES: |
+            # List dependent packages here, one per line
+            qemu-system-x86
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          set -euo pipefail
+          # build space-separated list from multiline
+          pkgs="$(printf '%s\n' "$APT_PACKAGES" | sed '/^\s*#/d;/^\s*$/d' | xargs || true)"
+          [ -n "$pkgs" ] || exit 0
+          # try install without updating
+          if ! sudo apt-get install -yq --no-install-recommends $pkgs; then
+            sudo apt-get update -yq
+            sudo apt-get install -yq --no-install-recommends $pkgs
+          fi
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
@@ -35,15 +76,19 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-cargo-
 
       - name: Cache target
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-target-
+          key: ${{ runner.os }}-target-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ hashFiles('rust-toolchain.toml') }}-
+            ${{ runner.os }}-target-
 
       - name: Build xtask tooling
         run: cargo build -p xtask
