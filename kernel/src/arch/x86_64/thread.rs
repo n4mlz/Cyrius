@@ -14,7 +14,7 @@ const STACK_ALIGNMENT: u64 = 16;
 const RFLAGS_RESERVED: u64 = 1 << 1;
 const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
 
-/// Saved CPU context for a suspended kernel task (thread).
+/// Saved CPU context for a suspended kernel thread.
 #[derive(Clone)]
 pub struct Context {
     regs: GeneralRegisters,

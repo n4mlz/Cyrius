@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{
     Arch,
-    api::{ArchInterrupt, ArchTask},
+    api::{ArchInterrupt, ArchThread},
 };
 use crate::interrupt::{InterruptServiceRoutine, TimerError, SYSTEM_TIMER};
 use crate::mem::addr::VirtAddr;
@@ -13,8 +13,8 @@ use crate::process::{ProcessError, ProcessId, PROCESS_TABLE};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
-pub type TaskId = u64;
-pub type KernelTaskEntry = fn() -> !;
+pub type ThreadId = u64;
+pub type KernelThreadEntry = fn() -> !;
 
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const KERNEL_STACK_ALIGN: usize = 16;
@@ -50,21 +50,21 @@ impl Scheduler {
             .map_err(SchedulerError::Process)?;
         inner.kernel_process = Some(kernel_pid);
 
-        let bootstrap = TaskControl::bootstrap(0, kernel_pid, "bootstrap");
+        let bootstrap = ThreadControl::bootstrap(0, kernel_pid, "bootstrap");
         PROCESS_TABLE
-            .attach_task(kernel_pid, bootstrap.id)
+            .attach_thread(kernel_pid, bootstrap.id)
             .map_err(SchedulerError::Process)?;
         inner.current = Some(bootstrap.id);
-        inner.tasks.push(bootstrap);
+        inner.threads.push(bootstrap);
 
         let idle_id = inner.next_tid;
-        let idle = TaskControl::idle(idle_id, kernel_pid).map_err(SchedulerError::Spawn)?;
+        let idle = ThreadControl::idle(idle_id, kernel_pid).map_err(SchedulerError::Spawn)?;
         PROCESS_TABLE
-            .attach_task(kernel_pid, idle_id)
+            .attach_thread(kernel_pid, idle_id)
             .map_err(SchedulerError::Process)?;
-        inner.next_tid = idle_id.checked_add(1).expect("task id overflow");
+        inner.next_tid = idle_id.checked_add(1).expect("thread id overflow");
         inner.idle = Some(idle.id);
-        inner.tasks.push(idle);
+        inner.threads.push(idle);
         inner.initialised = true;
         Ok(())
     }
@@ -72,8 +72,8 @@ impl Scheduler {
     pub fn spawn_kernel_thread(
         &self,
         name: &'static str,
-        entry: KernelTaskEntry,
-    ) -> Result<TaskId, SpawnError> {
+        entry: KernelThreadEntry,
+    ) -> Result<ThreadId, SpawnError> {
         let process = {
             let inner = self.inner.lock();
             if !inner.initialised {
@@ -89,31 +89,31 @@ impl Scheduler {
         &self,
         process: ProcessId,
         name: &'static str,
-        entry: KernelTaskEntry,
-    ) -> Result<TaskId, SpawnError> {
+        entry: KernelThreadEntry,
+    ) -> Result<ThreadId, SpawnError> {
         let mut inner = self.inner.lock();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        self.spawn_task_locked(&mut inner, process, name, entry)
+        self.spawn_thread_locked(&mut inner, process, name, entry)
     }
 
-    fn spawn_task_locked(
+    fn spawn_thread_locked(
         &self,
         inner: &mut SchedulerInner,
         process: ProcessId,
         name: &'static str,
-        entry: KernelTaskEntry,
-    ) -> Result<TaskId, SpawnError> {
+        entry: KernelThreadEntry,
+    ) -> Result<ThreadId, SpawnError> {
         let id = inner.next_tid;
-        let task = TaskControl::kernel(id, process, name, entry)?;
+        let thread = ThreadControl::kernel(id, process, name, entry)?;
         PROCESS_TABLE
-            .attach_task(process, id)
+            .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
-        inner.next_tid = id.checked_add(1).expect("task id overflow");
+        inner.next_tid = id.checked_add(1).expect("thread id overflow");
         inner.ready.push_back(id);
-        inner.tasks.push(task);
+        inner.threads.push(thread);
         Ok(id)
     }
 
@@ -164,17 +164,17 @@ impl Scheduler {
                 None => return,
             };
 
-            let idle_id = inner.idle.expect("idle task must exist");
+            let idle_id = inner.idle.expect("idle thread must exist");
 
-            if let Some(task) = inner.task_mut(current_id) {
-                let saved = <Arch as ArchTask>::save_context(frame);
-                task.context = saved;
+            if let Some(thread) = inner.thread_mut(current_id) {
+                let saved = <Arch as ArchThread>::save_context(frame);
+                thread.context = saved;
 
                 if current_id != idle_id {
-                    task.state = TaskState::Ready;
+                    thread.state = ThreadState::Ready;
                     inner.ready.push_back(current_id);
                 } else {
-                    task.state = TaskState::Idle;
+                    thread.state = ThreadState::Idle;
                 }
             }
 
@@ -182,23 +182,23 @@ impl Scheduler {
             inner.current = Some(next_id);
 
             let (ctx, space) = inner
-                .task_mut(next_id)
-                .map(|task| {
-                    task.state = if next_id == idle_id {
-                        TaskState::Idle
+                .thread_mut(next_id)
+                .map(|thread| {
+                    thread.state = if next_id == idle_id {
+                        ThreadState::Idle
                     } else {
-                        TaskState::Running
+                        ThreadState::Running
                     };
-                    (task.context.clone(), task.address_space)
+                    (thread.context.clone(), thread.address_space)
                 })
-                .expect("next task must exist");
+                .expect("next thread must exist");
 
             (ctx, space)
         };
 
         unsafe {
-            <Arch as ArchTask>::activate_address_space(&next_space);
-            <Arch as ArchTask>::restore_context(frame, &next_ctx);
+            <Arch as ArchThread>::activate_address_space(&next_space);
+            <Arch as ArchThread>::restore_context(frame, &next_ctx);
         }
     }
 }
@@ -226,11 +226,11 @@ pub enum SpawnError {
 }
 
 struct SchedulerInner {
-    tasks: Vec<TaskControl>,
-    ready: VecDeque<TaskId>,
-    current: Option<TaskId>,
-    idle: Option<TaskId>,
-    next_tid: TaskId,
+    threads: Vec<ThreadControl>,
+    ready: VecDeque<ThreadId>,
+    current: Option<ThreadId>,
+    idle: Option<ThreadId>,
+    next_tid: ThreadId,
     initialised: bool,
     kernel_process: Option<ProcessId>,
 }
@@ -238,7 +238,7 @@ struct SchedulerInner {
 impl SchedulerInner {
     const fn new() -> Self {
         Self {
-            tasks: Vec::new(),
+            threads: Vec::new(),
             ready: VecDeque::new(),
             current: None,
             idle: None,
@@ -248,40 +248,40 @@ impl SchedulerInner {
         }
     }
 
-    fn task_mut(&mut self, id: TaskId) -> Option<&mut TaskControl> {
-        self.tasks.iter_mut().find(|task| task.id == id)
+    fn thread_mut(&mut self, id: ThreadId) -> Option<&mut ThreadControl> {
+        self.threads.iter_mut().find(|thread| thread.id == id)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TaskState {
+enum ThreadState {
     Ready,
     Running,
     Idle,
 }
 
-struct TaskControl {
-    id: TaskId,
+struct ThreadControl {
+    id: ThreadId,
     _name: &'static str,
     _process: ProcessId,
-    context: <Arch as ArchTask>::Context,
-    address_space: <Arch as ArchTask>::AddressSpace,
+    context: <Arch as ArchThread>::Context,
+    address_space: <Arch as ArchThread>::AddressSpace,
     _stack: Option<KernelStack>,
-    state: TaskState,
+    state: ThreadState,
 }
 
-impl TaskControl {
+impl ThreadControl {
     fn kernel(
-        id: TaskId,
+        id: ThreadId,
         process: ProcessId,
         name: &'static str,
-        entry: KernelTaskEntry,
+        entry: KernelThreadEntry,
     ) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(entry as usize);
-        let context = <Arch as ArchTask>::bootstrap_kernel_context(entry_addr, stack_top);
-        let address_space = <Arch as ArchTask>::current_address_space();
+        let context = <Arch as ArchThread>::bootstrap_kernel_context(entry_addr, stack_top);
+        let address_space = <Arch as ArchThread>::current_address_space();
 
         Ok(Self {
             id,
@@ -290,16 +290,16 @@ impl TaskControl {
             context,
             address_space,
             _stack: Some(stack),
-            state: TaskState::Ready,
+            state: ThreadState::Ready,
         })
     }
 
-    fn idle(id: TaskId, process: ProcessId) -> Result<Self, SpawnError> {
+    fn idle(id: ThreadId, process: ProcessId) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(idle_thread as usize);
-        let context = <Arch as ArchTask>::bootstrap_kernel_context(entry_addr, stack_top);
-        let address_space = <Arch as ArchTask>::current_address_space();
+        let context = <Arch as ArchThread>::bootstrap_kernel_context(entry_addr, stack_top);
+        let address_space = <Arch as ArchThread>::current_address_space();
 
         Ok(Self {
             id,
@@ -308,19 +308,19 @@ impl TaskControl {
             context,
             address_space,
             _stack: Some(stack),
-            state: TaskState::Idle,
+            state: ThreadState::Idle,
         })
     }
 
-    fn bootstrap(id: TaskId, process: ProcessId, name: &'static str) -> Self {
+    fn bootstrap(id: ThreadId, process: ProcessId, name: &'static str) -> Self {
         Self {
             id,
             _name: name,
             _process: process,
-            context: <Arch as ArchTask>::Context::default(),
-            address_space: <Arch as ArchTask>::current_address_space(),
+            context: <Arch as ArchThread>::Context::default(),
+            address_space: <Arch as ArchThread>::current_address_space(),
             _stack: None,
-            state: TaskState::Running,
+            state: ThreadState::Running,
         }
     }
 }

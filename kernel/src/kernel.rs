@@ -12,7 +12,7 @@ pub mod device;
 pub mod interrupt;
 pub mod mem;
 pub mod process;
-pub mod task;
+pub mod thread;
 #[cfg(test)]
 pub mod test;
 pub mod trap;
@@ -26,7 +26,7 @@ use crate::arch::{
 };
 use crate::device::char::uart::Uart;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
-use crate::task::SCHEDULER;
+use crate::thread::SCHEDULER;
 use crate::mem::allocator;
 use bootloader_api::{
     BootInfo,
@@ -163,7 +163,7 @@ mod tests {
     use crate::{
         interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks},
         process::PROCESS_TABLE,
-        task::SCHEDULER,
+        thread::SCHEDULER,
         test::kernel_test_case,
     };
 
@@ -219,13 +219,13 @@ mod tests {
         }
     }
 
-    static TEST_KERNEL_TASK_COUNTER: AtomicU32 = AtomicU32::new(0);
-    static TEST_EXTRA_TASK_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static TEST_KERNEL_THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
+    static TEST_EXTRA_THREAD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     #[kernel_test_case]
-    fn scheduler_switches_tasks() {
-        TEST_KERNEL_TASK_COUNTER.store(0, Ordering::Relaxed);
-        TEST_EXTRA_TASK_COUNTER.store(0, Ordering::Relaxed);
+    fn scheduler_switches_threads() {
+        TEST_KERNEL_THREAD_COUNTER.store(0, Ordering::Relaxed);
+        TEST_EXTRA_THREAD_COUNTER.store(0, Ordering::Relaxed);
 
         SCHEDULER
             .init()
@@ -240,37 +240,37 @@ mod tests {
             .expect("create extra process");
 
         SCHEDULER
-            .spawn_kernel_thread("test-worker-kernel", scheduler_test_kernel_task)
-            .expect("spawn kernel task");
+            .spawn_kernel_thread("test-worker-kernel", scheduler_test_kernel_thread)
+            .expect("spawn kernel thread");
         SCHEDULER
-            .spawn_kernel_thread_for_process(extra_pid, "test-worker-extra", scheduler_test_extra_task)
-            .expect("spawn extra process task");
+            .spawn_kernel_thread_for_process(extra_pid, "test-worker-extra", scheduler_test_extra_thread)
+            .expect("spawn extra process thread");
 
         SCHEDULER.start().expect("start scheduler");
 
         const TARGET: u32 = 32;
         let mut spins: u64 = 0;
-        while (TEST_KERNEL_TASK_COUNTER.load(Ordering::Relaxed) < TARGET
-            || TEST_EXTRA_TASK_COUNTER.load(Ordering::Relaxed) < TARGET)
+        while (TEST_KERNEL_THREAD_COUNTER.load(Ordering::Relaxed) < TARGET
+            || TEST_EXTRA_THREAD_COUNTER.load(Ordering::Relaxed) < TARGET)
             && spins < 5_000_000
         {
             spins = spins.wrapping_add(1);
             core::hint::spin_loop();
         }
 
-        let kernel_iters = TEST_KERNEL_TASK_COUNTER.load(Ordering::Relaxed);
-        let extra_iters = TEST_EXTRA_TASK_COUNTER.load(Ordering::Relaxed);
-        assert!(kernel_iters >= TARGET, "kernel task observed {kernel_iters} iterations");
-        assert!(extra_iters >= TARGET, "extra task observed {extra_iters} iterations");
+        let kernel_iters = TEST_KERNEL_THREAD_COUNTER.load(Ordering::Relaxed);
+        let extra_iters = TEST_EXTRA_THREAD_COUNTER.load(Ordering::Relaxed);
+        assert!(kernel_iters >= TARGET, "kernel thread observed {kernel_iters} iterations");
+        assert!(extra_iters >= TARGET, "extra thread observed {extra_iters} iterations");
 
-        let kernel_tasks = PROCESS_TABLE
-            .task_count(kernel_pid)
+        let kernel_threads = PROCESS_TABLE
+            .thread_count(kernel_pid)
             .expect("kernel process missing");
-        let extra_tasks = PROCESS_TABLE
-            .task_count(extra_pid)
+        let extra_threads = PROCESS_TABLE
+            .thread_count(extra_pid)
             .expect("extra process missing");
-        assert!(kernel_tasks >= 3, "kernel process task count {kernel_tasks} < 3");
-        assert_eq!(extra_tasks, 1, "extra process task count {extra_tasks} != 1");
+        assert!(kernel_threads >= 3, "kernel process thread count {kernel_threads} < 3");
+        assert_eq!(extra_threads, 1, "extra process thread count {extra_threads} != 1");
 
         SCHEDULER.shutdown();
 
@@ -280,12 +280,12 @@ mod tests {
         INTERRUPTS.enable();
     }
 
-    fn scheduler_test_kernel_task() -> ! {
-        scheduler_test_worker_loop(&TEST_KERNEL_TASK_COUNTER)
+    fn scheduler_test_kernel_thread() -> ! {
+        scheduler_test_worker_loop(&TEST_KERNEL_THREAD_COUNTER)
     }
 
-    fn scheduler_test_extra_task() -> ! {
-        scheduler_test_worker_loop(&TEST_EXTRA_TASK_COUNTER)
+    fn scheduler_test_extra_thread() -> ! {
+        scheduler_test_worker_loop(&TEST_EXTRA_THREAD_COUNTER)
     }
 
     fn scheduler_test_worker_loop(counter: &'static AtomicU32) -> ! {

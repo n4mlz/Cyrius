@@ -1,13 +1,13 @@
 pub mod bus;
 pub mod interrupt;
 pub mod mem;
-mod task;
+mod thread;
 mod trap;
 
 use bootloader_api::BootInfo;
 
 use crate::arch::api::{
-    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchTask, ArchTrap, HeapRegionError,
+    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchThread, ArchTrap, HeapRegionError,
     InterruptInitError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
@@ -76,30 +76,30 @@ impl ArchInterrupt for X86_64 {
     }
 }
 
-impl ArchTask for X86_64 {
-    type Context = task::Context;
-    type AddressSpace = task::AddressSpace;
+impl ArchThread for X86_64 {
+    type Context = thread::Context;
+    type AddressSpace = thread::AddressSpace;
 
     fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context {
-        task::Context::from_trap(frame)
+        thread::Context::from_trap(frame)
     }
 
     unsafe fn restore_context(
         frame: &mut crate::trap::CurrentTrapFrame,
         ctx: &Self::Context,
     ) {
-        task::Context::write_to_trap(ctx, frame);
+        thread::Context::write_to_trap(ctx, frame);
     }
 
     fn bootstrap_kernel_context(entry: VirtAddr, stack_top: VirtAddr) -> Self::Context {
-        task::Context::for_kernel(entry, stack_top)
+        thread::Context::for_kernel(entry, stack_top)
     }
 
     fn current_address_space() -> Self::AddressSpace {
-        task::AddressSpace::current()
+        thread::AddressSpace::current()
     }
 
     unsafe fn activate_address_space(space: &Self::AddressSpace) {
-        unsafe { task::AddressSpace::activate(space); }
+        unsafe { thread::AddressSpace::activate(space); }
     }
 }

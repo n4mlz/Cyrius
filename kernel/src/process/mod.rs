@@ -1,7 +1,8 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::{Arch, api::ArchTask};
+use crate::arch::{Arch, api::ArchThread};
+use crate::thread::ThreadId;
 use crate::util::spinlock::SpinLock;
 
 pub type ProcessId = u64;
@@ -11,16 +12,16 @@ pub enum ProcessError {
     AlreadyInitialised,
     NotInitialised,
     NotFound,
-    DuplicateTask,
-    TaskNotAttached,
+    DuplicateThread,
+    ThreadNotAttached,
 }
 
-/// Global table that tracks processes and their associated tasks.
+/// Global table that tracks processes and their associated threads.
 ///
 /// # Implementation note
 ///
 /// At this point, each process does not have an individual address space and all share the kernel's address space.
-/// When implementing userland in the future, it will be necessary to properly duplicate and isolate `ArchTask::AddressSpace` here.
+/// When implementing userland in the future, it will be necessary to properly duplicate and isolate `ArchThread::AddressSpace` here.
 pub struct ProcessTable {
     inner: SpinLock<ProcessTableInner>,
     initialised: AtomicBool,
@@ -78,7 +79,7 @@ impl ProcessTable {
         Ok(pid)
     }
 
-    pub fn attach_task(&self, pid: ProcessId, tid: u64) -> Result<(), ProcessError> {
+    pub fn attach_thread(&self, pid: ProcessId, tid: ThreadId) -> Result<(), ProcessError> {
         if !self.initialised.load(Ordering::Acquire) {
             return Err(ProcessError::NotInitialised);
         }
@@ -86,15 +87,15 @@ impl ProcessTable {
         let mut inner = self.inner.lock();
         let process = inner.process_mut(pid).ok_or(ProcessError::NotFound)?;
 
-        if process.tasks.contains(&tid) {
-            return Err(ProcessError::DuplicateTask);
+        if process.threads.contains(&tid) {
+            return Err(ProcessError::DuplicateThread);
         }
 
-        process.tasks.push(tid);
+        process.threads.push(tid);
         Ok(())
     }
 
-    pub fn detach_task(&self, pid: ProcessId, tid: u64) -> Result<(), ProcessError> {
+    pub fn detach_thread(&self, pid: ProcessId, tid: ThreadId) -> Result<(), ProcessError> {
         if !self.initialised.load(Ordering::Acquire) {
             return Err(ProcessError::NotInitialised);
         }
@@ -102,17 +103,17 @@ impl ProcessTable {
         let mut inner = self.inner.lock();
         let process = inner.process_mut(pid).ok_or(ProcessError::NotFound)?;
 
-        if let Some(index) = process.tasks.iter().position(|&id| id == tid) {
-            process.tasks.swap_remove(index);
+        if let Some(index) = process.threads.iter().position(|&id| id == tid) {
+            process.threads.swap_remove(index);
             Ok(())
         } else {
-            Err(ProcessError::TaskNotAttached)
+            Err(ProcessError::ThreadNotAttached)
         }
     }
 
-    pub fn task_count(&self, pid: ProcessId) -> Option<usize> {
+    pub fn thread_count(&self, pid: ProcessId) -> Option<usize> {
         let inner = self.inner.lock();
-        inner.process(pid).map(|proc| proc.tasks.len())
+        inner.process(pid).map(|proc| proc.threads.len())
     }
 }
 
@@ -151,9 +152,9 @@ impl ProcessTableInner {
 struct Process {
     id: ProcessId,
     _name: &'static str,
-    _address_space: <Arch as ArchTask>::AddressSpace,
+    _address_space: <Arch as ArchThread>::AddressSpace,
     _state: ProcessState,
-    tasks: Vec<u64>,
+    threads: Vec<ThreadId>,
 }
 
 impl Process {
@@ -161,9 +162,9 @@ impl Process {
         Self {
             id,
             _name: name,
-            _address_space: <Arch as ArchTask>::current_address_space(),
+            _address_space: <Arch as ArchThread>::current_address_space(),
             _state: ProcessState::Active,
-            tasks: Vec::new(),
+            threads: Vec::new(),
         }
     }
 }
