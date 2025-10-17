@@ -11,7 +11,7 @@ pub mod arch;
 pub mod device;
 pub mod interrupt;
 pub mod mem;
-pub mod process;
+pub mod task;
 #[cfg(test)]
 pub mod test;
 pub mod trap;
@@ -25,7 +25,7 @@ use crate::arch::{
 };
 use crate::device::char::uart::Uart;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
-use crate::process::SCHEDULER;
+use crate::task::SCHEDULER;
 use crate::mem::allocator;
 use bootloader_api::{
     BootInfo,
@@ -161,7 +161,7 @@ mod tests {
 
     use crate::{
         interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks},
-        process::SCHEDULER,
+        task::SCHEDULER,
         test::kernel_test_case,
     };
 

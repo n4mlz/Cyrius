@@ -31,8 +31,8 @@ pub trait ArchMemory {
     ) -> Result<AddrRange<VirtAddr>, HeapRegionError>;
 }
 
-/// Architecture-specific process context management.
-pub trait ArchProcess {
+/// Architecture-specific task (thread) context management.
+pub trait ArchTask {
     type Context: Clone;
     type AddressSpace: Clone;
 

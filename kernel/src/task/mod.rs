@@ -5,18 +5,20 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{
     Arch,
-    api::{ArchInterrupt, ArchProcess},
+    api::{ArchInterrupt, ArchTask},
 };
-use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
+use crate::interrupt::{InterruptServiceRoutine, TimerError, SYSTEM_TIMER};
 use crate::mem::addr::VirtAddr;
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
-pub type ProcessId = u64;
-pub type KernelEntry = fn() -> !;
+pub type TaskId = u64;
+pub type KernelTaskEntry = fn() -> !;
 
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const KERNEL_STACK_ALIGN: usize = 16;
+
+/// Lightweight kernel-managed execution unit representing a single thread of execution.
 
 pub static SCHEDULER: Scheduler = Scheduler::new();
 static SCHEDULER_DISPATCH: SchedulerDispatch = SchedulerDispatch;
@@ -42,15 +44,15 @@ impl Scheduler {
             return Ok(());
         }
 
-        let bootstrap = Process::bootstrap(0, "bootstrap");
+        let bootstrap = TaskControl::bootstrap(0, "bootstrap");
         inner.current = Some(bootstrap.id);
-        inner.processes.push(bootstrap);
+        inner.tasks.push(bootstrap);
 
-        let idle_id = inner.next_pid;
-        let idle = Process::idle(idle_id).map_err(SchedulerError::Spawn)?;
-        inner.next_pid += 1;
+        let idle_id = inner.next_tid;
+        let idle = TaskControl::idle(idle_id).map_err(SchedulerError::Spawn)?;
+        inner.next_tid += 1;
         inner.idle = Some(idle.id);
-        inner.processes.push(idle);
+        inner.tasks.push(idle);
         inner.initialised = true;
         Ok(())
     }
@@ -58,18 +60,18 @@ impl Scheduler {
     pub fn spawn_kernel_thread(
         &self,
         name: &'static str,
-        entry: KernelEntry,
-    ) -> Result<ProcessId, SpawnError> {
+        entry: KernelTaskEntry,
+    ) -> Result<TaskId, SpawnError> {
         let mut inner = self.inner.lock();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        let id = inner.next_pid;
-        let process = Process::kernel(id, name, entry)?;
-        inner.next_pid += 1;
+        let id = inner.next_tid;
+        let task = TaskControl::kernel(id, name, entry)?;
+        inner.next_tid += 1;
         inner.ready.push_back(id);
-        inner.processes.push(process);
+        inner.tasks.push(task);
         Ok(id)
     }
 
@@ -120,17 +122,17 @@ impl Scheduler {
                 None => return,
             };
 
-            let idle_id = inner.idle.expect("idle process must exist");
+            let idle_id = inner.idle.expect("idle task must exist");
 
-            if let Some(proc) = inner.process_mut(current_id) {
-                let saved = <Arch as ArchProcess>::save_context(frame);
-                proc.context = saved;
+            if let Some(task) = inner.task_mut(current_id) {
+                let saved = <Arch as ArchTask>::save_context(frame);
+                task.context = saved;
 
                 if current_id != idle_id {
-                    proc.state = ProcessState::Ready;
+                    task.state = TaskState::Ready;
                     inner.ready.push_back(current_id);
                 } else {
-                    proc.state = ProcessState::Idle;
+                    task.state = TaskState::Idle;
                 }
             }
 
@@ -138,23 +140,23 @@ impl Scheduler {
             inner.current = Some(next_id);
 
             let (ctx, space) = inner
-                .process_mut(next_id)
-                .map(|proc| {
-                    proc.state = if next_id == idle_id {
-                        ProcessState::Idle
+                .task_mut(next_id)
+                .map(|task| {
+                    task.state = if next_id == idle_id {
+                        TaskState::Idle
                     } else {
-                        ProcessState::Running
+                        TaskState::Running
                     };
-                    (proc.context.clone(), proc.address_space)
+                    (task.context.clone(), task.address_space)
                 })
-                .expect("next process must exist");
+                .expect("next task must exist");
 
             (ctx, space)
         };
 
         unsafe {
-            <Arch as ArchProcess>::activate_address_space(&next_space);
-            <Arch as ArchProcess>::restore_context(frame, &next_ctx);
+            <Arch as ArchTask>::activate_address_space(&next_space);
+            <Arch as ArchTask>::restore_context(frame, &next_ctx);
         }
     }
 }
@@ -180,54 +182,54 @@ pub enum SpawnError {
 }
 
 struct SchedulerInner {
-    processes: Vec<Process>,
-    ready: VecDeque<ProcessId>,
-    current: Option<ProcessId>,
-    idle: Option<ProcessId>,
-    next_pid: ProcessId,
+    tasks: Vec<TaskControl>,
+    ready: VecDeque<TaskId>,
+    current: Option<TaskId>,
+    idle: Option<TaskId>,
+    next_tid: TaskId,
     initialised: bool,
 }
 
 impl SchedulerInner {
     const fn new() -> Self {
         Self {
-            processes: Vec::new(),
+            tasks: Vec::new(),
             ready: VecDeque::new(),
             current: None,
             idle: None,
-            next_pid: 1,
+            next_tid: 1,
             initialised: false,
         }
     }
 
-    fn process_mut(&mut self, id: ProcessId) -> Option<&mut Process> {
-        self.processes.iter_mut().find(|proc| proc.id == id)
+    fn task_mut(&mut self, id: TaskId) -> Option<&mut TaskControl> {
+        self.tasks.iter_mut().find(|task| task.id == id)
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ProcessState {
+enum TaskState {
     Ready,
     Running,
     Idle,
 }
 
-struct Process {
-    id: ProcessId,
+struct TaskControl {
+    id: TaskId,
     _name: &'static str,
-    context: <Arch as ArchProcess>::Context,
-    address_space: <Arch as ArchProcess>::AddressSpace,
+    context: <Arch as ArchTask>::Context,
+    address_space: <Arch as ArchTask>::AddressSpace,
     _stack: Option<KernelStack>,
-    state: ProcessState,
+    state: TaskState,
 }
 
-impl Process {
-    fn kernel(id: ProcessId, name: &'static str, entry: KernelEntry) -> Result<Self, SpawnError> {
+impl TaskControl {
+    fn kernel(id: TaskId, name: &'static str, entry: KernelTaskEntry) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(entry as usize);
-        let context = <Arch as ArchProcess>::bootstrap_kernel_context(entry_addr, stack_top);
-        let address_space = <Arch as ArchProcess>::current_address_space();
+        let context = <Arch as ArchTask>::bootstrap_kernel_context(entry_addr, stack_top);
+        let address_space = <Arch as ArchTask>::current_address_space();
 
         Ok(Self {
             id,
@@ -235,16 +237,16 @@ impl Process {
             context,
             address_space,
             _stack: Some(stack),
-            state: ProcessState::Ready,
+            state: TaskState::Ready,
         })
     }
 
-    fn idle(id: ProcessId) -> Result<Self, SpawnError> {
+    fn idle(id: TaskId) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(idle_thread as usize);
-        let context = <Arch as ArchProcess>::bootstrap_kernel_context(entry_addr, stack_top);
-        let address_space = <Arch as ArchProcess>::current_address_space();
+        let context = <Arch as ArchTask>::bootstrap_kernel_context(entry_addr, stack_top);
+        let address_space = <Arch as ArchTask>::current_address_space();
 
         Ok(Self {
             id,
@@ -252,18 +254,18 @@ impl Process {
             context,
             address_space,
             _stack: Some(stack),
-            state: ProcessState::Idle,
+            state: TaskState::Idle,
         })
     }
 
-    fn bootstrap(id: ProcessId, name: &'static str) -> Self {
+    fn bootstrap(id: TaskId, name: &'static str) -> Self {
         Self {
             id,
             _name: name,
-            context: <Arch as ArchProcess>::Context::default(),
-            address_space: <Arch as ArchProcess>::current_address_space(),
+            context: <Arch as ArchTask>::Context::default(),
+            address_space: <Arch as ArchTask>::current_address_space(),
             _stack: None,
-            state: ProcessState::Running,
+            state: TaskState::Running,
         }
     }
 }
