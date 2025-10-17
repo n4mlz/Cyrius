@@ -3,7 +3,7 @@ mod gdt;
 mod idt;
 mod stubs;
 
-pub use context::TrapFrame;
+pub use context::{GeneralRegisters, TrapFrame};
 
 use crate::trap::{TrapInfo, TrapOrigin};
 

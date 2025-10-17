@@ -4,7 +4,7 @@ pub(super) const GENERAL_REGS_SIZE: usize = core::mem::size_of::<GeneralRegister
 pub(super) const ORIGINAL_ERROR_OFFSET: usize = 8 + GENERAL_REGS_SIZE;
 
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct GeneralRegisters {
     pub rax: u64,
     pub rbx: u64,
@@ -23,8 +23,36 @@ pub struct GeneralRegisters {
     pub r15: u64,
 }
 
+impl GeneralRegisters {
+    pub const fn zero() -> Self {
+        Self {
+            rax: 0,
+            rbx: 0,
+            rcx: 0,
+            rdx: 0,
+            rsi: 0,
+            rdi: 0,
+            rbp: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r11: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+        }
+    }
+}
+
+impl Default for GeneralRegisters {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TrapFrame {
     pub error_code: u64,
     pub regs: GeneralRegisters,

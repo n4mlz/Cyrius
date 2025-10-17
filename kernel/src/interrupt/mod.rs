@@ -8,7 +8,7 @@ use crate::arch::{
 };
 use crate::trap::{self, CurrentTrapFrame, TrapFrame, TrapHandler, TrapInfo, TrapOrigin};
 use crate::util::spinlock::SpinLock;
-use crate::{print, println};
+use crate::println;
 
 pub mod timer;
 
