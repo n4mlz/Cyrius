@@ -20,7 +20,6 @@ const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const KERNEL_STACK_ALIGN: usize = 16;
 
 /// Lightweight kernel-managed execution unit representing a single thread of execution.
-
 pub static SCHEDULER: Scheduler = Scheduler::new();
 static SCHEDULER_DISPATCH: SchedulerDispatch = SchedulerDispatch;
 
@@ -29,6 +28,12 @@ struct SchedulerDispatch;
 pub struct Scheduler {
     inner: SpinLock<SchedulerInner>,
     started: AtomicBool,
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Scheduler {

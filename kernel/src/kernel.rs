@@ -121,7 +121,7 @@ fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
     const PRINT_INTERVAL: u64 = 1_000_000;
     let mut counter: u64 = 0;
     loop {
-        if counter % PRINT_INTERVAL == 0 {
+        if counter.is_multiple_of(PRINT_INTERVAL) {
             let epoch = counter / PRINT_INTERVAL;
             println!("[{name}] heartbeat {token}#{epoch}");
         }
