@@ -7,9 +7,9 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, ArchThread},
 };
-use crate::interrupt::{InterruptServiceRoutine, TimerError, SYSTEM_TIMER};
+use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
 use crate::mem::addr::VirtAddr;
-use crate::process::{ProcessError, ProcessId, PROCESS_TABLE};
+use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
@@ -79,7 +79,9 @@ impl Scheduler {
             if !inner.initialised {
                 return Err(SpawnError::SchedulerNotReady);
             }
-            inner.kernel_process.ok_or(SpawnError::Process(ProcessError::NotInitialised))?
+            inner
+                .kernel_process
+                .ok_or(SpawnError::Process(ProcessError::NotInitialised))?
         };
 
         self.spawn_kernel_thread_for_process(process, name, entry)

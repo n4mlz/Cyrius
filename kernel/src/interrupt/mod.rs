@@ -6,9 +6,9 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, InterruptInitError},
 };
+use crate::println;
 use crate::trap::{self, CurrentTrapFrame, TrapFrame, TrapHandler, TrapInfo, TrapOrigin};
 use crate::util::spinlock::SpinLock;
-use crate::println;
 
 pub mod timer;
 

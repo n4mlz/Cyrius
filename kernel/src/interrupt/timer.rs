@@ -4,9 +4,9 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, TimerDriver, TimerError, TimerMode, TimerTicks},
 };
+use crate::println;
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
-use crate::println;
 
 use super::{INTERRUPTS, InterruptError, InterruptServiceRoutine};
 

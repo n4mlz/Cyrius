@@ -12,9 +12,9 @@ pub mod device;
 pub mod interrupt;
 pub mod mem;
 pub mod process;
-pub mod thread;
 #[cfg(test)]
 pub mod test;
+pub mod thread;
 pub mod trap;
 pub mod util;
 
@@ -26,8 +26,8 @@ use crate::arch::{
 };
 use crate::device::char::uart::Uart;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
-use crate::thread::SCHEDULER;
 use crate::mem::allocator;
+use crate::thread::SCHEDULER;
 use bootloader_api::{
     BootInfo,
     config::{BootloaderConfig, Mapping},
@@ -163,8 +163,8 @@ mod tests {
     use crate::{
         interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks},
         process::PROCESS_TABLE,
-        thread::SCHEDULER,
         test::kernel_test_case,
+        thread::SCHEDULER,
     };
 
     #[kernel_test_case]
@@ -227,9 +227,7 @@ mod tests {
         TEST_KERNEL_THREAD_COUNTER.store(0, Ordering::Relaxed);
         TEST_EXTRA_THREAD_COUNTER.store(0, Ordering::Relaxed);
 
-        SCHEDULER
-            .init()
-            .expect("scheduler initialisation failed");
+        SCHEDULER.init().expect("scheduler initialisation failed");
 
         let kernel_pid = PROCESS_TABLE
             .kernel_process_id()
@@ -243,7 +241,11 @@ mod tests {
             .spawn_kernel_thread("test-worker-kernel", scheduler_test_kernel_thread)
             .expect("spawn kernel thread");
         SCHEDULER
-            .spawn_kernel_thread_for_process(extra_pid, "test-worker-extra", scheduler_test_extra_thread)
+            .spawn_kernel_thread_for_process(
+                extra_pid,
+                "test-worker-extra",
+                scheduler_test_extra_thread,
+            )
             .expect("spawn extra process thread");
 
         SCHEDULER.start().expect("start scheduler");
@@ -260,8 +262,14 @@ mod tests {
 
         let kernel_iters = TEST_KERNEL_THREAD_COUNTER.load(Ordering::Relaxed);
         let extra_iters = TEST_EXTRA_THREAD_COUNTER.load(Ordering::Relaxed);
-        assert!(kernel_iters >= TARGET, "kernel thread observed {kernel_iters} iterations");
-        assert!(extra_iters >= TARGET, "extra thread observed {extra_iters} iterations");
+        assert!(
+            kernel_iters >= TARGET,
+            "kernel thread observed {kernel_iters} iterations"
+        );
+        assert!(
+            extra_iters >= TARGET,
+            "extra thread observed {extra_iters} iterations"
+        );
 
         let kernel_threads = PROCESS_TABLE
             .thread_count(kernel_pid)
@@ -269,8 +277,14 @@ mod tests {
         let extra_threads = PROCESS_TABLE
             .thread_count(extra_pid)
             .expect("extra process missing");
-        assert!(kernel_threads >= 3, "kernel process thread count {kernel_threads} < 3");
-        assert_eq!(extra_threads, 1, "extra process thread count {extra_threads} != 1");
+        assert!(
+            kernel_threads >= 3,
+            "kernel process thread count {kernel_threads} < 3"
+        );
+        assert_eq!(
+            extra_threads, 1,
+            "extra process thread count {extra_threads} != 1"
+        );
 
         SCHEDULER.shutdown();
 

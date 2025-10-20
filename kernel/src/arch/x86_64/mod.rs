@@ -84,10 +84,7 @@ impl ArchThread for X86_64 {
         thread::Context::from_trap(frame)
     }
 
-    unsafe fn restore_context(
-        frame: &mut crate::trap::CurrentTrapFrame,
-        ctx: &Self::Context,
-    ) {
+    unsafe fn restore_context(frame: &mut crate::trap::CurrentTrapFrame, ctx: &Self::Context) {
         thread::Context::write_to_trap(ctx, frame);
     }
 
@@ -100,6 +97,8 @@ impl ArchThread for X86_64 {
     }
 
     unsafe fn activate_address_space(space: &Self::AddressSpace) {
-        unsafe { thread::AddressSpace::activate(space); }
+        unsafe {
+            thread::AddressSpace::activate(space);
+        }
     }
 }
