@@ -46,10 +46,7 @@ pub trait ArchThread {
     /// Callers must ensure that `frame` will be returned to the processor without additional
     /// modifications (other than the architecture-defined epilogue) and that the referenced
     /// context is valid and trusted.
-    unsafe fn restore_context(
-        frame: &mut crate::trap::CurrentTrapFrame,
-        ctx: &Self::Context,
-    );
+    unsafe fn restore_context(frame: &mut crate::trap::CurrentTrapFrame, ctx: &Self::Context);
 
     /// Build an initial kernel-mode context for a fresh thread.
     ///

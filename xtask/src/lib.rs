@@ -173,7 +173,7 @@ fn parse_executable_from_json(output: &str) -> Option<PathBuf> {
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
         })
-        .last()
+        .next_back()
 }
 
 fn configure_test_build(cmd: &mut Command, opts: &TestBuildOptions) {

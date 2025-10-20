@@ -7,9 +7,9 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, ArchThread},
 };
-use crate::interrupt::{InterruptServiceRoutine, TimerError, SYSTEM_TIMER};
+use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
 use crate::mem::addr::VirtAddr;
-use crate::process::{ProcessError, ProcessId, PROCESS_TABLE};
+use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
@@ -20,7 +20,6 @@ const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const KERNEL_STACK_ALIGN: usize = 16;
 
 /// Lightweight kernel-managed execution unit representing a single thread of execution.
-
 pub static SCHEDULER: Scheduler = Scheduler::new();
 static SCHEDULER_DISPATCH: SchedulerDispatch = SchedulerDispatch;
 
@@ -29,6 +28,12 @@ struct SchedulerDispatch;
 pub struct Scheduler {
     inner: SpinLock<SchedulerInner>,
     started: AtomicBool,
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Scheduler {
@@ -79,7 +84,9 @@ impl Scheduler {
             if !inner.initialised {
                 return Err(SpawnError::SchedulerNotReady);
             }
-            inner.kernel_process.ok_or(SpawnError::Process(ProcessError::NotInitialised))?
+            inner
+                .kernel_process
+                .ok_or(SpawnError::Process(ProcessError::NotInitialised))?
         };
 
         self.spawn_kernel_thread_for_process(process, name, entry)

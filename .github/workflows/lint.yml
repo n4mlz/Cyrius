@@ -1,0 +1,53 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Add required rust components
+        run: |
+          rustup component add --toolchain nightly rustfmt clippy rust-src llvm-tools-preview
+
+      - name: Show rustc version
+        run: rustc -Vv && cargo -V
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-target-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (host targets)
+        run: cargo clippy --workspace --all-targets --exclude kernel -- -D warnings
+
+      - name: Clippy (kernel)
+        run: >
+          cargo clippy -p kernel --target x86_64-unknown-none
+          -Z build-std=core,alloc,compiler_builtins
+          -Z build-std-features=compiler-builtins-mem
+          -- -D warnings
