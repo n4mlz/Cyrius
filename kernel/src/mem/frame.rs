@@ -126,13 +126,13 @@ impl BootInfoFrameAllocator {
         let mut merged: Vec<AddrRange<PhysAddr>> = Vec::with_capacity(self.reserved.len());
 
         for range in self.reserved.drain(..) {
-            if let Some(last) = merged.last_mut() {
-                if range.start.as_raw() <= last.end.as_raw() {
-                    if range.end.as_raw() > last.end.as_raw() {
-                        last.end = range.end;
-                    }
-                    continue;
+            if let Some(last) = merged.last_mut()
+                && range.start.as_raw() <= last.end.as_raw()
+            {
+                if range.end.as_raw() > last.end.as_raw() {
+                    last.end = range.end;
                 }
+                continue;
             }
             merged.push(range);
         }
@@ -143,10 +143,7 @@ impl BootInfoFrameAllocator {
     fn allocate_from_current(&mut self) -> Option<Page<PhysAddr>> {
         loop {
             let phys = {
-                let cursor = match self.current.as_mut() {
-                    Some(cursor) => cursor,
-                    None => return None,
-                };
+                let cursor = self.current.as_mut()?;
 
                 if cursor.exhausted() {
                     self.current = None;
@@ -251,13 +248,13 @@ impl<'a> core::ops::Deref for FrameAllocatorGuard<'a> {
     type Target = BootInfoFrameAllocator;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { (&*self.guard).assume_init_ref() }
+        unsafe { (*self.guard).assume_init_ref() }
     }
 }
 
 impl<'a> core::ops::DerefMut for FrameAllocatorGuard<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { (&mut *self.guard).assume_init_mut() }
+        unsafe { (*self.guard).assume_init_mut() }
     }
 }
 

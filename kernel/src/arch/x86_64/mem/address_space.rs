@@ -40,6 +40,13 @@ impl AddressSpace {
         self.flags
     }
 
+    /// Load this address space's root page table into `CR3`.
+    ///
+    /// # Safety
+    /// The caller must ensure that `self` represents a valid address space whose
+    /// root table remains resident and exclusively owned for the duration of the
+    /// switch. Interrupt handlers and concurrent cores must not mutate the same
+    /// page tables while the transition is in progress.
     pub unsafe fn activate(&self) {
         let frame = phys_frame_from_page(self.root);
         unsafe { Cr3::write(frame, self.flags) };
@@ -86,8 +93,7 @@ pub fn create_empty() -> Result<Arc<AddressSpace>, AddressSpaceError> {
         .allocate(PageSize::SIZE_4K)
         .ok_or(AddressSpaceError::FrameAllocationFailed)?;
     let mapper = manager::phys_mapper();
-    let table = unsafe { X86PageTable::new(frame, mapper) };
-    drop(table);
+    unsafe { X86PageTable::new(frame, mapper) };
 
     let (_, flags) = Cr3::read();
     Ok(Arc::new(AddressSpace::new(frame, flags, true)))
