@@ -55,7 +55,11 @@ impl Scheduler {
             .map_err(SchedulerError::Process)?;
         inner.kernel_process = Some(kernel_pid);
 
-        let bootstrap = ThreadControl::bootstrap(0, kernel_pid, "bootstrap");
+        let kernel_space = PROCESS_TABLE
+            .address_space(kernel_pid)
+            .ok_or(SchedulerError::Process(ProcessError::NotFound))?;
+
+        let bootstrap = ThreadControl::bootstrap(0, kernel_pid, "bootstrap", kernel_space.clone());
         PROCESS_TABLE
             .attach_thread(kernel_pid, bootstrap.id)
             .map_err(SchedulerError::Process)?;
@@ -63,7 +67,8 @@ impl Scheduler {
         inner.threads.push(bootstrap);
 
         let idle_id = inner.next_tid;
-        let idle = ThreadControl::idle(idle_id, kernel_pid).map_err(SchedulerError::Spawn)?;
+        let idle = ThreadControl::idle(idle_id, kernel_pid, kernel_space.clone())
+            .map_err(SchedulerError::Spawn)?;
         PROCESS_TABLE
             .attach_thread(kernel_pid, idle_id)
             .map_err(SchedulerError::Process)?;
@@ -114,7 +119,10 @@ impl Scheduler {
         entry: KernelThreadEntry,
     ) -> Result<ThreadId, SpawnError> {
         let id = inner.next_tid;
-        let thread = ThreadControl::kernel(id, process, name, entry)?;
+        let address_space = PROCESS_TABLE
+            .address_space(process)
+            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
+        let thread = ThreadControl::kernel(id, process, name, entry, address_space)?;
         PROCESS_TABLE
             .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
@@ -196,7 +204,7 @@ impl Scheduler {
                     } else {
                         ThreadState::Running
                     };
-                    (thread.context.clone(), thread.address_space)
+                    (thread.context.clone(), thread.address_space.clone())
                 })
                 .expect("next thread must exist");
 
@@ -283,12 +291,12 @@ impl ThreadControl {
         process: ProcessId,
         name: &'static str,
         entry: KernelThreadEntry,
+        address_space: <Arch as ArchThread>::AddressSpace,
     ) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(entry as usize);
         let context = <Arch as ArchThread>::bootstrap_kernel_context(entry_addr, stack_top);
-        let address_space = <Arch as ArchThread>::current_address_space();
 
         Ok(Self {
             id,
@@ -301,12 +309,15 @@ impl ThreadControl {
         })
     }
 
-    fn idle(id: ThreadId, process: ProcessId) -> Result<Self, SpawnError> {
+    fn idle(
+        id: ThreadId,
+        process: ProcessId,
+        address_space: <Arch as ArchThread>::AddressSpace,
+    ) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
         let entry_addr = VirtAddr::new(idle_thread as usize);
         let context = <Arch as ArchThread>::bootstrap_kernel_context(entry_addr, stack_top);
-        let address_space = <Arch as ArchThread>::current_address_space();
 
         Ok(Self {
             id,
@@ -319,13 +330,18 @@ impl ThreadControl {
         })
     }
 
-    fn bootstrap(id: ThreadId, process: ProcessId, name: &'static str) -> Self {
+    fn bootstrap(
+        id: ThreadId,
+        process: ProcessId,
+        name: &'static str,
+        address_space: <Arch as ArchThread>::AddressSpace,
+    ) -> Self {
         Self {
             id,
             _name: name,
             _process: process,
             context: <Arch as ArchThread>::Context::default(),
-            address_space: <Arch as ArchThread>::current_address_space(),
+            address_space,
             _stack: None,
             state: ThreadState::Running,
         }

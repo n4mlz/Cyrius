@@ -1,11 +1,9 @@
+use alloc::sync::Arc;
 use core::convert::TryFrom;
 
-use x86_64::{
-    instructions::segmentation::{CS, SS, Segment},
-    registers::control::{Cr3, Cr3Flags},
-    structures::paging::PhysFrame,
-};
+use x86_64::instructions::segmentation::{CS, SS, Segment};
 
+use crate::arch::x86_64::mem::address_space::{self, AddressSpace as InnerAddressSpace};
 use crate::mem::addr::VirtAddr;
 
 use super::trap::{GeneralRegisters, TrapFrame};
@@ -78,25 +76,28 @@ impl Default for Context {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct AddressSpace {
-    frame: PhysFrame,
-    flags: Cr3Flags,
+    inner: Arc<InnerAddressSpace>,
 }
 
 impl AddressSpace {
     pub fn current() -> Self {
-        let (frame, flags) = Cr3::read();
-        Self { frame, flags }
+        Self {
+            inner: address_space::kernel_address_space(),
+        }
     }
 
-    /// # Safety
-    ///
-    /// Callers must guarantee that the supplied address space keeps the kernel's critical code and
-    /// data mapped and that switching CR3 does not invalidate the current stack frame. Typically
-    /// interrupts should be disabled around the transition.
-    pub unsafe fn activate(space: &Self) {
-        unsafe { Cr3::write(space.frame, space.flags) };
+    pub fn from_arc(inner: Arc<InnerAddressSpace>) -> Self {
+        Self { inner }
+    }
+
+    pub fn inner(&self) -> &Arc<InnerAddressSpace> {
+        &self.inner
+    }
+
+    pub unsafe fn activate(&self) {
+        unsafe { self.inner.activate() };
     }
 }
 

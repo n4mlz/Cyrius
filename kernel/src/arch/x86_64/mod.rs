@@ -38,6 +38,10 @@ impl ArchTrap for X86_64 {
     fn init_traps() {
         trap::init();
     }
+
+    fn handle_exception(info: crate::trap::TrapInfo, frame: &mut Self::Frame) -> bool {
+        trap::handle_exception(info, frame)
+    }
 }
 
 impl ArchMemory for X86_64 {
@@ -98,7 +102,7 @@ impl ArchThread for X86_64 {
 
     unsafe fn activate_address_space(space: &Self::AddressSpace) {
         unsafe {
-            thread::AddressSpace::activate(space);
+            space.activate();
         }
     }
 }

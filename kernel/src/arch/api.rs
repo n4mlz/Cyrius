@@ -1,6 +1,7 @@
 use bootloader_api::BootInfo;
 
 use crate::mem::addr::{AddrRange, VirtAddr};
+use crate::trap::TrapInfo;
 
 pub trait ArchPlatform {
     fn name() -> &'static str;
@@ -16,6 +17,11 @@ pub trait ArchTrap {
     type Frame: crate::trap::TrapFrame;
 
     fn init_traps();
+
+    /// Attempt to handle an exception; return `true` if fully handled.
+    fn handle_exception(_info: TrapInfo, _frame: &mut Self::Frame) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

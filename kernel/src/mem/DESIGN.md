@@ -24,6 +24,16 @@
 - `PageTableOps` encapsulates map/unmap/translate/update operations plus root frame retrieval, forming the contract between high-level memory management and architecture-specific paging implementations.
 - Error enums (`MapError`, `UnmapError`, `TranslationError`) separate common failure modes such as non-canonical addresses, unsupported huge pages, or frame allocation failure.
 
+## Physical Frame Manager (`frame.rs`, `manager.rs`)
+- `BootInfoFrameAllocator` consumes the bootloader-provided memory map, aligns usable regions to 4 KiB and excludes reserved spans (e.g. the kernel heap) before handing out frames.
+- Freed frames are recycled lazily; callers interact with the allocator through `mem::manager::frame_allocator()`, which returns a guard implementing `FrameAllocator`.
+- `mem::manager::init` initialises both the frame allocator and an offset-based `PhysMapper`; it must run during early boot before any address space manipulation.
+
+## Address Space Handles
+- Architecture-specific address spaces are surfaced as reference-counted handles (currently via `arch::x86_64::mem::address_space`). Callers use `with_table` to mutate mappings under a spin lock while borrowing the global frame allocator.
+- The scheduler and process layer clone these handles so CR3 switches operate on concrete state instead of raw control-register snapshots.
+- Dropping an owned address space releases the root frame back to the allocator, ensuring tests can provision and tear down isolated spaces safely.
+
 ## Synchronisation and Safety
 - Spin locks protect mutable kernel heap state; callers are expected to keep critical sections minimal and respect no_std constraints (no blocking locks).
 - Address manipulation functions assert power-of-two alignment and panic on arithmetic overflow to catch programmer errors early.

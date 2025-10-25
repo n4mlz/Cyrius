@@ -191,6 +191,23 @@ impl<M: PhysMapper> X86PageTable<M> {
         }
     }
 
+    /// Construct a page table wrapper around an existing root without clearing it.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `root_frame` refers to a valid level-4/level-5 page table
+    /// that remains accessible through `mapper` for the lifetime of the returned instance.
+    pub unsafe fn from_existing(root_frame: Page<PhysAddr>, mapper: M) -> Self {
+        let root_virt = unsafe { mapper.phys_to_virt(root_frame.start) };
+        Self {
+            mapper,
+            root_frame,
+            root_virt,
+            paging_mode: unsafe { PagingMode::detect() },
+            _marker: PhantomData,
+        }
+    }
+
     fn root_table_mut(&mut self) -> &mut PageTable {
         unsafe { &mut *(self.root_virt.into_mut_ptr() as *mut PageTable) }
     }
