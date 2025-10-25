@@ -115,6 +115,11 @@ impl ProcessTable {
         let inner = self.inner.lock();
         inner.process(pid).map(|proc| proc.threads.len())
     }
+
+    pub fn address_space(&self, pid: ProcessId) -> Option<<Arch as ArchThread>::AddressSpace> {
+        let inner = self.inner.lock();
+        inner.process(pid).map(|proc| proc.address_space.clone())
+    }
 }
 
 impl Default for ProcessTable {
@@ -152,7 +157,7 @@ impl ProcessTableInner {
 struct Process {
     id: ProcessId,
     _name: &'static str,
-    _address_space: <Arch as ArchThread>::AddressSpace,
+    address_space: <Arch as ArchThread>::AddressSpace,
     _state: ProcessState,
     threads: Vec<ThreadId>,
 }
@@ -162,7 +167,7 @@ impl Process {
         Self {
             id,
             _name: name,
-            _address_space: <Arch as ArchThread>::current_address_space(),
+            address_space: <Arch as ArchThread>::current_address_space(),
             _state: ProcessState::Active,
             threads: Vec::new(),
         }
@@ -172,4 +177,25 @@ impl Process {
 #[derive(Clone, Copy, Debug)]
 enum ProcessState {
     Active,
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+    use crate::test::kernel_test_case;
+
+    #[kernel_test_case]
+    fn kernel_process_shares_address_space() {
+        let pid = PROCESS_TABLE.init_kernel().expect("kernel init");
+        let a = PROCESS_TABLE
+            .address_space(pid)
+            .expect("kernel address space");
+        let b = PROCESS_TABLE
+            .address_space(pid)
+            .expect("kernel address space clone");
+
+        assert!(Arc::ptr_eq(a.inner(), b.inner()));
+    }
 }

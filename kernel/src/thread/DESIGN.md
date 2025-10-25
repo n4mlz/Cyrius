@@ -13,14 +13,15 @@
 - Shutdown stops the timer and re-disables interrupts. Multiprocessor support and per-CPU schedulers remain future work.
 
 ## Thread Model
-- `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, address space, optional kernel stack, and scheduling state (`Ready`, `Running`, `Idle`).
+- `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, and scheduling state (`Ready`, `Running`, `Idle`).
 - Kernel threads receive dedicated stacks allocated via `KernelStack`; the bootstrap thread represents the boot CPU and reuses its existing stack.
-- Address spaces are snapshots from `ArchThread::current_address_space()`; userland isolation will require acquiring process-specific address spaces during context switch.
+- Address spaces are reference-counted handles cloned from the owning process; the scheduler switches CR3 via `ArchThread::activate_address_space` using these handles.
 - Thread creation uses `ArchThread::bootstrap_kernel_context` to seed an architecture-specific context that returns into Rust when first scheduled.
 
 ## Interaction with Other Subsystems
 - Requires the process subsystem to be initialised first; `Scheduler::init` calls `PROCESS_TABLE.init_kernel()` and records the kernel PID.
 - Thread registration/deregistration is delegated to `PROCESS_TABLE.attach_thread` / `detach_thread` to keep per-process thread lists in sync.
+- `Scheduler::init` captures the kernel process's address space once and shares it with bootstrap/idle threads; additional kernel threads acquire the same handle through `ProcessTable::address_space`.
 - Depends on the architecture abstraction to save/restore CPU context and manipulate interrupt state, keeping the scheduler generic over CPU implementations.
 - Timer integration occurs through `SYSTEM_TIMER.install_handler`, making the scheduler the consumer of periodic ticks.
 

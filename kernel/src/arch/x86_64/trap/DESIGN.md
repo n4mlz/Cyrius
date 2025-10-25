@@ -23,6 +23,11 @@
 - `ArchTrap::Frame` is aliased to this trap frame, enabling scheduler and process code to downcast without `cfg` checks.
 - `thread::Context` derives from a trap frame after interrupts, allowing seamless handoff between interrupt context and scheduled threads.
 
+## Exception Handlers
+- `handlers` provides the architecture-specific fast path for #PF/#GP/#DF, decoding hardware error codes and emitting structured diagnostics before panicking.
+- The dispatcher in `mod.rs` delegates to these helpers via `ArchTrap::handle_exception`; returning `true` suppresses the generic logging path.
+- Page-fault handling records the CR2 fault address and access type bits so future user-mode recovery logic has the required context.
+
 ## Future Work
 - Add support for user-mode traps once ring transitions are introduced (IST stack allocation, syscall/sysret setup).
 - Incorporate per-CPU IST buffers to support SMP and avoid contention on the global static region.

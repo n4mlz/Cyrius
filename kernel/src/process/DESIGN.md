@@ -13,8 +13,8 @@
 - Process lookup is linear today. If the number of processes grows, we plan to swap in a different structure (e.g. `BTreeMap`).
 
 ### Process
-- Stores `id`, `_name`, `_address_space`, `_state`, and a `threads` list.
-- `_address_space` captures an `ArchThread::AddressSpace` snapshot; on x86-64 this means the shared kernel address space.
+- Stores `id`, `_name`, `address_space`, `_state`, and a `threads` list.
+- `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` currently exposes only `Active`. Expanded lifecycle states (e.g. `Sleeping`, `Zombie`) are still future work.
 - Fields prefixed with `_` are reserved for upcoming functionality, so they remain even if unused today.
 
@@ -28,6 +28,7 @@
 - The scheduler invokes `attach_thread` / `detach_thread` whenever threads are created or torn down so the mapping between processes and `ThreadId`s stays in sync.
 - Duplicate attachment for the same thread is rejected via `ProcessError::DuplicateThread`, catching misuse early.
 - `thread_count` is a lightweight helper for statistics and debugging.
+- `address_space(pid)` clones the stored handle so scheduling and memory management components can operate on the same CR3 state.
 - Process lifetime management (e.g. reclaiming a process when its thread list becomes empty) is intentionally deferred.
 
 ## Address Space and ABI Considerations

@@ -15,6 +15,11 @@
 - Permission updates propagate writable/user bits through intermediate tables, matching x86-64's AND-semantics for access checks.
 - TLB invalidation is conservative: leaf changes flush the affected page, while intermediate updates flush the entire TLB to avoid stale permission caches.
 
+## Address Space Handles
+- `address_space.rs` wraps the active CR3 frame in an `Arc<AddressSpace>` so processes and threads share concrete address-space state instead of raw `PhysFrame` snapshots.
+- `kernel_address_space()` lazily snapshots the boot CR3 after `mem::manager::init` succeeds, guaranteeing the physical-mapper offset is available.
+- `AddressSpace::with_table` serialises page-table mutation behind a spin lock and grants temporary access to the global frame allocator; owned address spaces return their root frames on drop.
+
 ## Safety Contracts
 - Constructors are `unsafe`: callers must ensure exclusive ownership of the root frame and provide a mapper that yields non-aliased access to page tables.
 - `is_table_empty` and related helpers assume the `PhysMapper` remains valid for the duration of the inspection.

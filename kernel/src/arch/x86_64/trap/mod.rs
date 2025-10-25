@@ -1,5 +1,6 @@
 mod context;
 mod gdt;
+mod handlers;
 mod idt;
 mod stubs;
 
@@ -10,6 +11,10 @@ use crate::trap::{TrapInfo, TrapOrigin};
 pub(super) fn init() {
     gdt::load();
     idt::load();
+}
+
+pub(super) fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
+    handlers::handle_exception(info, frame)
 }
 
 const EXCEPTION_DESCRIPTIONS: [&str; 32] = [

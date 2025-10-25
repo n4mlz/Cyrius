@@ -7,6 +7,9 @@
 
 extern crate alloc;
 
+use core::convert::TryFrom;
+use core::panic::PanicInfo;
+
 pub mod arch;
 pub mod device;
 pub mod interrupt;
@@ -18,15 +21,15 @@ pub mod thread;
 pub mod trap;
 pub mod util;
 
-use core::panic::PanicInfo;
-
 use crate::arch::{
     Arch,
     api::{ArchDevice, ArchMemory},
 };
 use crate::device::char::uart::Uart;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
+use crate::mem::addr::{AddrRange, PhysAddr};
 use crate::mem::allocator;
+use crate::mem::manager;
 use crate::thread::SCHEDULER;
 use bootloader_api::{
     BootInfo,
@@ -77,8 +80,38 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
             .unwrap_or_else(|err| panic!("failed to locate kernel heap: {err:?}"))
     };
 
+    let phys_offset = boot_info
+        .physical_memory_offset
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|| panic!("bootloader did not provide a physical memory offset"));
+
+    let heap_reserved = AddrRange {
+        start: PhysAddr::new(
+            usize::try_from(
+                (heap_range.start.as_raw() as u64)
+                    .checked_sub(phys_offset)
+                    .unwrap_or_else(|| panic!("heap start below physical mapping")),
+            )
+            .unwrap_or_else(|_| panic!("heap start exceeds usize")),
+        ),
+        end: PhysAddr::new(
+            usize::try_from(
+                (heap_range.end.as_raw() as u64)
+                    .checked_sub(phys_offset)
+                    .unwrap_or_else(|| panic!("heap end below physical mapping")),
+            )
+            .unwrap_or_else(|_| panic!("heap end exceeds usize")),
+        ),
+    };
+
     allocator::init_heap(heap_range)
         .unwrap_or_else(|err| panic!("failed to initialise kernel heap: {err:?}"));
+
+    let info: &'static BootInfo = &*boot_info;
+    let reserved = [heap_reserved];
+    manager::init(info, &reserved)
+        .unwrap_or_else(|err| panic!("failed to initialise memory manager: {err:?}"));
 
     INTERRUPTS
         .init(boot_info)

@@ -1,3 +1,4 @@
+pub mod address_space;
 pub mod paging;
 
 use core::convert::TryFrom;

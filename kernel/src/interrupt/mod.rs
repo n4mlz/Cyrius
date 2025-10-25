@@ -4,7 +4,7 @@ use bootloader_api::BootInfo;
 
 use crate::arch::{
     Arch,
-    api::{ArchInterrupt, InterruptInitError},
+    api::{ArchInterrupt, ArchTrap, InterruptInitError},
 };
 use crate::println;
 use crate::trap::{self, CurrentTrapFrame, TrapFrame, TrapHandler, TrapInfo, TrapOrigin};
@@ -154,7 +154,9 @@ impl TrapHandler for InterruptController {
         match info.origin {
             TrapOrigin::Interrupt => self.handle_interrupt(info, frame),
             TrapOrigin::Exception | TrapOrigin::NonMaskable | TrapOrigin::Unknown => {
-                self.log_trap(info, frame);
+                if !<Arch as ArchTrap>::handle_exception(info, frame) {
+                    self.log_trap(info, frame);
+                }
             }
         }
     }
