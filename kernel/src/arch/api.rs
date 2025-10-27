@@ -1,6 +1,7 @@
 use bootloader_api::BootInfo;
 
 use crate::mem::addr::{AddrRange, VirtAddr};
+use crate::mem::paging::MapError;
 use crate::trap::TrapInfo;
 
 pub trait ArchPlatform {
@@ -41,6 +42,7 @@ pub trait ArchMemory {
 pub trait ArchThread {
     type Context: Clone;
     type AddressSpace: Clone;
+    type UserStack;
 
     /// Capture the CPU context described by the current trap frame.
     fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context;
@@ -62,6 +64,9 @@ pub trait ArchThread {
     /// stack region mapped with kernel read/write permissions.
     fn bootstrap_kernel_context(entry: VirtAddr, stack_top: VirtAddr) -> Self::Context;
 
+    /// Build an initial user-mode context that resumes execution at `entry` on the supplied stack.
+    fn bootstrap_user_context(entry: VirtAddr, user_stack_top: VirtAddr) -> Self::Context;
+
     /// Return a handle to the currently active address space.
     fn current_address_space() -> Self::AddressSpace;
 
@@ -73,6 +78,18 @@ pub trait ArchThread {
     /// that kernel text/data remain accessible and that interrupts are either disabled or handlers
     /// tolerate the transition.
     unsafe fn activate_address_space(space: &Self::AddressSpace);
+
+    /// Allocate a user-mode stack within the provided address space.
+    fn allocate_user_stack(
+        space: &Self::AddressSpace,
+        size: usize,
+    ) -> Result<Self::UserStack, UserStackError>;
+
+    /// Return the canonical top-of-stack for the provided user stack handle.
+    fn user_stack_top(stack: &Self::UserStack) -> VirtAddr;
+
+    /// Update the privilege-stack pointer used during user→kernel transitions.
+    fn update_privilege_stack(stack_top: VirtAddr);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +98,14 @@ pub enum InterruptInitError {
     AddressOverflow,
     ApicUnavailable,
     AlreadyInitialised,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserStackError {
+    InvalidSize,
+    AddressSpaceExhausted,
+    OutOfMemory,
+    MapFailed(MapError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

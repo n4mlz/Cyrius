@@ -17,7 +17,9 @@
 
 ## Thread and Address Space Management
 - `thread::Context` captures general-purpose registers and segment state directly from the trap frame, enabling round-tripping between trap handler and scheduler.
-- Kernel threads are bootstrapped by aligning stack tops, seeding RIP, and copying the current CS/SS selectors; this keeps threads executing in ring 0.
+- Kernel threads are bootstrapped by aligning stack tops, seeding RIP, and copying the GDT-derived ring-0 selectors.
+- User threads rely on `thread::UserStack`, which reserves lower-half virtual space, maps 4 KiB pages with `MemPerm::USER_RW`, and zeroes the backing memory before first use.
+- `ArchThread::update_privilege_stack` mirrors the currently scheduled thread's kernel stack into `TSS.rsp0` so ring transitions land on the owning thread's stack.
 - `thread::AddressSpace` wraps CR3 and its flags; activation writes CR3, expecting callers to guard with interrupt masking.
 
 ## Memory Management

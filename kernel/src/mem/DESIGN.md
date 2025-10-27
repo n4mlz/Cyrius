@@ -44,3 +44,8 @@
 - Expand paging support to handle userland address spaces, copy-on-write, and per-process permission setups.
 - Add large-page awareness to higher-level code paths, with dynamic selection based on workload characteristics.
 - Provide instrumentation/telemetry for memory usage, fragmentation, and cluster-wide resource pooling consistent with the overall OS vision.
+
+## User Access Helpers (`user.rs`)
+- Centralises guard logic for copying data between the kernel and user address space under the assumption of 48-bit canonical addresses.
+- Offers `copy_to_user`, `copy_from_user`, and scoped slice helpers that validate ranges, alignment, and pointer provenance before touching memory.
+- Validation occurs entirely in Rust; actual accesses may still fault if page table permissions disagree, keeping the helpers lightweight and deterministic.

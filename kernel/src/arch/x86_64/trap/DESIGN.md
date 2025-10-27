@@ -5,8 +5,10 @@
 - Own the GDT/TSS, IDT, and the hand-written trap stubs that translate hardware events into the architecture-neutral trap dispatcher.
 
 ## Descriptor Tables
-- `gdt` builds a kernel-only GDT plus TSS entries, allocating three IST stacks (NMI, double-fault, machine-check) from a statically mapped buffer.
+- `gdt` installs both ring-0 and ring-3 segment descriptors alongside the TSS entry, allocating three IST stacks (NMI, double-fault, machine-check) from a statically mapped buffer.
+- `set_privilege_stack` updates `TSS.rsp0` on every context switch so user→kernel transitions enter on the scheduled thread's kernel stack, while a fallback ring-0 stack remains available for bootstrap paths.
 - `idt` populates exception vectors with dedicated stubs and assigns IST indices where architectural guidance recommends hardened stacks.
+- The IDT exposes vector `0x80` with DPL=3, providing an initial software interrupt entry point for user mode before the syscall MSRs are wired up.
 - `init()` loads both tables during early boot and must run per-CPU prior to enabling interrupts.
 
 ## Trap Stubs
@@ -28,7 +30,6 @@
 - The dispatcher in `mod.rs` delegates to these helpers via `ArchTrap::handle_exception`; returning `true` suppresses the generic logging path.
 - Page-fault handling records the CR2 fault address and access type bits so future user-mode recovery logic has the required context.
 
-## Future Work
-- Add support for user-mode traps once ring transitions are introduced (IST stack allocation, syscall/sysret setup).
+- Expand syscall handling beyond `int 0x80` by enabling `SYSCALL/SYSRET` once MSR management is implemented.
 - Incorporate per-CPU IST buffers to support SMP and avoid contention on the global static region.
 - Harden stubs against invalid stack scenarios by adding guard pages or double-fault recovery strategies.

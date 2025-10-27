@@ -79,6 +79,19 @@ impl ProcessTable {
         Ok(pid)
     }
 
+    pub fn create_user_process(&self, name: &'static str) -> Result<ProcessId, ProcessError> {
+        if !self.initialised.load(Ordering::Acquire) {
+            return Err(ProcessError::NotInitialised);
+        }
+
+        let mut inner = self.inner.lock();
+        let pid = inner.next_pid;
+        let process = Process::user(pid, name);
+        inner.next_pid = pid.checked_add(1).expect("process id overflow");
+        inner.processes.push(process);
+        Ok(pid)
+    }
+
     pub fn attach_thread(&self, pid: ProcessId, tid: ThreadId) -> Result<(), ProcessError> {
         if !self.initialised.load(Ordering::Acquire) {
             return Err(ProcessError::NotInitialised);
@@ -159,6 +172,8 @@ struct Process {
     _name: &'static str,
     address_space: <Arch as ArchThread>::AddressSpace,
     _state: ProcessState,
+    #[allow(dead_code)]
+    kind: ProcessKind,
     threads: Vec<ThreadId>,
 }
 
@@ -169,6 +184,18 @@ impl Process {
             _name: name,
             address_space: <Arch as ArchThread>::current_address_space(),
             _state: ProcessState::Active,
+            kind: ProcessKind::Kernel,
+            threads: Vec::new(),
+        }
+    }
+
+    fn user(id: ProcessId, name: &'static str) -> Self {
+        Self {
+            id,
+            _name: name,
+            address_space: <Arch as ArchThread>::current_address_space(),
+            _state: ProcessState::Active,
+            kind: ProcessKind::User,
             threads: Vec::new(),
         }
     }
@@ -177,6 +204,12 @@ impl Process {
 #[derive(Clone, Copy, Debug)]
 enum ProcessState {
     Active,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessKind {
+    Kernel,
+    User,
 }
 
 #[cfg(test)]
@@ -197,5 +230,21 @@ mod tests {
             .expect("kernel address space clone");
 
         assert!(Arc::ptr_eq(a.inner(), b.inner()));
+    }
+
+    #[kernel_test_case]
+    fn create_user_process_assigns_pid() {
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("user-proc")
+            .expect("create user process");
+        assert!(pid > 0);
+        let addr_space = PROCESS_TABLE
+            .address_space(pid)
+            .expect("user address space");
+        let ref_again = PROCESS_TABLE
+            .address_space(pid)
+            .expect("user address space clone");
+        assert!(Arc::ptr_eq(addr_space.inner(), ref_again.inner()));
     }
 }
