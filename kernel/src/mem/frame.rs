@@ -329,7 +329,6 @@ pub static FRAME_ALLOCATOR: GlobalFrameAllocator = GlobalFrameAllocator::uninit(
 mod tests {
     use super::*;
     use crate::test::kernel_test_case;
-    use alloc::vec;
     use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 
     const fn region(start: u64, end: u64, kind: MemoryRegionKind) -> MemoryRegion {

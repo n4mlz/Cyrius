@@ -17,6 +17,7 @@
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` currently exposes only `Active`. Expanded lifecycle states (e.g. `Sleeping`, `Zombie`) are still future work.
 - Fields prefixed with `_` are reserved for upcoming functionality, so they remain even if unused today.
+- `Process::user` mirrors kernel setup for now, provisioning a PID for user-mode threads while still sharing the kernel address space until proper duplication arrives.
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.
@@ -36,6 +37,7 @@
 - `ArchThread::current_address_space()` seeds the stored address space. Future plans include:
   - cloning / isolating address spaces when we spawn userland processes;
   - letting the scheduler reactivate a process-specific address space on context switches.
+- User-process creation already allocates a distinct PID and thread list but continues to reference the shared kernel mappings until the paging layer exposes copy-on-write cloning.
 - When Linux compatibility arrives, each `Process` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
 
 ## Error Model and Synchronization

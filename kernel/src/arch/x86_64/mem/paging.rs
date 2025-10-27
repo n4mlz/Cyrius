@@ -956,16 +956,15 @@ mod tests {
         }
 
         // Verify all pages are mapped
-        for i in 0..frame_count {
-            let (page, _) = frames[i];
+        for (page, _) in frames.iter().take(frame_count) {
             let translated = table.translate(page.start).expect("translate mapped addr");
             assert!(translated.as_raw() > 0);
         }
 
         // Unmap all pages - this should trigger recursive cleanup
-        for i in 0..frame_count {
-            let (page, _) = frames[i];
-            let unmapped = table.unmap(page).expect("unmap page");
+        for (page, _) in frames.iter().take(frame_count) {
+            let page_to_unmap = Page::new(page.start, page.size);
+            let unmapped = table.unmap(page_to_unmap).expect("unmap page");
             assert!(unmapped.start.as_raw() > 0);
         }
 

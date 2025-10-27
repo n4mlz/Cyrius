@@ -4,11 +4,13 @@ pub mod mem;
 mod thread;
 mod trap;
 
+use self::trap::gdt;
+
 use bootloader_api::BootInfo;
 
 use crate::arch::api::{
     ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchThread, ArchTrap, HeapRegionError,
-    InterruptInitError,
+    InterruptInitError, UserStackError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
 use crate::mem::addr::{AddrRange, VirtAddr};
@@ -83,6 +85,7 @@ impl ArchInterrupt for X86_64 {
 impl ArchThread for X86_64 {
     type Context = thread::Context;
     type AddressSpace = thread::AddressSpace;
+    type UserStack = thread::UserStack;
 
     fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context {
         thread::Context::from_trap(frame)
@@ -96,6 +99,10 @@ impl ArchThread for X86_64 {
         thread::Context::for_kernel(entry, stack_top)
     }
 
+    fn bootstrap_user_context(entry: VirtAddr, stack_top: VirtAddr) -> Self::Context {
+        thread::Context::for_user(entry, stack_top)
+    }
+
     fn current_address_space() -> Self::AddressSpace {
         thread::AddressSpace::current()
     }
@@ -104,5 +111,20 @@ impl ArchThread for X86_64 {
         unsafe {
             space.activate();
         }
+    }
+
+    fn allocate_user_stack(
+        space: &Self::AddressSpace,
+        size: usize,
+    ) -> Result<Self::UserStack, UserStackError> {
+        thread::UserStack::allocate(space, size)
+    }
+
+    fn user_stack_top(stack: &Self::UserStack) -> VirtAddr {
+        stack.top()
+    }
+
+    fn update_privilege_stack(stack_top: VirtAddr) {
+        gdt::set_privilege_stack(stack_top);
     }
 }

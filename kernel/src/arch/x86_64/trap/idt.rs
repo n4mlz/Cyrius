@@ -1,4 +1,4 @@
-use x86_64::{VirtAddr, structures::idt::InterruptDescriptorTable};
+use x86_64::{PrivilegeLevel, VirtAddr, structures::idt::InterruptDescriptorTable};
 
 use crate::util::lazylock::LazyLock;
 
@@ -7,7 +7,7 @@ use super::stubs::{
     exception_0, exception_1, exception_2, exception_3, exception_4, exception_5, exception_6,
     exception_7, exception_8, exception_10, exception_11, exception_12, exception_13, exception_14,
     exception_16, exception_17, exception_18, exception_19, exception_20, exception_21,
-    exception_28, exception_29, exception_30, interrupt_timer,
+    exception_28, exception_29, exception_30, interrupt_timer, software_interrupt_syscall,
 };
 
 static IDT: LazyLock<InterruptDescriptorTable, fn() -> InterruptDescriptorTable> =
@@ -72,6 +72,9 @@ fn build_idt() -> InterruptDescriptorTable {
             .set_handler_addr(VirtAddr::from_ptr(exception_30 as *const ()));
         idt[super::super::interrupt::TIMER_VECTOR]
             .set_handler_addr(VirtAddr::from_ptr(interrupt_timer as *const ()));
+        idt[super::SYSCALL_VECTOR]
+            .set_handler_addr(VirtAddr::from_ptr(software_interrupt_syscall as *const ()))
+            .set_privilege_level(PrivilegeLevel::Ring3);
     }
     idt
 }

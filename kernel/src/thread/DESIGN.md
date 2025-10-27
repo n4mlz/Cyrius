@@ -15,6 +15,8 @@
 ## Thread Model
 - `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, and scheduling state (`Ready`, `Running`, `Idle`).
 - Kernel threads receive dedicated stacks allocated via `KernelStack`; the bootstrap thread represents the boot CPU and reuses its existing stack.
+- User threads layer a lazily allocated `UserStack` (via `ArchThread::UserStack`) on top of the kernel stack so ring transitions land on a thread-private stack while user-mode execution stays in the lower half of the address space.
+- Context restoration calls `ArchThread::update_privilege_stack` when the next thread is user-mode, keeping `TSS.rsp0` in sync with the scheduled kernel stack.
 - Address spaces are reference-counted handles cloned from the owning process; the scheduler switches CR3 via `ArchThread::activate_address_space` using these handles.
 - Thread creation uses `ArchThread::bootstrap_kernel_context` to seed an architecture-specific context that returns into Rust when first scheduled.
 
