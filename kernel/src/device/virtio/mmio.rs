@@ -192,6 +192,15 @@ impl MmioDevice {
         self.write32(Self::REG_QUEUE_NOTIFY, queue_index as u32)
     }
 
+    pub fn read_config<T>(&self, offset: usize) -> Result<T, MmioError>
+    where
+        T: Copy,
+    {
+        let ptr = self.cfg.ptr::<T>(Self::HEADER_LEN + offset)?;
+        // SAFETY: range checked above.
+        Ok(unsafe { core::ptr::read_volatile(ptr) })
+    }
+
     fn write64(
         &self,
         low_offset: usize,

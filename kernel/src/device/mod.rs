@@ -1,3 +1,4 @@
+pub mod block;
 pub mod bus;
 pub mod char;
 pub mod virtio;
