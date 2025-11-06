@@ -119,6 +119,11 @@ impl VirtQueueRegion {
         self.total_len
     }
 
+    /// Return whether the region length is zero.
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
+    }
+
     /// Translate the region into virtual addresses for mapping helpers.
     pub fn into_virtual(self, base: VirtAddr) -> VirtQueueVirtualRegion {
         VirtQueueVirtualRegion {
@@ -145,6 +150,10 @@ pub struct VirtQueueVirtualRegion {
 impl VirtQueueVirtualRegion {
     pub fn len(&self) -> usize {
         self.total_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
     }
 }
 
