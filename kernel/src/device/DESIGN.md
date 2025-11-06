@@ -14,3 +14,4 @@
 - Introduce registry infrastructure to enumerate devices discovered during boot.
 - Extend to block devices (storage) and network adapters, aligning with the project goal of container-native workloads.
 - Provide mock implementations for unit tests and simulation environments.
+- Consolidate VirtIO transport helpers shared by `virtio-blk` and future network drivers to avoid duplicating queue/DMA setup logic.
