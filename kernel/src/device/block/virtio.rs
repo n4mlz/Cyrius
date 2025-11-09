@@ -5,7 +5,7 @@ use core::sync::atomic::{Ordering, fence};
 use crate::device::block::BlockDevice;
 use crate::device::virtio::dma::{DmaAllocator, DmaError, DmaRegion};
 use crate::device::virtio::queue::{Descriptor, VirtQueueLayout};
-use crate::device::virtio::{MmioDevice, MmioError, features, status};
+use crate::device::virtio::{PciTransport, PciTransportError, features, status};
 use crate::device::{Device, DeviceType};
 use crate::mem::addr::{PhysAddr, VirtIntoPtr};
 use crate::util::spinlock::SpinLock;
@@ -36,7 +36,7 @@ struct RequestHeader {
 
 pub struct VirtioBlockDevice {
     name: &'static str,
-    mmio: MmioDevice,
+    transport: PciTransport,
     queue: SpinLock<QueueState>,
     block_size: u32,
     capacity_sectors: u64,
@@ -51,16 +51,16 @@ struct QueueState {
 }
 
 impl VirtioBlockDevice {
-    pub fn new(name: &'static str, mmio: MmioDevice) -> Result<Self, VirtioBlockError> {
-        mmio.set_status(0)?;
+    pub fn new(name: &'static str, transport: PciTransport) -> Result<Self, VirtioBlockError> {
+        transport.set_status(0)?;
 
         let mut status_bits = status::ACKNOWLEDGE;
-        mmio.set_status(status_bits)?;
+        transport.set_status(status_bits)?;
 
         status_bits |= status::DRIVER;
-        mmio.set_status(status_bits)?;
+        transport.set_status(status_bits)?;
 
-        let device_features = mmio.read_device_features()?;
+        let device_features = transport.read_device_features()?;
         if device_features & features::VERSION_1 == 0 {
             return Err(VirtioBlockError::MissingFeature("VERSION_1"));
         }
@@ -74,16 +74,16 @@ impl VirtioBlockDevice {
             driver_features |= VIRTIO_BLK_F_FLUSH;
         }
 
-        mmio.write_driver_features(driver_features)?;
+        transport.write_driver_features(driver_features)?;
 
         status_bits |= status::FEATURES_OK;
-        mmio.set_status(status_bits)?;
-        if mmio.status()? & status::FEATURES_OK == 0 {
+        transport.set_status(status_bits)?;
+        if transport.status()? & status::FEATURES_OK == 0 {
             return Err(VirtioBlockError::FeaturesRejected);
         }
 
-        mmio.select_queue(QUEUE_INDEX)?;
-        let max_size = mmio.queue_size_max()?;
+        transport.select_queue(QUEUE_INDEX)?;
+        let max_size = transport.queue_size_max()?;
         let mut queue_size = max_size.min(QUEUE_DEPTH);
         while queue_size > 0 && !queue_size.is_power_of_two() {
             queue_size -= 1;
@@ -93,26 +93,26 @@ impl VirtioBlockDevice {
                 available: max_size,
             });
         }
-        mmio.set_queue_size(queue_size)?;
+        transport.set_queue_size(queue_size)?;
 
         let layout = VirtQueueLayout::new(queue_size);
         let mut region = DmaAllocator::allocate(layout.total_size())?;
         region.zero();
 
         let queue_region = layout.region_from(region.phys_start());
-        mmio.configure_queue(queue_region)?;
-        mmio.set_queue_ready(true)?;
+        transport.configure_queue(queue_region)?;
+        transport.set_queue_ready(true)?;
 
-        let capacity_sectors = mmio.read_config::<u64>(CONFIG_CAPACITY_OFFSET)?;
+        let capacity_sectors = transport.read_config::<u64>(CONFIG_CAPACITY_OFFSET)?;
         let block_size = if device_features & VIRTIO_BLK_F_BLK_SIZE != 0 {
-            let size = mmio.read_config::<u32>(CONFIG_BLK_SIZE_OFFSET)?;
+            let size = transport.read_config::<u32>(CONFIG_BLK_SIZE_OFFSET)?;
             if size == 0 { 512 } else { size }
         } else {
             512
         };
 
         status_bits |= status::DRIVER_OK;
-        mmio.set_status(status_bits)?;
+        transport.set_status(status_bits)?;
 
         let queue = QueueState {
             layout,
@@ -120,15 +120,27 @@ impl VirtioBlockDevice {
             avail_index: 0,
         };
 
-        Ok(Self {
+        let device = Self {
             name,
-            mmio,
+            transport,
             queue: SpinLock::new(queue),
             block_size,
             capacity_sectors,
             _negotiated_features: driver_features,
             flush_supported,
-        })
+        };
+
+        #[cfg(debug_assertions)]
+        crate::println!(
+            "[virtio-blk] {}: queue={} block={} capacity={} sectors features=0x{:x}",
+            name,
+            queue_size,
+            block_size,
+            capacity_sectors,
+            driver_features
+        );
+
+        Ok(device)
     }
 
     pub fn capacity_sectors(&self) -> u64 {
@@ -253,7 +265,7 @@ impl VirtioBlockDevice {
 
         drop(queue);
 
-        self.mmio.notify_queue(QUEUE_INDEX)?;
+        self.transport.notify_queue(QUEUE_INDEX)?;
 
         loop {
             let used = unsafe { core::ptr::read_volatile(used_idx_ptr) };
@@ -377,7 +389,7 @@ fn write_descriptor(
 
 #[derive(Debug)]
 pub enum VirtioBlockError {
-    Mmio(MmioError),
+    Transport(PciTransportError),
     Dma(DmaError),
     MissingFeature(&'static str),
     FeaturesRejected,
@@ -392,7 +404,7 @@ pub enum VirtioBlockError {
 impl core::fmt::Display for VirtioBlockError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Mmio(_) => write!(f, "mmio error"),
+            Self::Transport(_) => write!(f, "transport error"),
             Self::Dma(_) => write!(f, "dma allocation error"),
             Self::MissingFeature(name) => write!(f, "missing feature {name}"),
             Self::FeaturesRejected => write!(f, "device rejected negotiated features"),
@@ -413,14 +425,63 @@ impl core::fmt::Display for VirtioBlockError {
     }
 }
 
-impl From<MmioError> for VirtioBlockError {
-    fn from(value: MmioError) -> Self {
-        Self::Mmio(value)
+impl From<PciTransportError> for VirtioBlockError {
+    fn from(value: PciTransportError) -> Self {
+        Self::Transport(value)
     }
 }
 
 impl From<DmaError> for VirtioBlockError {
     fn from(value: DmaError) -> Self {
         Self::Dma(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::bus::pci;
+    use crate::device::virtio::PciTransport;
+    use crate::test::kernel_test_case;
+
+    const TEST_SIGNATURE: &[u8] = b"CYRIUSBL";
+    const PCI_VENDOR_VIRTIO: u16 = 0x1AF4;
+    const PCI_DEVICE_BLK_MODERN: u16 = 0x1042;
+
+    #[kernel_test_case]
+    fn virtio_blk_reads_signature() {
+        let Some(pci_dev) = pci::find_device(PCI_VENDOR_VIRTIO, PCI_DEVICE_BLK_MODERN) else {
+            crate::println!("[test virtio-blk] skipping: modern virtio-blk PCI device not found");
+            return;
+        };
+
+        let transport = match PciTransport::new(pci_dev) {
+            Ok(transport) => transport,
+            Err(err) => {
+                crate::println!(
+                    "[test virtio-blk] skipping: failed to initialise transport ({err})"
+                );
+                return;
+            }
+        };
+
+        let driver = match VirtioBlockDevice::new("virtio-test", transport) {
+            Ok(dev) => dev,
+            Err(VirtioBlockError::MissingFeature(name)) => {
+                crate::println!("[test virtio-blk] skipping: feature {name} missing");
+                return;
+            }
+            Err(other) => panic!("virtio-blk init failed: {other:?}"),
+        };
+
+        assert!(driver.block_size() >= 512);
+
+        let mut sector = [0u8; 512];
+        driver
+            .read_at(0, &mut sector)
+            .unwrap_or_else(|err| panic!("virtio-blk read failed: {err:?}"));
+
+        assert_eq!(&sector[..TEST_SIGNATURE.len()], TEST_SIGNATURE);
+        assert!(sector[TEST_SIGNATURE.len()..].iter().any(|byte| *byte == 0));
     }
 }

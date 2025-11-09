@@ -40,7 +40,7 @@ fn real_main() -> Result<i32> {
         },
     )?;
 
-    let status = run_qemu(&image, test)?;
+    let status = run_qemu(&image, test, None)?;
 
     if !test {
         return Ok(status.code().unwrap_or_default());

@@ -1,4 +1,6 @@
 use std::{
+    fs::{self, File},
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     str,
@@ -112,7 +114,7 @@ pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
     }
 }
 
-pub fn run_qemu(image: &Path, test: bool) -> Result<ExitStatus> {
+pub fn run_qemu(image: &Path, test: bool, virtio_blk: Option<&Path>) -> Result<ExitStatus> {
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args([
         "-m",
@@ -131,6 +133,14 @@ pub fn run_qemu(image: &Path, test: bool) -> Result<ExitStatus> {
             "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-no-reboot",
         ]);
+    }
+
+    if let Some(path) = virtio_blk {
+        let drive_arg = format!("if=none,format=raw,file={},id=blk0", path.display());
+        qemu.arg("-drive");
+        qemu.arg(drive_arg);
+        qemu.arg("-device");
+        qemu.arg("virtio-blk-pci,drive=blk0,disable-legacy=on");
     }
 
     qemu.status()
@@ -185,4 +195,23 @@ fn configure_test_build(cmd: &mut Command, opts: &TestBuildOptions) {
     if opts.list_only {
         cmd.env("CYRIUS_TEST_LIST_ONLY", "1");
     }
+}
+
+pub fn ensure_test_disk(signature: &[u8]) -> Result<PathBuf> {
+    let path = PathBuf::from("target/virtio-blk-test.img");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = File::create(&path)?;
+    file.set_len(1 << 20)?; // 1 MiB image filled with zeroes
+    file.seek(SeekFrom::Start(0))?;
+
+    let mut sector = [0u8; 512];
+    let len = signature.len().min(sector.len());
+    sector[..len].copy_from_slice(&signature[..len]);
+    file.write_all(&sector)?;
+    file.flush()?;
+
+    Ok(path)
 }

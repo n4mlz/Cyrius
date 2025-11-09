@@ -1,11 +1,11 @@
 //! Shared VirtIO transport primitives used by device drivers.
 
 pub mod dma;
-pub mod mmio;
+pub mod pci;
 pub mod queue;
 
 pub use dma::{DmaAllocator, DmaError, DmaRegion};
-pub use mmio::{MmioConfig, MmioDevice, MmioError};
+pub use pci::{PciTransport, PciTransportError};
 pub use queue::{VirtQueueLayout, VirtQueueRegion};
 
 /// Standard VirtIO device identifiers.

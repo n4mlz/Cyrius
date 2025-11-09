@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use xtask::{
-    ImageKind, TestBuildOptions, TestSelector, build_kernel, build_kernel_tests, image_bios,
-    run_qemu,
+    ImageKind, TestBuildOptions, TestSelector, build_kernel, build_kernel_tests, ensure_test_disk,
+    image_bios, run_qemu,
 };
 
 #[derive(Parser)]
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
 fn run_kernel(release: bool) -> Result<()> {
     let kernel = build_kernel(release)?;
     let img = image_bios(&kernel, ImageKind::Run)?;
-    let status = run_qemu(&img, false)?;
+    let status = run_qemu(&img, false, None)?;
     if !status.success() {
         bail!("qemu exited with {status}");
     }
@@ -83,7 +83,8 @@ fn run_tests(args: TestArgs) -> Result<()> {
     }
 
     let image = image_bios(&test_binary, ImageKind::Test)?;
-    let status = run_qemu(&image, true)?;
+    let disk = ensure_test_disk(b"CYRIUSBL")?;
+    let status = run_qemu(&image, true, Some(&disk))?;
 
     interpret_test_exit(status)
 }

@@ -161,3 +161,46 @@ fn align_up(value: usize, align: usize) -> usize {
     assert!(align.is_power_of_two(), "alignment must be a power of two");
     (value + align - 1) & !(align - 1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::addr::{PhysAddr, VirtAddr};
+    use crate::test::kernel_test_case;
+
+    #[kernel_test_case]
+    fn layout_aligns_driver_and_device_regions() {
+        let layout = VirtQueueLayout::new(8);
+        assert_eq!(layout.queue_size(), 8);
+        assert_eq!(layout.total_size(), 4164);
+
+        let offsets = layout.virtual_offsets();
+        assert_eq!(offsets.descriptor, 0);
+        assert_eq!(offsets.driver, core::mem::size_of::<Descriptor>() * 8);
+        assert_eq!(offsets.device % 4096, 0);
+
+        let region = layout.region_from(PhysAddr::new(0x2000));
+        assert_eq!(region.descriptor.as_raw(), 0x2000);
+        assert_eq!(region.driver.as_raw(), 0x2000 + offsets.driver);
+        assert_eq!(region.device.as_raw(), 0x2000 + offsets.device);
+    }
+
+    #[kernel_test_case]
+    fn virtual_region_preserves_offsets() {
+        let layout = VirtQueueLayout::new(8);
+        let base_phys = PhysAddr::new(0x4000);
+        let region = layout.region_from(base_phys);
+        let base_virt = VirtAddr::new(0xffff_8000_0040_0000);
+        let virt = region.into_virtual(base_virt);
+
+        assert_eq!(virt.descriptor.as_raw(), base_virt.as_raw());
+        assert_eq!(
+            virt.driver.as_raw(),
+            base_virt.as_raw() + layout.virtual_offsets().driver
+        );
+        assert_eq!(
+            virt.device.as_raw(),
+            base_virt.as_raw() + layout.virtual_offsets().device
+        );
+    }
+}

@@ -13,12 +13,12 @@
 ## VirtIO-blk Overview
 - Targets the VirtIO 1.1 specification using the split virtqueue layout (descriptor table, available ring, used ring) and modern feature negotiation (`VIRTIO_F_VERSION_1`).
 - Negotiates `VIRTIO_F_VERSION_1` unconditionally, enables the write-back cache bit when offered, and advertises flush support only if `VIRTIO_BLK_F_FLUSH` is present.
-- Reads capacity (512-byte sectors) and block size (guarded by `VIRTIO_BLK_F_BLK_SIZE`) from the device configuration space via the mmio helper.
-- Legacy transport quirks remain out of scope; the driver assumes a modern device exposed through VirtIO-MMIO for now.
+- Reads capacity (512-byte sectors) and block size (guarded by `VIRTIO_BLK_F_BLK_SIZE`) from the device configuration space via the PCI transport helper.
+- Legacy transport quirks remain out of scope; the driver assumes a modern device exposed through VirtIO PCI (`disable-legacy=on`).
 
 ## Transport and Discovery
-- Initial bring-up assumes a VirtIO-MMIO device mapped by the bootloader (address + IRQ via device tree or static config). PCI enumeration remains future work once the bus layer is ready.
-- The bus layer must expose a typed accessor for the VirtIO common/config/notification/isr regions; `device::bus` will grow a thin wrapper so the block driver can obtain register handles without duplicating unsafe code.
+- Device discovery relies on the PCI bus walker in `device::bus::pci`, which provides `PciTransport` with pre-validated mappings for the common, device, notify, and ISR capabilities.
+- The transport caches notify doorbells per queue so steady-state I/O avoids touching the common configuration registers.
 
 ## DMA and Memory Requirements
 - Queue structures (descriptor table, avail, used) are backed by a `DmaRegion` allocated through `device::virtio::dma::DmaAllocator`. The queue depth is currently clamped to eight entries (or the device maximum) to keep the region small and ensure descriptor chaining for header/data/status fits.
@@ -29,11 +29,12 @@
 - `VirtioBlockDevice` implements `BlockDevice`, retains negotiated feature bits, and exposes helper methods (`block_size`, `capacity_sectors`) for higher layers.
 - Requests are issued synchronously, polling the used index until completion, and the queue lock serialises access so callers can hold only `&self`.
 - Flush requests are only accepted when `VIRTIO_BLK_F_FLUSH` was negotiated; otherwise `flush()` returns `FlushUnsupported`.
-- Error cases surface as `VirtioBlockError`, covering MMIO failures, DMA allocation issues, buffer alignment mistakes, and device-reported status codes.
+- Error cases surface as `VirtioBlockError`, covering PCI transport failures, DMA allocation issues, buffer alignment mistakes, and device-reported status codes.
 
 ## Testing and Instrumentation
-- Unit tests validate virtqueue initialisation, descriptor chaining, and status flag handling in a host-only environment using fake MMIO windows.
-- Integration tests boot QEMU with `-device virtio-blk-device,drive=...` and verify that a known sector reads back the expected signature, logging via the UART console for automated checks.
+- Unit tests validate virtqueue initialisation, descriptor chaining, and status flag handling around the split queue layout.
+- Integration tests boot QEMU with an auto-generated virtio-blk image (`target/virtio-blk-test.img`) and verify that sector 0 contains the `"CYRIUSBL"` signature. Tests expect `virtio-blk-pci,disable-legacy=on`; when the modern device is absent the case logs a skip message instead of failing hard.
+- Debug builds emit a concise `println!` summarising queue depth, block size, capacity, and negotiated features to help with bring-up logs.
 
 ## Known Open Questions
 - Multi-queue scaling (per-CPU virtqueues) will require a queue allocator that can hand out distinct rings and DmaRegions per CPU.
