@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod interrupt;
 pub mod mem;
+pub mod pci;
 mod thread;
 mod trap;
 

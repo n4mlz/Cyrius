@@ -29,6 +29,12 @@
 - Freed frames are recycled lazily; callers interact with the allocator through `mem::manager::frame_allocator()`, which returns a guard implementing `FrameAllocator`.
 - `mem::manager::init` initialises both the frame allocator and an offset-based `PhysMapper`; it must run during early boot before any address space manipulation.
 
+## DMA Regions (`dma.rs`)
+- `DmaRegionProvider` carves out physically-contiguous page runs backed by the global frame allocator.
+- Regions are described by `DmaRegion` handles that pair the physical base with its kernel-virtual alias obtained via the global `PhysMapper`.
+- Allocation requests state the required size/alignment so descriptor rings (e.g. VirtIO virtqueues) can live inside a single bounce buffer compliant with the device's DMA expectations.
+- The provider keeps book of the individual 4 KiB frames comprising a region so `drop` can safely recycle them without leaking memory, even if partial initialisation fails.
+
 ## Address Space Handles
 - Architecture-specific address spaces are surfaced as reference-counted handles (currently via `arch::x86_64::mem::address_space`). Callers use `with_table` to mutate mappings under a spin lock while borrowing the global frame allocator.
 - The scheduler and process layer clone these handles so CR3 switches operate on concrete state instead of raw control-register snapshots.
