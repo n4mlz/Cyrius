@@ -16,6 +16,8 @@ const CFG_TYPE_DEVICE: u8 = 4;
 const CAP_LEN_BASE: u8 = 16;
 const CAP_LEN_NOTIFY: u8 = 20;
 
+const NOTIFY_WIDTH: usize = 2;
+
 /// Provides access to a VirtIO device exposed via the modern PCI transport.
 ///
 /// # Notes
@@ -29,6 +31,7 @@ pub struct PciTransport {
     device_cfg_len: usize,
     notify_addrs: Vec<Option<VirtAddr>>,
     queue_count: u16,
+    negotiated_features: u64,
 }
 
 impl PciTransport {
@@ -69,11 +72,11 @@ impl PciTransport {
         }
 
         let notify_region = map_region(&address, &caps.notify.cap)?;
-        if notify_region.len == 0 {
+        if notify_region.len < NOTIFY_WIDTH {
             return Err(PciTransportError::CapabilityTooSmall {
                 capability: "notify",
-                required: 2,
-                actual: 0,
+                required: NOTIFY_WIDTH,
+                actual: notify_region.len,
             });
         }
 
@@ -105,7 +108,10 @@ impl PciTransport {
                     .checked_mul(multiplier)
                     .ok_or(PciTransportError::NotifyOffsetOverflow { queue })?;
 
-                if stride.checked_add(2).map_or(true, |end| end > notify_len) {
+                if stride
+                    .checked_add(NOTIFY_WIDTH)
+                    .map_or(true, |end| end > notify_len)
+                {
                     return Err(PciTransportError::NotifyOffsetOutOfRange {
                         queue,
                         offset: stride,
@@ -138,6 +144,7 @@ impl PciTransport {
             device_cfg_len: device_region.len,
             notify_addrs,
             queue_count,
+            negotiated_features: 0,
         })
     }
 
@@ -158,7 +165,16 @@ impl PciTransport {
         Ok(value)
     }
 
-    pub fn write_driver_features(&self, features: u64) -> Result<(), PciTransportError> {
+    /// Writes driver feature bits to the device.
+    ///
+    /// # Arguments
+    ///
+    /// * `features` - The agreed feature set (intersection of device features and driver desired features).
+    ///                 This value should be the result of `device_features & driver_desired_features`.
+    ///
+    /// After writing, the agreed feature set is stored in `negotiated_features` for use in operations
+    /// that depend on specific feature bits (e.g., `notify_queue`).
+    pub fn write_driver_features(&mut self, features: u64) -> Result<(), PciTransportError> {
         for sel in 0..2u32 {
             unsafe {
                 core::ptr::write_volatile(
@@ -172,6 +188,7 @@ impl PciTransport {
                 );
             }
         }
+        self.negotiated_features = features;
         Ok(())
     }
 
@@ -278,11 +295,6 @@ impl PciTransport {
                 queue_index,
             );
         }
-        let notify_data = unsafe {
-            core::ptr::read_volatile(core::ptr::addr_of!(
-                (*self.common_cfg.as_ptr()).queue_notify_data
-            ))
-        };
 
         let doorbell = self
             .notify_addrs
@@ -290,8 +302,21 @@ impl PciTransport {
             .and_then(|entry| *entry)
             .ok_or(PciTransportError::NotifyAddressMissing { queue: queue_index })?;
 
+        use crate::device::virtio::features;
+        let value = if self.negotiated_features & features::NOTIFICATION_DATA != 0 {
+            // VIRTIO_F_NOTIFICATION_DATA is negotiated: use queue_notify_data
+            unsafe {
+                core::ptr::read_volatile(core::ptr::addr_of!(
+                    (*self.common_cfg.as_ptr()).queue_notify_data
+                ))
+            }
+        } else {
+            // VIRTIO_F_NOTIFICATION_DATA is not negotiated: use queue_index
+            queue_index
+        };
+
         unsafe {
-            core::ptr::write_volatile(doorbell.into_mut_ptr() as *mut u16, notify_data);
+            core::ptr::write_volatile(doorbell.into_mut_ptr() as *mut u16, value);
         }
         Ok(())
     }

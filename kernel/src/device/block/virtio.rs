@@ -51,7 +51,7 @@ struct QueueState {
 }
 
 impl VirtioBlockDevice {
-    pub fn new(name: &'static str, transport: PciTransport) -> Result<Self, VirtioBlockError> {
+    pub fn new(name: &'static str, mut transport: PciTransport) -> Result<Self, VirtioBlockError> {
         transport.set_status(0)?;
 
         let mut status_bits = status::ACKNOWLEDGE;
@@ -65,16 +65,23 @@ impl VirtioBlockDevice {
             return Err(VirtioBlockError::MissingFeature("VERSION_1"));
         }
 
-        let mut driver_features = features::VERSION_1;
+        // Build desired feature set (intersection with device features)
+        let mut driver_desired = features::VERSION_1;
         if device_features & features::WRITEBACK != 0 {
-            driver_features |= features::WRITEBACK;
+            driver_desired |= features::WRITEBACK;
         }
         let flush_supported = device_features & VIRTIO_BLK_F_FLUSH != 0;
         if flush_supported {
-            driver_features |= VIRTIO_BLK_F_FLUSH;
+            driver_desired |= VIRTIO_BLK_F_FLUSH;
+        }
+        // Negotiate NOTIFICATION_DATA if device supports it
+        if device_features & features::NOTIFICATION_DATA != 0 {
+            driver_desired |= features::NOTIFICATION_DATA;
         }
 
-        transport.write_driver_features(driver_features)?;
+        // Agreed feature set is the intersection of device and driver desired features
+        let agreed = device_features & driver_desired;
+        transport.write_driver_features(agreed)?;
 
         status_bits |= status::FEATURES_OK;
         transport.set_status(status_bits)?;
@@ -126,7 +133,7 @@ impl VirtioBlockDevice {
             queue: SpinLock::new(queue),
             block_size,
             capacity_sectors,
-            _negotiated_features: driver_features,
+            _negotiated_features: agreed,
             flush_supported,
         };
 
@@ -137,7 +144,7 @@ impl VirtioBlockDevice {
             queue_size,
             block_size,
             capacity_sectors,
-            driver_features
+            agreed
         );
 
         Ok(device)

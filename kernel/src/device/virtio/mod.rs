@@ -20,6 +20,8 @@ pub mod features {
     pub const VERSION_1: u64 = 1 << 32;
     /// Enables writeback cache management for block devices.
     pub const WRITEBACK: u64 = 1 << 9;
+    /// When set, queue_notify_data field is valid and should be used for queue notifications.
+    pub const NOTIFICATION_DATA: u64 = 1u64 << 38;
 }
 
 /// Device status flag bits defined by the VirtIO specification.
