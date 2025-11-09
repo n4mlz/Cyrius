@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::mem::addr::{Addr, Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr};
+use crate::mem::addr::{Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr};
 use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, PhysMapper};
 
@@ -50,6 +50,10 @@ impl DmaRegion {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Returns a mutable byte slice backed by the DMA region.
@@ -123,6 +127,7 @@ fn align_up(value: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mem::addr::Addr;
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]

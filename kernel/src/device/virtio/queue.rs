@@ -219,7 +219,7 @@ impl<'a> AvailRing<'a> {
             let header = &mut *(base as *mut AvailHeader);
             let ring_ptr = base.add(size_of::<AvailHeader>()) as *mut u16;
             let ring = core::slice::from_raw_parts_mut(ring_ptr, size);
-            let used_event_ptr = ring_ptr.add(size) as *mut u16;
+            let used_event_ptr = ring_ptr.add(size);
             let used_event = &mut *used_event_ptr;
             Self {
                 header,

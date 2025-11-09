@@ -5,7 +5,7 @@ use crate::device::virtio::pci::{self, VirtioPciTransport};
 use crate::device::virtio::queue::{
     Descriptor, DescriptorFlags, QueueError, QueueMemory, UsedElem,
 };
-use crate::device::virtio::transport::{DeviceStatus, QueueNotifier, Transport, TransportError};
+use crate::device::virtio::transport::{DeviceStatus, Transport, TransportError};
 use crate::device::{Device, DeviceType};
 use crate::mem::addr::{Addr, PageSize, PhysAddr, VirtIntoPtr};
 use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
@@ -189,7 +189,7 @@ impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
     }
 
     fn validate_buffer(&self, lba: u64, len: usize) -> Result<u64, VirtioBlkError> {
-        if len % self.block_size as usize != 0 {
+        if !len.is_multiple_of(self.block_size as usize) {
             return Err(VirtioBlkError::UnalignedBuffer);
         }
         let sectors_per_block = self.block_size as u64 / VIRTIO_SECTOR_SIZE as u64;
@@ -309,7 +309,7 @@ impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
     }
 
     #[cfg(test)]
-    pub fn set_completion_hook(&mut self, hook: fn(&mut QueueState, &mut RequestBuffers)) {
+    pub(self) fn set_completion_hook(&mut self, hook: fn(&mut QueueState, &mut RequestBuffers)) {
         self.completion_hook = Some(hook);
     }
 }
@@ -635,6 +635,7 @@ mod tests {
     use core::sync::atomic::{AtomicU8, Ordering};
 
     use crate::device::virtio::queue::QueueConfig;
+    use crate::device::virtio::transport::QueueNotifier;
     use crate::test::kernel_test_case;
 
     const fn write_capture_init() -> SpinLock<Vec<u8>> {

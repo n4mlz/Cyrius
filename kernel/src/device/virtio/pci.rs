@@ -29,6 +29,7 @@ impl VirtioDeviceKind {
 }
 
 pub struct VirtioPciTransport {
+    #[allow(dead_code)]
     addr: PciAddress,
     device_id: u16,
     common: CommonCfg,
@@ -269,6 +270,7 @@ impl TryFrom<u8> for VirtioCfgType {
 }
 
 struct MmioRegion {
+    #[allow(dead_code)]
     phys: PhysAddr,
     virt: VirtAddr,
     len: usize,
@@ -323,6 +325,10 @@ impl DeviceCfgRegion {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn read<T: Copy>(&self) -> T {
         assert!(
             core::mem::size_of::<T>() <= self.len,
@@ -349,6 +355,7 @@ impl<T> MmioRegister<T> {
         unsafe { core::ptr::read_volatile(self.ptr.as_ptr()) }
     }
 
+    #[allow(dead_code)]
     fn write(&self, value: T) {
         unsafe { core::ptr::write_volatile(self.ptr.as_ptr(), value) }
     }
