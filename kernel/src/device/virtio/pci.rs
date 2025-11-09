@@ -38,6 +38,8 @@ pub struct VirtioPciTransport {
     num_queues: u16,
 }
 
+unsafe impl Send for VirtioPciTransport {}
+
 impl VirtioPciTransport {
     pub fn probe(addr: PciAddress) -> Result<Self, ProbeError> {
         if pci::vendor_id(addr) != VIRTIO_VENDOR_ID {
@@ -319,6 +321,14 @@ impl DeviceCfgRegion {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn read<T: Copy>(&self) -> T {
+        assert!(
+            core::mem::size_of::<T>() <= self.len,
+            "device config too small"
+        );
+        unsafe { core::ptr::read_volatile(self.base.into_ptr() as *const T) }
     }
 }
 

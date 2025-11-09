@@ -323,6 +323,16 @@ impl<'a> core::ops::DerefMut for FrameAllocatorGuard<'a> {
     }
 }
 
+impl<'a> FrameAllocatorGuard<'a> {
+    pub fn allocate_contiguous(
+        &mut self,
+        count: usize,
+        size: PageSize,
+    ) -> Option<Vec<Page<PhysAddr>>> {
+        (**self).allocate_contiguous(count, size)
+    }
+}
+
 impl<'a> FrameAllocator for FrameAllocatorGuard<'a> {
     fn allocate(&mut self, size: PageSize) -> Option<Page<PhysAddr>> {
         (**self).allocate(size)

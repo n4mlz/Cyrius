@@ -5,6 +5,7 @@ use bitflags::bitflags;
 use crate::device::virtio::queue::QueueConfig;
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct DeviceStatus: u8 {
         const ACKNOWLEDGE = 1;
         const DRIVER = 2;

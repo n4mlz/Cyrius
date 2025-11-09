@@ -26,6 +26,7 @@ use crate::arch::{
     api::{ArchDevice, ArchMemory},
 };
 use crate::device::char::uart::Uart;
+use crate::device::virtio::block;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
 use crate::mem::addr::{AddrRange, PhysAddr};
 use crate::mem::allocator;
@@ -122,6 +123,11 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
         .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
 
     INTERRUPTS.enable();
+
+    let discovered_blocks = block::probe_pci_devices();
+    if discovered_blocks > 0 {
+        println!("[blk] discovered {discovered_blocks} virtio block device(s)",);
+    }
 }
 
 fn initialise_scheduler() {

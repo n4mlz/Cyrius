@@ -20,6 +20,12 @@
 - Each virtqueue is backed by a `DmaRegion` allocated via the shared `DmaRegionProvider`, guaranteeing physical contiguity and cache-line alignment.
 - The provider returns both physical and virtual views so queue initialisation can zero buffers and program physical addresses without extra helpers.
 
+## VirtIO Block Driver (`block.rs`)
+- Implements the `BlockDevice` trait on top of `Transport`, negotiating only the features currently supported (read-only flag, flush, block-size reporting) and rejecting devices with incompatible block sizes.
+- Uses a single virtqueue and busy-wait completion path for now; each request builds a descriptor chain of `{header, data, status}` buffers allocated from the DMA provider to satisfy contiguous DMA requirements.
+- Discovery (`probe_pci_devices`) scans the PCI transport helper, instantiates `VirtioBlkDevice` objects with human-readable names, and logs failures without panicking so other devices can continue initialising.
+- Unit tests rely on a mock transport plus a test-only completion hook that simulates device acknowledgements by directly mutating the used ring, enabling deterministic verification of descriptor layout and data copying without QEMU.
+
 ## Testing Strategy
 - Unit tests cover descriptor layout calculations and DMA region accounting.
 - Integration tests (QEMU) will later validate that virtio-blk negotiation succeeds and that read requests complete.

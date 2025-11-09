@@ -14,7 +14,7 @@ pub enum DmaError {
     AllocationFailed,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DmaRegionProvider;
 
 impl DmaRegionProvider {

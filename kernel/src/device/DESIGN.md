@@ -10,6 +10,12 @@
 - Prefer trait bounds (`ReadOps`, `WriteOps`) to enforce capability checks at compile time.
 - Encourage drivers to surface transport errors via structured enums instead of panicking, leaving policy decisions to callers.
 
+## Block Devices (`device::block`)
+- Defines the synchronous `BlockDevice` trait used by storage drivers. Consumers operate on logical block addresses and supply buffers that are multiples of the advertised block size.
+- The trait is intentionally narrow (read/write/flush plus metadata) so that VFS/paging code can compose higher-level semantics without being tied to the transport.
+- `device::virtio::block` provides the first concrete implementation using the VirtIO PCI transport. Devices are discovered through `probe_pci_devices`, stored in a simple registry guarded by a `SpinLock`, and surfaced to future subsystems via helper callbacks.
+- The driver keeps virtqueue plumbing and DMA buffer management self-contained, reusing the generic `QueueMemory` + `DmaRegionProvider` so other transports can follow the same pattern.
+
 ## Future Work
 - Introduce registry infrastructure to enumerate devices discovered during boot.
 - Extend to block devices (storage) and network adapters, aligning with the project goal of container-native workloads.
