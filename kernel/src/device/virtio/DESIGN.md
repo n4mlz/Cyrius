@@ -28,4 +28,6 @@
 
 ## Testing Strategy
 - Unit tests cover descriptor layout calculations and DMA region accounting.
-- Integration tests (QEMU) will later validate that virtio-blk negotiation succeeds and that read requests complete.
+- Integration tests (driven via `cargo xtask test`) attach `target/virtio-blk-test.img` as a
+  VirtIO block device and assert that the driver can read the seeded pattern and persist writes,
+  exercising the full DMA + queue path under QEMU.

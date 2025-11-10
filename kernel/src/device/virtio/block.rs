@@ -630,6 +630,7 @@ fn align_up(value: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::Cell;
     use core::sync::atomic::{AtomicU8, Ordering};
@@ -686,6 +687,59 @@ mod tests {
         device.write_blocks(0, &buffer).expect("write");
         let capture = WRITE_CAPTURE.lock();
         assert_eq!(capture.as_slice(), buffer);
+    }
+
+    /// Validates virtio-blk against the QEMU-provided disk image.
+    ///
+    /// # Implicit dependency
+    /// Relies on `xtask::prepare_test_block_image` attaching `target/virtio-blk-test.img`
+    /// as the first VirtIO block device during `cargo xtask test` runs. The image seeds
+    /// sector 0 with the repeated pattern `CYRIUSBLKTESTIMG` and reserves sector 1 for
+    /// writeback verification.
+    #[kernel_test_case]
+    fn virtio_blk_rw_roundtrip_integration() {
+        const PATTERN: &[u8] = b"CYRIUSBLKTESTIMG";
+        const READ_LBA: u64 = 0;
+        const WRITE_LBA: u64 = 1;
+
+        with_devices(|devices| {
+            assert!(
+                !devices.is_empty(),
+                "virtio-blk integration test requires a block device"
+            );
+            let device = &mut devices[0];
+
+            let block_size = device.block_size() as usize;
+            let mut read_buf = vec![0u8; block_size];
+            device
+                .read_blocks(READ_LBA, &mut read_buf)
+                .expect("read seed block");
+
+            for (index, byte) in read_buf.iter().enumerate().take(PATTERN.len()) {
+                assert_eq!(
+                    *byte,
+                    PATTERN[index % PATTERN.len()],
+                    "seed pattern mismatch at byte {index}"
+                );
+            }
+
+            let write_buf = vec![0xA5u8; block_size];
+            device
+                .write_blocks(WRITE_LBA, &write_buf)
+                .expect("write payload");
+
+            match device.flush() {
+                Ok(()) => {}
+                Err(VirtioBlkError::FlushUnsupported) => {}
+                Err(err) => panic!("flush failed: {err:?}"),
+            }
+
+            let mut verify_buf = vec![0u8; block_size];
+            device
+                .read_blocks(WRITE_LBA, &mut verify_buf)
+                .expect("read back payload");
+            assert_eq!(verify_buf, write_buf, "written block mismatch");
+        });
     }
 
     fn complete_read(queue: &mut QueueState, buffers: &mut RequestBuffers) {
