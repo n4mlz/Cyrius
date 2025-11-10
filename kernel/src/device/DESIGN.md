@@ -15,6 +15,7 @@
 - The trait is intentionally narrow (read/write/flush plus metadata) so that VFS/paging code can compose higher-level semantics without being tied to the transport.
 - `device::virtio::block` provides the first concrete implementation using the VirtIO PCI transport. Devices are discovered through `probe_pci_devices`, stored in a simple registry guarded by a `SpinLock`, and surfaced to future subsystems via helper callbacks.
 - The driver keeps virtqueue plumbing and DMA buffer management self-contained, reusing the generic `QueueMemory` + `DmaRegionProvider` so other transports can follow the same pattern.
+- Modern VirtIO devices expose MSI-X vectors; the driver now programs a per-queue vector via the shared interrupt allocator so completions arrive asynchronously instead of pure polling.
 
 ## Future Work
 - Introduce registry infrastructure to enumerate devices discovered during boot.
@@ -30,6 +31,7 @@
   - `DeviceCfg` (virtio-blk config exposing capacity, geometry, status)
 - Queue shared memory areas are provisioned via a transport-agnostic DMA allocator so descriptor/avail/used regions share a contiguous physical window suitable for device DMA.
 - Interrupt/notification surfacing is channelled through a transport trait so future transports (e.g. MMIO, CCW) can integrate without rewriting queue logic.
+- MSI-X programming rides on the same trait: transports that cannot wire interrupts simply return `Unsupported`, allowing the block layer to fall back to spin-based completion while x86_64 PCI parts opt into the interrupt path automatically.
 
 ## Block Device Abstraction Roadmap
 - `device::block` module hosts the upcoming `BlockDevice` trait with read/write/flush primitives that are synchronous-by-default for ease of bring-up.

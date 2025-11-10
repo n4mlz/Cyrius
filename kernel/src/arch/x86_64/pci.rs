@@ -159,10 +159,31 @@ pub fn capabilities_pointer(addr: PciAddress) -> Option<u8> {
     Some(read_u8(addr, 0x34))
 }
 
+pub fn find_capability(addr: PciAddress, target: u8) -> Option<u8> {
+    let mut cap = capabilities_pointer(addr)?;
+    let mut guard = 0;
+    while cap != 0 && guard < 64 {
+        if read_capability_byte(addr, cap, 0) == target {
+            return Some(cap);
+        }
+        cap = read_capability_byte(addr, cap, 1);
+        guard += 1;
+    }
+    None
+}
+
 pub fn read_capability_dword(addr: PciAddress, cap: u8, offset: u8) -> u32 {
     read_u32(addr, cap as u16 + offset as u16)
 }
 
 pub fn read_capability_byte(addr: PciAddress, cap: u8, offset: u8) -> u8 {
     read_u8(addr, cap as u16 + offset as u16)
+}
+
+pub fn read_capability_word(addr: PciAddress, cap: u8, offset: u8) -> u16 {
+    read_u16(addr, cap as u16 + offset as u16)
+}
+
+pub fn write_capability_word(addr: PciAddress, cap: u8, offset: u8, value: u16) {
+    write_u16(addr, cap as u16 + offset as u16, value)
 }

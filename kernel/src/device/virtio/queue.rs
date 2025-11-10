@@ -1,4 +1,5 @@
 use core::mem::size_of;
+use core::ptr;
 
 use crate::mem::addr::{Addr, PhysAddr, VirtIntoPtr};
 use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
@@ -230,19 +231,19 @@ impl<'a> AvailRing<'a> {
     }
 
     pub fn flags(&self) -> u16 {
-        self.header.flags
+        unsafe { ptr::read_volatile(&self.header.flags) }
     }
 
     pub fn set_flags(&mut self, value: u16) {
-        self.header.flags = value;
+        unsafe { ptr::write_volatile(&mut self.header.flags, value) }
     }
 
     pub fn idx(&self) -> u16 {
-        self.header.idx
+        unsafe { ptr::read_volatile(&self.header.idx) }
     }
 
     pub fn set_idx(&mut self, value: u16) {
-        self.header.idx = value;
+        unsafe { ptr::write_volatile(&mut self.header.idx, value) }
     }
 
     pub fn ring(&mut self) -> &mut [u16] {
@@ -277,19 +278,19 @@ impl<'a> UsedRing<'a> {
     }
 
     pub fn flags(&self) -> u16 {
-        self.header.flags
+        unsafe { ptr::read_volatile(&self.header.flags) }
     }
 
     pub fn set_flags(&mut self, value: u16) {
-        self.header.flags = value;
+        unsafe { ptr::write_volatile(&mut self.header.flags, value) }
     }
 
     pub fn idx(&self) -> u16 {
-        self.header.idx
+        unsafe { ptr::read_volatile(&self.header.idx) }
     }
 
     pub fn set_idx(&mut self, value: u16) {
-        self.header.idx = value;
+        unsafe { ptr::write_volatile(&mut self.header.idx, value) }
     }
 
     pub fn ring(&mut self) -> &mut [UsedElem] {

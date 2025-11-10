@@ -15,11 +15,16 @@ pub mod timer;
 pub use crate::arch::api::{TimerError, TimerMode, TimerTicks};
 pub use timer::{SYSTEM_TIMER, SystemTimer};
 
+pub const DEVICE_VECTOR_BASE: u8 = 0x60;
+pub const DEVICE_VECTOR_COUNT: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptError {
     InvalidVector,
     HandlerAlreadyRegistered,
     NotInitialised,
+    HandlerMismatch,
+    VectorExhausted,
 }
 
 pub trait InterruptServiceRoutine: Sync {
@@ -84,6 +89,44 @@ impl InterruptController {
         }
         *slot = Some(handler);
         Ok(())
+    }
+
+    pub fn allocate_vector(
+        &self,
+        handler: &'static dyn InterruptServiceRoutine,
+    ) -> Result<u8, InterruptError> {
+        for offset in 0..DEVICE_VECTOR_COUNT {
+            let vector = DEVICE_VECTOR_BASE + offset as u8;
+            match self.register_handler(vector, handler) {
+                Ok(()) => return Ok(vector),
+                Err(InterruptError::HandlerAlreadyRegistered) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(InterruptError::VectorExhausted)
+    }
+
+    pub fn release_vector(
+        &self,
+        vector: u8,
+        handler: &'static dyn InterruptServiceRoutine,
+    ) -> Result<(), InterruptError> {
+        if vector < 32 || vector as usize >= VECTOR_COUNT {
+            return Err(InterruptError::InvalidVector);
+        }
+
+        let mut table = self.handlers.lock();
+        let slot = table
+            .get_mut(vector as usize)
+            .ok_or(InterruptError::InvalidVector)?;
+        match slot {
+            Some(current) if core::ptr::eq(*current, handler) => {
+                *slot = None;
+                Ok(())
+            }
+            Some(_) => Err(InterruptError::HandlerMismatch),
+            None => Err(InterruptError::InvalidVector),
+        }
     }
 
     pub fn enable(&self) {

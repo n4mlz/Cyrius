@@ -1,16 +1,21 @@
-use alloc::{format, string::String, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use crate::device::block::BlockDevice;
 use crate::device::virtio::pci::{self, VirtioPciTransport};
 use crate::device::virtio::queue::{
     Descriptor, DescriptorFlags, QueueError, QueueMemory, UsedElem,
 };
-use crate::device::virtio::transport::{DeviceStatus, Transport, TransportError};
+use crate::device::virtio::transport::{
+    DeviceStatus, Transport, TransportError, VirtioIrqError, VirtioIrqTransport,
+};
 use crate::device::{Device, DeviceType};
+use crate::interrupt::{INTERRUPTS, InterruptError, InterruptServiceRoutine};
 use crate::mem::addr::{Addr, PageSize, PhysAddr, VirtIntoPtr};
 use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
+use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const VIRTIO_BLOCK_QUEUE_INDEX: u16 = 0;
 const MAX_QUEUE_SIZE: u16 = 128;
@@ -115,11 +120,14 @@ pub struct VirtioBlkDevice<T: VirtioBlkTransport> {
     capacity_sectors: u64,
     read_only: bool,
     flush_supported: bool,
+    queue_irq: Option<&'static QueueInterrupt>,
+    irq_handler: Option<&'static QueueInterruptHandler>,
+    irq_vector: Option<u8>,
     #[cfg(test)]
     completion_hook: Option<fn(&mut QueueState, &mut RequestBuffers)>,
 }
 
-impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
+impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
     pub fn new(name: String, mut transport: T) -> Result<Self, VirtioBlkError> {
         let mut status = DeviceStatus::ACKNOWLEDGE;
         transport.set_status(status);
@@ -170,22 +178,30 @@ impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
             ));
         }
 
-        let queue = QueueState::new(queue_size, queue_memory);
-        status = status.with(DeviceStatus::DRIVER_OK);
-        transport.set_status(status);
-
-        Ok(Self {
+        let mut device = Self {
             name,
-            queue,
+            queue: QueueState::new(queue_size, queue_memory),
             transport,
             dma: DmaRegionProvider::new(),
             block_size,
             capacity_sectors: config.capacity,
             read_only: (device_features & FeatureBits::RO.bits()) != 0,
             flush_supported: (device_features & FeatureBits::FLUSH.bits()) != 0,
+            queue_irq: None,
+            irq_handler: None,
+            irq_vector: None,
             #[cfg(test)]
             completion_hook: None,
-        })
+        };
+
+        if let Err(err) = device.init_interrupts() {
+            return Err(fail_status(&mut device.transport, err));
+        }
+
+        status = status.with(DeviceStatus::DRIVER_OK);
+        device.transport.set_status(status);
+
+        Ok(device)
     }
 
     fn validate_buffer(&self, lba: u64, len: usize) -> Result<u64, VirtioBlkError> {
@@ -252,6 +268,9 @@ impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
         direction: IoDirection,
     ) -> Result<u8, VirtioBlkError> {
         self.prepare_descriptors(buffers, direction);
+        if let Some(irq) = self.queue_irq {
+            irq.arm();
+        }
         self.queue.push(0);
         self.transport
             .notify_queue(VIRTIO_BLOCK_QUEUE_INDEX)
@@ -260,7 +279,11 @@ impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
         if let Some(hook) = self.completion_hook {
             hook(&mut self.queue, buffers);
         }
-        let _completion = self.queue.wait_for_used();
+        let _completion = if let Some(irq) = self.queue_irq {
+            self.wait_for_completion(irq)
+        } else {
+            self.queue.wait_for_used()
+        };
         Ok(buffers.status())
     }
 
@@ -308,13 +331,54 @@ impl<T: VirtioBlkTransport> VirtioBlkDevice<T> {
         slices.avail.set_flags(0);
     }
 
+    fn init_interrupts(&mut self) -> Result<(), VirtioBlkError> {
+        if !self.transport.supports_queue_irq() {
+            return Ok(());
+        }
+
+        let (queue_irq, handler) = allocate_queue_irq();
+        let vector = INTERRUPTS
+            .allocate_vector(handler)
+            .map_err(VirtioBlkError::InterruptController)?;
+
+        match self
+            .transport
+            .configure_queue_irq(VIRTIO_BLOCK_QUEUE_INDEX, vector)
+        {
+            Ok(()) => {
+                queue_irq.arm();
+                self.queue_irq = Some(queue_irq);
+                self.irq_handler = Some(handler);
+                self.irq_vector = Some(vector);
+                Ok(())
+            }
+            Err(VirtioIrqError::Unsupported) => {
+                let _ = INTERRUPTS.release_vector(vector, handler);
+                Ok(())
+            }
+            Err(err) => {
+                let _ = INTERRUPTS.release_vector(vector, handler);
+                Err(VirtioBlkError::Interrupt(err))
+            }
+        }
+    }
+
+    fn wait_for_completion(&mut self, irq: &QueueInterrupt) -> UsedElem {
+        loop {
+            if let Some(entry) = self.queue.pop_used() {
+                return entry;
+            }
+            irq.wait();
+        }
+    }
+
     #[cfg(test)]
     pub(self) fn set_completion_hook(&mut self, hook: fn(&mut QueueState, &mut RequestBuffers)) {
         self.completion_hook = Some(hook);
     }
 }
 
-impl<T: VirtioBlkTransport> Device for VirtioBlkDevice<T> {
+impl<T: VirtioBlkTransport + VirtioIrqTransport> Device for VirtioBlkDevice<T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -324,7 +388,7 @@ impl<T: VirtioBlkTransport> Device for VirtioBlkDevice<T> {
     }
 }
 
-impl<T: VirtioBlkTransport> BlockDevice for VirtioBlkDevice<T> {
+impl<T: VirtioBlkTransport + VirtioIrqTransport> BlockDevice for VirtioBlkDevice<T> {
     type Error = VirtioBlkError;
 
     fn block_size(&self) -> u32 {
@@ -387,6 +451,8 @@ pub enum VirtioBlkError {
     DeviceStatus(u8),
     ReadOnly,
     FlushUnsupported,
+    Interrupt(VirtioIrqError),
+    InterruptController(InterruptError),
 }
 
 impl From<TransportError> for VirtioBlkError {
@@ -404,6 +470,12 @@ impl From<QueueError> for VirtioBlkError {
 impl From<DmaError> for VirtioBlkError {
     fn from(value: DmaError) -> Self {
         Self::Dma(value)
+    }
+}
+
+impl From<VirtioIrqError> for VirtioBlkError {
+    fn from(value: VirtioIrqError) -> Self {
+        Self::Interrupt(value)
     }
 }
 
@@ -434,18 +506,75 @@ impl QueueState {
 
     fn wait_for_used(&mut self) -> UsedElem {
         loop {
-            {
-                let mut slices = self.memory.slices();
-                let used_idx = slices.used.idx();
-                if used_idx != self.used_idx {
-                    let slot = ((used_idx.wrapping_sub(1)) % self.size) as usize;
-                    let entry = slices.used.ring()[slot];
-                    self.used_idx = used_idx;
-                    return entry;
-                }
+            if let Some(entry) = self.pop_used() {
+                return entry;
             }
             core::hint::spin_loop();
         }
+    }
+
+    fn pop_used(&mut self) -> Option<UsedElem> {
+        let mut slices = self.memory.slices();
+        let used_idx = slices.used.idx();
+        if used_idx == self.used_idx {
+            return None;
+        }
+        let slot = ((used_idx.wrapping_sub(1)) % self.size) as usize;
+        let ring = slices.used.ring();
+        let entry = unsafe { core::ptr::read_volatile(&ring[slot]) };
+        self.used_idx = used_idx;
+        Some(entry)
+    }
+}
+
+fn allocate_queue_irq() -> (&'static QueueInterrupt, &'static QueueInterruptHandler) {
+    let queue = Box::leak(Box::new(QueueInterrupt::new()));
+    let handler = Box::leak(Box::new(QueueInterruptHandler::new(queue)));
+    (queue, handler)
+}
+
+struct QueueInterrupt {
+    pending: AtomicBool,
+}
+
+impl QueueInterrupt {
+    const fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn wait(&self) {
+        loop {
+            if self.pending.swap(false, Ordering::AcqRel) {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    fn notify(&self) {
+        self.pending.store(true, Ordering::Release);
+    }
+}
+
+struct QueueInterruptHandler {
+    queue: &'static QueueInterrupt,
+}
+
+impl QueueInterruptHandler {
+    const fn new(queue: &'static QueueInterrupt) -> Self {
+        Self { queue }
+    }
+}
+
+impl InterruptServiceRoutine for QueueInterruptHandler {
+    fn handle(&self, _info: TrapInfo, _frame: &mut CurrentTrapFrame) {
+        self.queue.notify();
     }
 }
 
@@ -454,7 +583,10 @@ impl QueueState {
     fn test_complete(&mut self, len: u32) {
         let mut slices = self.memory.slices();
         let slot = (self.used_idx % self.size) as usize;
-        slices.used.ring()[slot] = UsedElem { id: 0, len };
+        let ring = slices.used.ring();
+        unsafe {
+            core::ptr::write_volatile(&mut ring[slot], UsedElem { id: 0, len });
+        }
         let next = self.used_idx.wrapping_add(1);
         slices.used.set_idx(next);
     }
@@ -840,6 +972,8 @@ mod tests {
             Ok(())
         }
     }
+
+    impl VirtioIrqTransport for MockTransport {}
 
     impl QueueNotifier for MockTransport {
         fn notify_queue(&self, queue_index: u16) -> Result<(), TransportError> {

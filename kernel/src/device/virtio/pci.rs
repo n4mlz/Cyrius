@@ -3,15 +3,26 @@ use core::convert::TryFrom;
 use core::ptr::NonNull;
 
 use crate::arch::x86_64::pci::{self, BarAddress, PciAddress};
+use crate::arch::{
+    Arch,
+    api::{ArchInterrupt, MsiMessage},
+};
 use crate::device::virtio::queue::QueueConfig;
-use crate::device::virtio::transport::{DeviceStatus, QueueNotifier, Transport, TransportError};
+use crate::device::virtio::transport::{
+    DeviceStatus, QueueNotifier, Transport, TransportError, VirtioIrqError, VirtioIrqTransport,
+};
 use crate::mem::addr::{Addr, PhysAddr, VirtAddr, VirtIntoPtr};
 use crate::mem::manager;
 use crate::mem::paging::PhysMapper;
+use crate::util::spinlock::SpinLock;
 
 const PCI_CAP_ID_VENDOR: u8 = 0x09;
+const PCI_CAP_ID_MSIX: u8 = 0x11;
 const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
 const VIRTIO_BLOCK_DEVICE_ID: u16 = 0x1042;
+const MSIX_ENABLE: u16 = 1 << 15;
+const MSIX_FUNCTION_MASK: u16 = 1 << 14;
+const MSIX_VECTOR_MASK: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioDeviceKind {
@@ -37,6 +48,7 @@ pub struct VirtioPciTransport {
     isr: MmioRegister<u8>,
     device_cfg: DeviceCfgRegion,
     num_queues: u16,
+    msix: Option<SpinLock<MsixState>>,
 }
 
 unsafe impl Send for VirtioPciTransport {}
@@ -63,6 +75,7 @@ impl VirtioPciTransport {
 
         let common = CommonCfg::new(common)?;
         let num_queues = common.num_queues();
+        let msix = MsixState::discover(addr)?;
 
         Ok(Self {
             addr,
@@ -72,6 +85,7 @@ impl VirtioPciTransport {
             isr,
             device_cfg: DeviceCfgRegion::from(device_cfg),
             num_queues,
+            msix: msix.map(SpinLock::new),
         })
     }
 
@@ -157,6 +171,29 @@ impl Transport for VirtioPciTransport {
     }
 }
 
+impl VirtioIrqTransport for VirtioPciTransport {
+    fn supports_queue_irq(&self) -> bool {
+        self.msix.is_some()
+    }
+
+    fn configure_queue_irq(&self, queue_index: u16, vector: u8) -> Result<(), VirtioIrqError> {
+        let msix = self.msix.as_ref().ok_or(VirtioIrqError::Unsupported)?;
+        let message = <Arch as ArchInterrupt>::msi_message(vector)
+            .ok_or(VirtioIrqError::Backend("msi message unavailable"))?;
+
+        let mut state = msix.lock();
+        state.enable().map_err(VirtioIrqError::from)?;
+        state
+            .program_entry(0, message)
+            .map_err(VirtioIrqError::from)?;
+        self.select_queue(queue_index)
+            .map_err(VirtioIrqError::from)?;
+        self.common.set_queue_msix_vector(0);
+        self.common.set_msix_config_vector(u16::MAX);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ProbeError {
     NotVirtio,
@@ -178,6 +215,119 @@ struct CapLocation {
 struct NotifyLocation {
     cap: CapLocation,
     multiplier: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsixError {
+    InvalidIndex,
+}
+
+impl From<MsixError> for VirtioIrqError {
+    fn from(value: MsixError) -> Self {
+        match value {
+            MsixError::InvalidIndex => VirtioIrqError::Backend("invalid MSI-X index"),
+        }
+    }
+}
+
+struct MsixState {
+    addr: PciAddress,
+    cap_ptr: u8,
+    table: MsixTable,
+    enabled: bool,
+}
+
+impl MsixState {
+    fn discover(addr: PciAddress) -> Result<Option<Self>, ProbeError> {
+        let cap_ptr = match pci::find_capability(addr, PCI_CAP_ID_MSIX) {
+            Some(ptr) => ptr,
+            None => return Ok(None),
+        };
+
+        let msg_control = pci::read_capability_word(addr, cap_ptr, 2);
+        let table_size = ((msg_control & 0x07FF) + 1) as usize;
+        if table_size == 0 {
+            return Ok(None);
+        }
+
+        let table_raw = pci::read_capability_dword(addr, cap_ptr, 4);
+        let table_bir = (table_raw & 0x7) as u8;
+        let table_offset = table_raw & !0x7;
+        let table_len = table_size * core::mem::size_of::<MsixTableEntry>();
+        let table_region = map_bar_region(addr, table_bir, table_offset, table_len)?;
+        let table = MsixTable::new(table_region, table_size)?;
+
+        Ok(Some(Self {
+            addr,
+            cap_ptr,
+            table,
+            enabled: false,
+        }))
+    }
+
+    fn enable(&mut self) -> Result<(), MsixError> {
+        if self.enabled {
+            return Ok(());
+        }
+        let mut control = pci::read_capability_word(self.addr, self.cap_ptr, 2);
+        control |= MSIX_ENABLE;
+        control &= !MSIX_FUNCTION_MASK;
+        pci::write_capability_word(self.addr, self.cap_ptr, 2, control);
+        self.enabled = true;
+        Ok(())
+    }
+
+    fn program_entry(&mut self, index: u16, message: MsiMessage) -> Result<(), MsixError> {
+        self.table.program(index, message)
+    }
+}
+
+struct MsixTable {
+    _region: MmioRegion,
+    entries: *mut MsixTableEntry,
+    len: usize,
+}
+
+impl MsixTable {
+    fn new(region: MmioRegion, len: usize) -> Result<Self, ProbeError> {
+        let needed = len
+            .checked_mul(core::mem::size_of::<MsixTableEntry>())
+            .ok_or(ProbeError::MapFailed)?;
+        if region.len < needed {
+            return Err(ProbeError::MapFailed);
+        }
+        let entries = region.virt.into_mut_ptr() as *mut MsixTableEntry;
+        Ok(Self {
+            _region: region,
+            entries,
+            len,
+        })
+    }
+
+    fn program(&mut self, index: u16, message: MsiMessage) -> Result<(), MsixError> {
+        let idx = index as usize;
+        if idx >= self.len {
+            return Err(MsixError::InvalidIndex);
+        }
+        unsafe {
+            let entry = self.entries.add(idx);
+            core::ptr::write_volatile(&mut (*entry).addr_lo, message.address as u32);
+            core::ptr::write_volatile(&mut (*entry).addr_hi, (message.address >> 32) as u32);
+            core::ptr::write_volatile(&mut (*entry).data, message.data);
+            let mut ctrl = core::ptr::read_volatile(&(*entry).vector_control);
+            ctrl &= !MSIX_VECTOR_MASK;
+            core::ptr::write_volatile(&mut (*entry).vector_control, ctrl);
+        }
+        Ok(())
+    }
+}
+
+#[repr(C)]
+struct MsixTableEntry {
+    addr_lo: u32,
+    addr_hi: u32,
+    data: u32,
+    vector_control: u32,
 }
 
 struct VirtioCapSet {
@@ -447,6 +597,14 @@ impl CommonCfg {
         unsafe { core::ptr::write_volatile(&mut (*self.raw.as_ptr()).queue_enable, enabled as u16) }
     }
 
+    fn set_queue_msix_vector(&self, value: u16) {
+        unsafe { core::ptr::write_volatile(&mut (*self.raw.as_ptr()).queue_msix_vector, value) }
+    }
+
+    fn set_msix_config_vector(&self, value: u16) {
+        unsafe { core::ptr::write_volatile(&mut (*self.raw.as_ptr()).msix_config, value) }
+    }
+
     fn queue_notify_offset(&self) -> u16 {
         unsafe { core::ptr::read_volatile(&(*self.raw.as_ptr()).queue_notify_off) }
     }
@@ -505,6 +663,20 @@ fn map_notify_region(addr: PciAddress, notify: NotifyLocation) -> Result<NotifyR
         region,
         multiplier: notify.multiplier,
     })
+}
+
+fn map_bar_region(
+    addr: PciAddress,
+    bar: u8,
+    offset: u32,
+    len: usize,
+) -> Result<MmioRegion, ProbeError> {
+    let cap = CapLocation {
+        bar,
+        offset,
+        length: len.try_into().map_err(|_| ProbeError::AddressOverflow)?,
+    };
+    map_cap_region(addr, cap)
 }
 
 pub fn enumerate_block_transports() -> Vec<VirtioPciTransport> {

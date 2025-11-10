@@ -45,6 +45,23 @@ pub trait QueueNotifier {
     fn notify_queue(&self, queue_index: u16) -> Result<(), TransportError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioIrqError {
+    Unsupported,
+    Backend(&'static str),
+}
+
+impl From<TransportError> for VirtioIrqError {
+    fn from(value: TransportError) -> Self {
+        Self::Backend(match value {
+            TransportError::CapabilityMissing(name) => name,
+            TransportError::QueueUnavailable => "queue unavailable",
+            TransportError::InvalidQueueSize => "invalid queue size",
+            TransportError::NotifyUnavailable => "notify unavailable",
+        })
+    }
+}
+
 pub trait Transport: QueueNotifier {
     fn device_id(&self) -> u16;
     fn read_device_features(&self, select: u32) -> u32;
@@ -58,4 +75,14 @@ pub trait Transport: QueueNotifier {
     fn set_queue_size(&self, size: u16) -> Result<(), TransportError>;
     fn program_queue(&self, cfg: &QueueConfig) -> Result<(), TransportError>;
     fn enable_queue(&self, enabled: bool) -> Result<(), TransportError>;
+}
+
+pub trait VirtioIrqTransport: Transport {
+    fn supports_queue_irq(&self) -> bool {
+        false
+    }
+
+    fn configure_queue_irq(&self, _queue_index: u16, _vector: u8) -> Result<(), VirtioIrqError> {
+        Err(VirtioIrqError::Unsupported)
+    }
 }

@@ -95,7 +95,9 @@ impl SystemTimer {
         let vector = <Arch as ArchInterrupt>::timer_vector();
         match INTERRUPTS.register_handler(vector, &TIMER_DISPATCH) {
             Ok(()) | Err(InterruptError::HandlerAlreadyRegistered) => Ok(()),
-            Err(InterruptError::InvalidVector) => {
+            Err(InterruptError::InvalidVector)
+            | Err(InterruptError::HandlerMismatch)
+            | Err(InterruptError::VectorExhausted) => {
                 self.handler_registered.store(false, Ordering::Release);
                 Err(TimerError::HardwareError)
             }
