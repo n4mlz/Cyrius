@@ -32,6 +32,12 @@ pub enum HeapRegionError {
     AddressOverflow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsiMessage {
+    pub address: u64,
+    pub data: u32,
+}
+
 pub trait ArchMemory {
     fn locate_kernel_heap(
         boot_info: &'static BootInfo,
@@ -157,4 +163,5 @@ pub trait ArchInterrupt {
 
     fn timer() -> &'static Self::Timer;
     fn timer_vector() -> u8;
+    fn msi_message(vector: u8) -> Option<MsiMessage>;
 }

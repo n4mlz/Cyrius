@@ -4,7 +4,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use bootloader_api::BootInfo;
 
-use crate::arch::api::{InterruptInitError, TimerDriver, TimerError, TimerMode, TimerTicks};
+use crate::arch::api::{
+    InterruptInitError, MsiMessage, TimerDriver, TimerError, TimerMode, TimerTicks,
+};
 use crate::device::bus::reg::RegBus;
 use crate::util::spinlock::SpinLock;
 
@@ -21,6 +23,7 @@ const APIC_BASE_MASK: u64 = 0xffff_f000;
 
 const SPURIOUS_VECTOR: u8 = 0xFF;
 
+const REG_ID: usize = 0x20;
 const REG_TPR: usize = 0x80;
 const REG_EOI: usize = 0xB0;
 const REG_SVR: usize = 0xF0;
@@ -119,6 +122,21 @@ impl LocalApic {
 
     pub fn timer(&'static self) -> &'static LocalApicTimer {
         &TIMER_DEVICE
+    }
+
+    pub fn id(&self) -> Option<u8> {
+        let regs = self.regs()?;
+        let raw = unsafe { regs.read(REG_ID) };
+        Some(((raw >> 24) & 0xFF) as u8)
+    }
+
+    pub fn msi_message(&self, vector: u8) -> Option<MsiMessage> {
+        let dest_id = self.id()?;
+        let address = 0xFEE0_0000u64 | ((dest_id as u64) << 12);
+        Some(MsiMessage {
+            address,
+            data: vector as u32,
+        })
     }
 
     fn regs(&self) -> Option<LocalApicRegs> {
@@ -235,6 +253,11 @@ impl LocalApicRegs {
         unsafe {
             ptr.write_volatile(value);
         }
+    }
+
+    unsafe fn read(&self, offset: usize) -> u32 {
+        let ptr = unsafe { self.base.add(offset) as *const u32 };
+        unsafe { ptr.read_volatile() }
     }
 }
 

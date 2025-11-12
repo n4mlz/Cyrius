@@ -11,6 +11,7 @@
 ## Handler Dispatch
 - Maintains a fixed-size table (`handlers[256]`) protected by a `SpinLock`; vector 0–31 remain reserved for exceptions.
 - Exceptions and NMIs fall back to structured logging, while external interrupts invoke registered `InterruptServiceRoutine`s and automatically issue end-of-interrupt acknowledgements.
+- Vectors `0x60..0x6F` are dedicated to devices. Drivers call `allocate_vector`/`release_vector` instead of hard-coding IDs, letting the controller enforce exclusivity before the architecture-specific entry point (IDT) hands control to the driver handler.
 
 ## Timer Integration
 - `SystemTimer` wraps the architecture timer driver, ensuring a dispatch handler is registered before programming hardware.
@@ -24,4 +25,4 @@
 ## Future Work
 - Add support for nested interrupt prioritisation and vector allocation policies.
 - Track per-CPU interrupt state when SMP arrives, including per-core handler tables.
-- Provide generic abstractions for message-signalled interrupts (MSI/MSI-X) once device drivers require them.
+- Extend the new MSI-X plumbing with richer policies (vector pinning, per-CPU affinity) and generalise the interface so non-PCI transports can surface equivalent message-signalled mechanisms.

@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod interrupt;
 pub mod mem;
+pub mod pci;
 mod thread;
 mod trap;
 
@@ -10,7 +11,7 @@ use bootloader_api::BootInfo;
 
 use crate::arch::api::{
     ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchThread, ArchTrap, HeapRegionError,
-    InterruptInitError, UserStackError,
+    InterruptInitError, MsiMessage, UserStackError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
 use crate::mem::addr::{AddrRange, VirtAddr};
@@ -79,6 +80,10 @@ impl ArchInterrupt for X86_64 {
 
     fn timer_vector() -> u8 {
         interrupt::TIMER_VECTOR
+    }
+
+    fn msi_message(vector: u8) -> Option<MsiMessage> {
+        interrupt::LOCAL_APIC.msi_message(vector)
     }
 }
 

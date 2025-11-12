@@ -3,7 +3,7 @@ use std::{path::PathBuf, process};
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use xtask::{ImageKind, image_bios, run_qemu};
+use xtask::{ImageKind, image_bios, prepare_test_block_image, run_qemu};
 
 #[derive(Parser)]
 struct RunnerCli {
@@ -40,7 +40,13 @@ fn real_main() -> Result<i32> {
         },
     )?;
 
-    let status = run_qemu(&image, test)?;
+    let block_image = if test {
+        Some(prepare_test_block_image()?)
+    } else {
+        None
+    };
+
+    let status = run_qemu(&image, test, block_image.as_deref())?;
 
     if !test {
         return Ok(status.code().unwrap_or_default());

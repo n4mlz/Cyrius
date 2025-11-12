@@ -109,7 +109,7 @@ fn alloc_error(layout: Layout) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::kernel_test_case;
+    use crate::{println, test::kernel_test_case};
 
     const HEAP_BYTES: usize = 64 * 1024;
 
@@ -137,6 +137,8 @@ mod tests {
 
     #[kernel_test_case]
     fn initialise_and_allocate() {
+        println!("[test] initialise_and_allocate");
+
         unsafe { reset_region() };
 
         let heap = LockedHeap::new();
@@ -163,6 +165,8 @@ mod tests {
 
     #[kernel_test_case]
     fn double_initialisation_fails() {
+        println!("[test] double_initialisation_fails");
+
         unsafe { reset_region() };
 
         let heap = LockedHeap::new();

@@ -93,6 +93,17 @@ impl BootInfoFrameAllocator {
         }
     }
 
+    pub fn allocate_contiguous(
+        &mut self,
+        count: usize,
+        size: PageSize,
+    ) -> Option<Vec<Page<PhysAddr>>> {
+        if size != PageSize::SIZE_4K || count == 0 {
+            return None;
+        }
+        self.allocate_run(count)
+    }
+
     pub fn reserve(&mut self, range: AddrRange<PhysAddr>) {
         if range.is_empty() {
             return;
@@ -176,6 +187,47 @@ impl BootInfoFrameAllocator {
         }
     }
 
+    fn allocate_run(&mut self, count: usize) -> Option<Vec<Page<PhysAddr>>> {
+        loop {
+            if self.current.is_none() && !self.advance_region() {
+                return None;
+            }
+
+            let mut reset_region = false;
+            let (start, end) = {
+                let cursor = self
+                    .current
+                    .as_mut()
+                    .expect("cursor must exist after advance_region");
+                cursor.align_next();
+                let start = cursor.next;
+                let bytes = FRAME_SIZE.checked_mul(count as u64)?;
+                let end = start.checked_add(bytes)?;
+                if end > cursor.end {
+                    reset_region = true;
+                }
+                (start, end)
+            };
+
+            if reset_region {
+                self.current = None;
+                continue;
+            }
+
+            if let Some(skip_to) = self.reserved_overlap(start, end) {
+                if let Some(cursor) = self.current.as_mut() {
+                    cursor.skip_to(skip_to);
+                }
+                continue;
+            }
+
+            if let Some(cursor) = self.current.as_mut() {
+                cursor.next = end;
+            }
+            return Some(build_page_run(start, count));
+        }
+    }
+
     fn reserved_overlap(&self, start: u64, end: u64) -> Option<u64> {
         for range in &self.reserved {
             let r_start = range.start.as_raw() as u64;
@@ -240,6 +292,19 @@ fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
+fn build_page_run(start: u64, count: usize) -> Vec<Page<PhysAddr>> {
+    let mut frames = Vec::with_capacity(count);
+    for index in 0..count {
+        let addr = start
+            .checked_add(FRAME_SIZE * index as u64)
+            .expect("contiguous run overflow");
+        let phys =
+            PhysAddr::new(usize::try_from(addr).expect("contiguous run address exceeds usize"));
+        frames.push(Page::new(phys, PageSize::SIZE_4K));
+    }
+    frames
+}
+
 pub struct FrameAllocatorGuard<'a> {
     guard: SpinLockGuard<'a, MaybeUninit<BootInfoFrameAllocator>>,
 }
@@ -255,6 +320,16 @@ impl<'a> core::ops::Deref for FrameAllocatorGuard<'a> {
 impl<'a> core::ops::DerefMut for FrameAllocatorGuard<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { (*self.guard).assume_init_mut() }
+    }
+}
+
+impl<'a> FrameAllocatorGuard<'a> {
+    pub fn allocate_contiguous(
+        &mut self,
+        count: usize,
+        size: PageSize,
+    ) -> Option<Vec<Page<PhysAddr>>> {
+        (**self).allocate_contiguous(count, size)
     }
 }
 
@@ -328,7 +403,7 @@ pub static FRAME_ALLOCATOR: GlobalFrameAllocator = GlobalFrameAllocator::uninit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::kernel_test_case;
+    use crate::{println, test::kernel_test_case};
     use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 
     const fn region(start: u64, end: u64, kind: MemoryRegionKind) -> MemoryRegion {
@@ -337,6 +412,8 @@ mod tests {
 
     #[kernel_test_case]
     fn reserve_excludes_frames() {
+        println!("[test] reserve_excludes_frames");
+
         static REGIONS: [MemoryRegion; 1] = [region(0x1000, 0x9000, MemoryRegionKind::Usable)];
         let mut allocator = BootInfoFrameAllocator::new(&REGIONS);
 
@@ -362,6 +439,8 @@ mod tests {
 
     #[kernel_test_case]
     fn recycle_returns_frames() {
+        println!("[test] recycle_returns_frames");
+
         static REGIONS: [MemoryRegion; 1] = [region(0x1000, 0x3000, MemoryRegionKind::Usable)];
         let mut allocator = BootInfoFrameAllocator::new(&REGIONS);
 

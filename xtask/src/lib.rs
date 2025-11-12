@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     str,
@@ -112,7 +113,7 @@ pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
     }
 }
 
-pub fn run_qemu(image: &Path, test: bool) -> Result<ExitStatus> {
+pub fn run_qemu(image: &Path, test: bool, block_image: Option<&Path>) -> Result<ExitStatus> {
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args([
         "-m",
@@ -125,6 +126,20 @@ pub fn run_qemu(image: &Path, test: bool) -> Result<ExitStatus> {
         &format!("format=raw,file={}", image.display()),
     ]);
 
+    if let Some(extra) = block_image {
+        qemu.args([
+            "-drive",
+            &format!(
+                "if=none,id=virtio_blk_test,format=raw,file={}",
+                extra.display()
+            ),
+        ]);
+        qemu.args([
+            "-device",
+            "virtio-blk-pci,drive=virtio_blk_test,disable-legacy=on",
+        ]);
+    }
+
     if test {
         qemu.args([
             "-device",
@@ -135,6 +150,29 @@ pub fn run_qemu(image: &Path, test: bool) -> Result<ExitStatus> {
 
     qemu.status()
         .with_context(|| format!("qemu failed to start for {}", image.display()))
+}
+
+pub fn prepare_test_block_image() -> Result<PathBuf> {
+    const IMAGE_PATH: &str = "target/virtio-blk-test.img";
+    const SECTOR_BYTES: usize = 512;
+    const SECTORS: usize = 64;
+    const PATTERN: &[u8] = b"CYRIUSBLKTESTIMG";
+
+    let path = PathBuf::from(IMAGE_PATH);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+
+    let mut image = vec![0u8; SECTOR_BYTES * SECTORS];
+    for (index, byte) in image[..SECTOR_BYTES].iter_mut().enumerate() {
+        *byte = PATTERN[index % PATTERN.len()];
+    }
+
+    fs::write(&path, &image)
+        .with_context(|| format!("write virtio-blk test image {}", path.display()))?;
+
+    Ok(path)
 }
 
 fn run_checked(cmd: &mut Command, what: &str) -> Result<ExitStatus> {
