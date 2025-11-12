@@ -10,6 +10,7 @@ use crate::arch::{
 use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
 use crate::mem::addr::VirtAddr;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use crate::syscall::{AbiFlavor, SyscallPolicy};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
@@ -304,7 +305,22 @@ impl SchedulerInner {
         let address_space = PROCESS_TABLE
             .address_space(process)
             .ok_or(SpawnError::Process(ProcessError::NotFound))?;
-        let thread = ThreadControl::user(id, process, name, entry, address_space, stack_size)?;
+        let abi = PROCESS_TABLE
+            .abi(process)
+            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
+        let policy = PROCESS_TABLE
+            .policy(process)
+            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
+        let thread = ThreadControl::user(
+            id,
+            process,
+            name,
+            entry,
+            address_space,
+            abi,
+            policy,
+            stack_size,
+        )?;
         PROCESS_TABLE
             .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
@@ -339,6 +355,8 @@ struct ThreadControl {
     user_stack: Option<<Arch as ArchThread>::UserStack>,
     kind: ThreadKind,
     state: ThreadState,
+    abi: AbiFlavor,
+    policy: SyscallPolicy,
 }
 
 impl ThreadControl {
@@ -364,6 +382,8 @@ impl ThreadControl {
             user_stack: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Ready,
+            abi: AbiFlavor::Host,
+            policy: SyscallPolicy::Full,
         })
     }
 
@@ -373,6 +393,8 @@ impl ThreadControl {
         name: &'static str,
         entry: VirtAddr,
         address_space: <Arch as ArchThread>::AddressSpace,
+        abi: AbiFlavor,
+        policy: SyscallPolicy,
         stack_size: usize,
     ) -> Result<Self, SpawnError> {
         let stack_size = if stack_size == 0 {
@@ -398,6 +420,8 @@ impl ThreadControl {
             user_stack: Some(user_stack),
             kind: ThreadKind::User,
             state: ThreadState::Ready,
+            abi,
+            policy,
         })
     }
 
@@ -429,6 +453,8 @@ impl ThreadControl {
             user_stack: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Idle,
+            abi: AbiFlavor::Host,
+            policy: SyscallPolicy::Full,
         })
     }
 
@@ -448,6 +474,8 @@ impl ThreadControl {
             user_stack: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Running,
+            abi: AbiFlavor::Host,
+            policy: SyscallPolicy::Full,
         }
     }
 }
@@ -492,6 +520,7 @@ mod tests {
     use super::*;
     use crate::mem::addr::VirtAddr;
     use crate::process::PROCESS_TABLE;
+    use crate::syscall::{AbiFlavor, SyscallPolicy};
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
@@ -510,6 +539,8 @@ mod tests {
             "utest",
             VirtAddr::new(0x4000),
             space,
+            AbiFlavor::Host,
+            SyscallPolicy::Full,
             USER_STACK_SIZE,
         )
         .expect("spawn user thread");

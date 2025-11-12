@@ -12,12 +12,13 @@
 - PIDs are `u64`, allocated monotonically; overflow is treated as a logic bug that panics.
 - Process lookup is linear today. If the number of processes grows, we plan to swap in a different structure (e.g. `BTreeMap`).
 
-### Process
 - Stores `id`, `_name`, `address_space`, `_state`, and a `threads` list.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
+- `abi` captures whether the process expects the host ABI or Linux ABI. The scheduler and syscall dispatcher will consult this field while selecting the syscall table.
+- `policy` is a coarse seccomp-style enum (`Minimal`/`Full`) that the Linux Box demo uses to allow/deny syscalls per container.
 - `ProcessState` currently exposes only `Active`. Expanded lifecycle states (e.g. `Sleeping`, `Zombie`) are still future work.
 - Fields prefixed with `_` are reserved for upcoming functionality, so they remain even if unused today.
-- `Process::user` mirrors kernel setup for now, provisioning a PID for user-mode threads while still sharing the kernel address space until proper duplication arrives.
+- `Process::user` mirrors kernel setup for now, provisioning a PID for user-mode threads while still sharing the kernel address space until proper duplication arrives. Callers can specify the target `abi`/`policy` using `create_user_process_with`.
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.

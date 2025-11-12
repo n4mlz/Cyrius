@@ -2,6 +2,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{Arch, api::ArchThread};
+use crate::syscall::{AbiFlavor, SyscallPolicy};
 use crate::thread::ThreadId;
 use crate::util::spinlock::SpinLock;
 
@@ -80,13 +81,22 @@ impl ProcessTable {
     }
 
     pub fn create_user_process(&self, name: &'static str) -> Result<ProcessId, ProcessError> {
+        self.create_user_process_with(name, AbiFlavor::Host, SyscallPolicy::default())
+    }
+
+    pub fn create_user_process_with(
+        &self,
+        name: &'static str,
+        abi: AbiFlavor,
+        policy: SyscallPolicy,
+    ) -> Result<ProcessId, ProcessError> {
         if !self.initialised.load(Ordering::Acquire) {
             return Err(ProcessError::NotInitialised);
         }
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Process::user(pid, name);
+        let process = Process::user(pid, name, abi, policy);
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -133,6 +143,27 @@ impl ProcessTable {
         let inner = self.inner.lock();
         inner.process(pid).map(|proc| proc.address_space.clone())
     }
+
+    pub fn abi(&self, pid: ProcessId) -> Option<AbiFlavor> {
+        let inner = self.inner.lock();
+        inner.process(pid).map(|proc| proc.abi)
+    }
+
+    pub fn policy(&self, pid: ProcessId) -> Option<SyscallPolicy> {
+        let inner = self.inner.lock();
+        inner.process(pid).map(|proc| proc.policy)
+    }
+
+    pub fn set_policy(&self, pid: ProcessId, policy: SyscallPolicy) -> Result<(), ProcessError> {
+        if !self.initialised.load(Ordering::Acquire) {
+            return Err(ProcessError::NotInitialised);
+        }
+
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(ProcessError::NotFound)?;
+        process.policy = policy;
+        Ok(())
+    }
 }
 
 impl Default for ProcessTable {
@@ -174,6 +205,8 @@ struct Process {
     _state: ProcessState,
     #[allow(dead_code)]
     kind: ProcessKind,
+    abi: AbiFlavor,
+    policy: SyscallPolicy,
     threads: Vec<ThreadId>,
 }
 
@@ -185,17 +218,21 @@ impl Process {
             address_space: <Arch as ArchThread>::current_address_space(),
             _state: ProcessState::Active,
             kind: ProcessKind::Kernel,
+            abi: AbiFlavor::Host,
+            policy: SyscallPolicy::Full,
             threads: Vec::new(),
         }
     }
 
-    fn user(id: ProcessId, name: &'static str) -> Self {
+    fn user(id: ProcessId, name: &'static str, abi: AbiFlavor, policy: SyscallPolicy) -> Self {
         Self {
             id,
             _name: name,
             address_space: <Arch as ArchThread>::current_address_space(),
             _state: ProcessState::Active,
             kind: ProcessKind::User,
+            abi,
+            policy,
             threads: Vec::new(),
         }
     }
@@ -217,6 +254,7 @@ mod tests {
     use alloc::sync::Arc;
 
     use super::*;
+    use crate::syscall::{AbiFlavor, SyscallPolicy};
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
@@ -246,5 +284,18 @@ mod tests {
             .address_space(pid)
             .expect("user address space clone");
         assert!(Arc::ptr_eq(addr_space.inner(), ref_again.inner()));
+        assert_eq!(PROCESS_TABLE.abi(pid), Some(AbiFlavor::Host));
+        assert_eq!(PROCESS_TABLE.policy(pid), Some(SyscallPolicy::Minimal));
+    }
+
+    #[kernel_test_case]
+    fn create_linux_process_with_policy() {
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process_with("ctr-demo", AbiFlavor::Linux, SyscallPolicy::Full)
+            .expect("create linux demo process");
+        assert!(pid > 0);
+        assert_eq!(PROCESS_TABLE.abi(pid), Some(AbiFlavor::Linux));
+        assert_eq!(PROCESS_TABLE.policy(pid), Some(SyscallPolicy::Full));
     }
 }

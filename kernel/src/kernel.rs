@@ -11,10 +11,12 @@ use core::convert::TryFrom;
 use core::panic::PanicInfo;
 
 pub mod arch;
+pub mod demo;
 pub mod device;
 pub mod interrupt;
 pub mod mem;
 pub mod process;
+pub mod syscall;
 #[cfg(test)]
 pub mod test;
 pub mod thread;
