@@ -769,6 +769,7 @@ mod tests {
 
     use crate::device::virtio::queue::QueueConfig;
     use crate::device::virtio::transport::QueueNotifier;
+    use crate::println;
     use crate::test::kernel_test_case;
 
     const fn write_capture_init() -> SpinLock<Vec<u8>> {
@@ -780,6 +781,8 @@ mod tests {
 
     #[kernel_test_case]
     fn queue_waits_for_completion() {
+        println!("[test] queue_waits_for_completion");
+
         let mut provider = DmaRegionProvider::new();
         let queue_mem = QueueMemory::allocate(0, 8, &mut provider).expect("queue allocation");
         let mut queue = QueueState::new(8, queue_mem);
@@ -790,6 +793,8 @@ mod tests {
 
     #[kernel_test_case]
     fn request_buffers_copy_roundtrip() {
+        println!("[test] request_buffers_copy_roundtrip");
+
         let mut provider = DmaRegionProvider::new();
         let mut buffers = RequestBuffers::new(&mut provider, 512).expect("dma alloc");
         let payload = [0xA5u8; 512];
@@ -801,6 +806,8 @@ mod tests {
 
     #[kernel_test_case]
     fn virtio_blk_read_roundtrip() {
+        println!("[test] virtio_blk_read_roundtrip");
+
         let transport = MockTransport::default();
         let mut device = VirtioBlkDevice::new("testblk".into(), transport).expect("device init");
         device.set_completion_hook(complete_read);
@@ -812,6 +819,8 @@ mod tests {
 
     #[kernel_test_case]
     fn virtio_blk_write_captures_data() {
+        println!("[test] virtio_blk_write_captures_data");
+
         let transport = MockTransport::default();
         let mut device = VirtioBlkDevice::new("testblk".into(), transport).expect("device init");
         device.set_completion_hook(complete_write);
@@ -830,6 +839,8 @@ mod tests {
     /// writeback verification.
     #[kernel_test_case]
     fn virtio_blk_rw_roundtrip_integration() {
+        println!("[test] virtio_blk_rw_roundtrip_integration");
+
         const PATTERN: &[u8] = b"CYRIUSBLKTESTIMG";
         const READ_LBA: u64 = 0;
         const WRITE_LBA: u64 = 1;

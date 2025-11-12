@@ -128,10 +128,13 @@ fn align_up(value: usize, align: usize) -> usize {
 mod tests {
     use super::*;
     use crate::mem::addr::Addr;
+    use crate::println;
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
     fn allocates_single_page() {
+        println!("[test] allocates_single_page");
+
         let mut provider = DmaRegionProvider::new();
         let mut region = provider
             .allocate(512, PAGE_BYTES)
@@ -145,6 +148,8 @@ mod tests {
 
     #[kernel_test_case]
     fn rejects_large_alignment() {
+        println!("[test] rejects_large_alignment");
+
         let mut provider = DmaRegionProvider::new();
         let result = provider.allocate(PAGE_BYTES, PAGE_BYTES * 2);
         assert!(matches!(result, Err(DmaError::AlignmentTooLarge)));

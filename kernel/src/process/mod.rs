@@ -217,10 +217,12 @@ mod tests {
     use alloc::sync::Arc;
 
     use super::*;
-    use crate::test::kernel_test_case;
+    use crate::{println, test::kernel_test_case};
 
     #[kernel_test_case]
     fn kernel_process_shares_address_space() {
+        println!("[test] kernel_process_shares_address_space");
+
         let pid = PROCESS_TABLE.init_kernel().expect("kernel init");
         let a = PROCESS_TABLE
             .address_space(pid)
@@ -234,6 +236,8 @@ mod tests {
 
     #[kernel_test_case]
     fn create_user_process_assigns_pid() {
+        println!("[test] create_user_process_assigns_pid");
+
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
             .create_user_process("user-proc")

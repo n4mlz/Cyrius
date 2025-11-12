@@ -67,6 +67,8 @@ mod tests {
 
     #[kernel_test_case]
     fn other_vectors_fall_back() {
+        println!("[test] other_vectors_fall_back");
+
         let info = TrapInfo {
             vector: 0x21,
             origin: TrapOrigin::Exception,

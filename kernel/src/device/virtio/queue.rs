@@ -305,10 +305,12 @@ impl<'a> UsedRing<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::kernel_test_case;
+    use crate::{println, test::kernel_test_case};
 
     #[kernel_test_case]
     fn allocation_size_matches_spec() {
+        println!("[test] allocation_size_matches_spec");
+
         let req = QueueMemory::requirements(256).expect("queue size valid");
         assert_eq!(req.align, VRING_ALIGN);
         assert_eq!(req.size, 10_246);
@@ -316,6 +318,8 @@ mod tests {
 
     #[kernel_test_case]
     fn reject_non_power_of_two() {
+        println!("[test] reject_non_power_of_two");
+
         match QueueMemory::requirements(3) {
             Err(QueueError::NotPowerOfTwo) => {}
             other => panic!("unexpected result: {:?}", other),

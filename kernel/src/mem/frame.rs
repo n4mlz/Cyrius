@@ -403,7 +403,7 @@ pub static FRAME_ALLOCATOR: GlobalFrameAllocator = GlobalFrameAllocator::uninit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::kernel_test_case;
+    use crate::{println, test::kernel_test_case};
     use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 
     const fn region(start: u64, end: u64, kind: MemoryRegionKind) -> MemoryRegion {
@@ -412,6 +412,8 @@ mod tests {
 
     #[kernel_test_case]
     fn reserve_excludes_frames() {
+        println!("[test] reserve_excludes_frames");
+
         static REGIONS: [MemoryRegion; 1] = [region(0x1000, 0x9000, MemoryRegionKind::Usable)];
         let mut allocator = BootInfoFrameAllocator::new(&REGIONS);
 
@@ -437,6 +439,8 @@ mod tests {
 
     #[kernel_test_case]
     fn recycle_returns_frames() {
+        println!("[test] recycle_returns_frames");
+
         static REGIONS: [MemoryRegion; 1] = [region(0x1000, 0x3000, MemoryRegionKind::Usable)];
         let mut allocator = BootInfoFrameAllocator::new(&REGIONS);
 

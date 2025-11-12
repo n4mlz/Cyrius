@@ -557,6 +557,7 @@ mod tests {
     use crate::mem::paging::{
         FrameAllocator, MapError, PageTableOps, PhysMapper, TranslationError,
     };
+    use crate::println;
     use crate::test::kernel_test_case;
 
     use super::X86PageTable;
@@ -656,6 +657,8 @@ mod tests {
 
     #[kernel_test_case]
     fn map_and_translate() {
+        println!("[test] map_and_translate");
+
         let (mut table, mut allocator) = setup();
         let mapper = TestMapper::new();
 
@@ -682,6 +685,8 @@ mod tests {
 
     #[kernel_test_case]
     fn translate_unmapped() {
+        println!("[test] translate_unmapped");
+
         let (table, _allocator) = setup();
         let virt = VirtAddr::new(0x5000_1000);
         let result = table.translate(virt);
@@ -690,6 +695,8 @@ mod tests {
 
     #[kernel_test_case]
     fn unmap_page() {
+        println!("[test] unmap_page");
+
         let (mut table, mut allocator) = setup();
 
         let virt = VirtAddr::new(0x4000_0000);
@@ -711,6 +718,8 @@ mod tests {
 
     #[kernel_test_case]
     fn double_map_error() {
+        println!("[test] double_map_error");
+
         let (mut table, mut allocator) = setup();
         let virt = VirtAddr::new(0x4000_0000);
         let page = Page::new(virt, PageSize::SIZE_4K);
@@ -731,6 +740,8 @@ mod tests {
 
     #[kernel_test_case]
     fn update_permissions() {
+        println!("[test] update_permissions");
+
         let (mut table, mut allocator) = setup();
         let mapper = TestMapper::new();
 
@@ -770,6 +781,8 @@ mod tests {
 
     #[kernel_test_case]
     fn writable_propagation_to_existing_tables() {
+        println!("[test] writable_propagation_to_existing_tables");
+
         let (mut table, mut allocator) = setup();
         let mapper = TestMapper::new();
 
@@ -821,6 +834,8 @@ mod tests {
 
     #[kernel_test_case]
     fn user_propagation_to_existing_tables() {
+        println!("[test] user_propagation_to_existing_tables");
+
         let (mut table, mut allocator) = setup();
         let mapper = TestMapper::new();
 
@@ -872,6 +887,8 @@ mod tests {
 
     #[kernel_test_case]
     fn canonical_address_validation() {
+        println!("[test] canonical_address_validation");
+
         let (mut table, mut allocator) = setup();
 
         // Test non-canonical addresses that should be rejected
@@ -927,6 +944,8 @@ mod tests {
 
     #[kernel_test_case]
     fn recursive_cleanup_empty_tables() {
+        println!("[test] recursive_cleanup_empty_tables");
+
         let (mut table, mut allocator) = setup();
 
         // Map multiple pages that share intermediate tables

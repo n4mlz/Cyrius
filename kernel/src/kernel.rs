@@ -201,6 +201,7 @@ mod tests {
 
     use crate::{
         interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks},
+        println,
         process::PROCESS_TABLE,
         test::kernel_test_case,
         thread::SCHEDULER,
@@ -208,16 +209,20 @@ mod tests {
 
     #[kernel_test_case]
     fn test1() {
+        println!("[test] test1");
         assert_eq!(1, 1);
     }
 
     #[kernel_test_case]
     fn test2() {
+        println!("[test] test2");
         assert_eq!(2, 2);
     }
 
     #[kernel_test_case]
     fn lapic_timer_fires() {
+        println!("[test] lapic_timer_fires");
+
         use core::arch::x86_64::_rdtsc;
 
         const TSC_TIMEOUT_CYCLES: u64 = 500_000_000; // ~0.1-0.5s depending on host frequency
@@ -263,6 +268,8 @@ mod tests {
 
     #[kernel_test_case]
     fn scheduler_switches_threads() {
+        println!("[test] scheduler_switches_threads");
+
         TEST_KERNEL_THREAD_COUNTER.store(0, Ordering::Relaxed);
         TEST_EXTRA_THREAD_COUNTER.store(0, Ordering::Relaxed);
 
