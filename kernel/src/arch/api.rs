@@ -1,6 +1,6 @@
 use bootloader_api::BootInfo;
 
-use crate::mem::addr::{AddrRange, VirtAddr};
+use crate::mem::addr::{AddrRange, MemPerm, VirtAddr};
 use crate::mem::paging::MapError;
 use crate::trap::TrapInfo;
 
@@ -43,6 +43,7 @@ pub trait ArchThread {
     type Context: Clone;
     type AddressSpace: Clone;
     type UserStack;
+    type UserImage;
 
     /// Capture the CPU context described by the current trap frame.
     fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context;
@@ -90,6 +91,17 @@ pub trait ArchThread {
 
     /// Update the privilege-stack pointer used during user→kernel transitions.
     fn update_privilege_stack(stack_top: VirtAddr);
+
+    /// Map a user payload at a fixed base address with the requested permissions.
+    fn map_user_image(
+        space: &Self::AddressSpace,
+        base: VirtAddr,
+        payload: &[u8],
+        perms: MemPerm,
+    ) -> Result<Self::UserImage, UserImageError>;
+
+    /// Return the entry point for a mapped user image.
+    fn user_image_entry(image: &Self::UserImage) -> VirtAddr;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +118,15 @@ pub enum UserStackError {
     AddressSpaceExhausted,
     OutOfMemory,
     MapFailed(MapError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserImageError {
+    InvalidBase,
+    SizeOverflow,
+    AddressSpaceExhausted,
+    MapFailed(MapError),
+    OutOfMemory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,4 +179,10 @@ pub trait ArchInterrupt {
     fn timer() -> &'static Self::Timer;
     fn timer_vector() -> u8;
     fn syscall_vector() -> u8;
+}
+
+pub trait ArchSyscall: ArchTrap {
+    fn syscall_number(frame: &<Self as ArchTrap>::Frame) -> u64;
+    fn syscall_arg(frame: &<Self as ArchTrap>::Frame, index: usize) -> u64;
+    fn set_syscall_ret(frame: &mut <Self as ArchTrap>::Frame, value: u64);
 }

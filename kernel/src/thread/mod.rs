@@ -125,13 +125,14 @@ impl Scheduler {
         name: &'static str,
         entry: VirtAddr,
         stack_size: usize,
+        image: Option<<Arch as ArchThread>::UserImage>,
     ) -> Result<ThreadId, SpawnError> {
         let mut inner = self.inner.lock();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        inner.spawn_user_thread(process, name, entry, stack_size)
+        inner.spawn_user_thread(process, name, entry, stack_size, image)
     }
 
     fn spawn_thread_locked(
@@ -379,6 +380,7 @@ impl SchedulerInner {
         name: &'static str,
         entry: VirtAddr,
         stack_size: usize,
+        image: Option<<Arch as ArchThread>::UserImage>,
     ) -> Result<ThreadId, SpawnError> {
         let id = self.next_tid;
         let address_space = PROCESS_TABLE
@@ -399,6 +401,7 @@ impl SchedulerInner {
             abi,
             policy,
             stack_size,
+            image,
         )?;
         PROCESS_TABLE
             .attach_thread(process, id)
@@ -432,6 +435,8 @@ struct ThreadControl {
     kernel_stack: Option<KernelStack>,
     #[allow(dead_code)]
     user_stack: Option<<Arch as ArchThread>::UserStack>,
+    #[allow(dead_code)]
+    user_image: Option<<Arch as ArchThread>::UserImage>,
     kind: ThreadKind,
     state: ThreadState,
     abi: AbiFlavor,
@@ -459,6 +464,7 @@ impl ThreadControl {
             address_space,
             kernel_stack: Some(stack),
             user_stack: None,
+            user_image: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Ready,
             abi: AbiFlavor::Host,
@@ -476,6 +482,7 @@ impl ThreadControl {
         abi: AbiFlavor,
         policy: SyscallPolicy,
         stack_size: usize,
+        image: Option<<Arch as ArchThread>::UserImage>,
     ) -> Result<Self, SpawnError> {
         let stack_size = if stack_size == 0 {
             USER_STACK_SIZE
@@ -498,6 +505,7 @@ impl ThreadControl {
             address_space,
             kernel_stack: Some(kernel_stack),
             user_stack: Some(user_stack),
+            user_image: image,
             kind: ThreadKind::User,
             state: ThreadState::Ready,
             abi,
@@ -531,6 +539,7 @@ impl ThreadControl {
             address_space,
             kernel_stack: Some(stack),
             user_stack: None,
+            user_image: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Idle,
             abi: AbiFlavor::Host,
@@ -552,6 +561,7 @@ impl ThreadControl {
             address_space,
             kernel_stack: None,
             user_stack: None,
+            user_image: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Running,
             abi: AbiFlavor::Host,
@@ -645,6 +655,7 @@ mod tests {
             AbiFlavor::Host,
             SyscallPolicy::Full,
             USER_STACK_SIZE,
+            None,
         )
         .expect("spawn user thread");
 

@@ -27,6 +27,8 @@ use crate::arch::{
     Arch,
     api::{ArchDevice, ArchMemory},
 };
+#[cfg(not(test))]
+use crate::demo::linux_box::spawn_shell_thread;
 use crate::device::char::uart::Uart;
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
 use crate::mem::addr::{AddrRange, PhysAddr};
@@ -133,39 +135,42 @@ fn initialise_scheduler() {
         .init()
         .unwrap_or_else(|err| panic!("failed to initialise scheduler: {err:?}"));
 
-    SCHEDULER
-        .spawn_kernel_thread("worker-a", scheduler_worker_a)
-        .unwrap_or_else(|err| panic!("failed to spawn worker-a: {err:?}"));
+    // SCHEDULER
+    //     .spawn_kernel_thread("worker-a", scheduler_worker_a)
+    //     .unwrap_or_else(|err| panic!("failed to spawn worker-a: {err:?}"));
 
-    SCHEDULER
-        .spawn_kernel_thread("worker-b", scheduler_worker_b)
-        .unwrap_or_else(|err| panic!("failed to spawn worker-b: {err:?}"));
+    // SCHEDULER
+    //     .spawn_kernel_thread("worker-b", scheduler_worker_b)
+    //     .unwrap_or_else(|err| panic!("failed to spawn worker-b: {err:?}"));
+
+    #[cfg(not(test))]
+    spawn_shell_thread();
 
     SCHEDULER
         .start()
         .unwrap_or_else(|err| panic!("failed to start scheduler: {err:?}"));
 }
 
-fn scheduler_worker_a() -> ! {
-    scheduler_worker_loop("worker-a", 'A')
-}
+// fn scheduler_worker_a() -> ! {
+//     scheduler_worker_loop("worker-a", 'A')
+// }
 
-fn scheduler_worker_b() -> ! {
-    scheduler_worker_loop("worker-b", 'B')
-}
+// fn scheduler_worker_b() -> ! {
+//     scheduler_worker_loop("worker-b", 'B')
+// }
 
-fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
-    const PRINT_INTERVAL: u64 = 1_000_000;
-    let mut counter: u64 = 0;
-    loop {
-        if counter.is_multiple_of(PRINT_INTERVAL) {
-            let epoch = counter / PRINT_INTERVAL;
-            println!("[{name}] heartbeat {token}#{epoch}");
-        }
-        counter = counter.wrapping_add(1);
-        core::hint::spin_loop();
-    }
-}
+// fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
+//     const PRINT_INTERVAL: u64 = 1_000_000;
+//     let mut counter: u64 = 0;
+//     loop {
+//         if counter.is_multiple_of(PRINT_INTERVAL) {
+//             let epoch = counter / PRINT_INTERVAL;
+//             println!("[{name}] heartbeat {token}#{epoch}");
+//         }
+//         counter = counter.wrapping_add(1);
+//         core::hint::spin_loop();
+//     }
+// }
 
 #[cfg(not(test))]
 #[panic_handler]

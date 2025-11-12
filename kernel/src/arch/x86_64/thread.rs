@@ -14,6 +14,7 @@ const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
 const USER_STACK_REGION_START: usize = 0x0000_7000_0000_0000;
 const USER_STACK_REGION_END: usize = 0x0000_7FFF_FF00_0000;
 const USER_STACK_ALIGNMENT: usize = PageSize::SIZE_4K.bytes();
+const USER_IMAGE_ALIGNMENT: usize = PageSize::SIZE_4K.bytes();
 
 struct UserStackAllocator {
     next: usize,
@@ -150,6 +151,99 @@ impl Drop for UserStack {
 }
 
 unsafe impl Send for UserStack {}
+
+#[derive(Clone)]
+pub struct UserImage {
+    space: AddressSpace,
+    base: VirtAddr,
+    size: usize,
+}
+
+impl UserImage {
+    pub(crate) fn map(
+        space: &AddressSpace,
+        base: VirtAddr,
+        payload: &[u8],
+        perms: MemPerm,
+    ) -> Result<Self, crate::arch::api::UserImageError> {
+        if base.as_raw() == 0 || !base.as_raw().is_multiple_of(USER_IMAGE_ALIGNMENT) {
+            return Err(crate::arch::api::UserImageError::InvalidBase);
+        }
+        let requested = payload.len().max(PageSize::SIZE_4K.bytes());
+        let size = align_up_usize(requested, USER_IMAGE_ALIGNMENT);
+        let mut mapped_pages = Vec::new();
+        let map_result = space.inner().with_table(|table, allocator| {
+            for offset in (0..size).step_by(PageSize::SIZE_4K.bytes()) {
+                let addr = base
+                    .checked_add(offset)
+                    .ok_or(crate::arch::api::UserImageError::SizeOverflow)?;
+                let page = Page::new(addr, PageSize::SIZE_4K);
+                let frame = allocator
+                    .allocate(PageSize::SIZE_4K)
+                    .ok_or(crate::arch::api::UserImageError::OutOfMemory)?;
+                let perms_with_write = perms.union(MemPerm::WRITE);
+                if let Err(err) = table.map(page, frame, perms_with_write, allocator) {
+                    allocator.deallocate(frame);
+                    rollback_user_mapping(table, allocator, &mapped_pages);
+                    return Err(crate::arch::api::UserImageError::MapFailed(err));
+                }
+                mapped_pages.push(addr);
+            }
+            Ok(())
+        });
+
+        map_result?;
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(payload.as_ptr(), base.into_mut_ptr(), payload.len());
+            let padding = size.saturating_sub(payload.len());
+            if padding > 0 {
+                core::ptr::write_bytes(base.into_mut_ptr().add(payload.len()), 0, padding);
+            }
+        }
+
+        if !perms.contains(MemPerm::WRITE) {
+            space.inner().with_table(|table, _allocator| {
+                for offset in (0..size).step_by(PageSize::SIZE_4K.bytes()) {
+                    let addr = base.checked_add(offset).expect("user image addr overflow");
+                    let page = Page::new(addr, PageSize::SIZE_4K);
+                    if let Err(err) = table.update_permissions(page, perms) {
+                        panic!("failed to update user image permissions: {err:?}");
+                    }
+                }
+            });
+        }
+
+        Ok(Self {
+            space: space.clone(),
+            base,
+            size,
+        })
+    }
+
+    pub(crate) fn entry(&self) -> VirtAddr {
+        self.base
+    }
+}
+
+impl Drop for UserImage {
+    fn drop(&mut self) {
+        self.space.inner().with_table(|table, allocator| {
+            for offset in (0..self.size).step_by(PageSize::SIZE_4K.bytes()) {
+                let addr = self
+                    .base
+                    .checked_add(offset)
+                    .expect("user image addr overflow");
+                let page = Page::new(addr, PageSize::SIZE_4K);
+                match table.unmap(page) {
+                    Ok(frame) => allocator.deallocate(frame),
+                    Err(UnmapError::NotMapped) => {}
+                    Err(err) => panic!("failed to unmap user image page: {err:?}"),
+                }
+            }
+        });
+    }
+}
 
 /// Saved CPU context for a suspended kernel thread.
 #[derive(Clone)]

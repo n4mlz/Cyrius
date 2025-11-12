@@ -5,7 +5,10 @@ mod linux;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::{Arch, api::ArchInterrupt};
+use crate::arch::{
+    Arch,
+    api::{ArchInterrupt, ArchSyscall},
+};
 use crate::interrupt::{INTERRUPTS, InterruptServiceRoutine};
 use crate::println;
 use crate::process::ProcessId;
@@ -107,23 +110,15 @@ impl<'a> SyscallContext<'a> {
     }
 
     pub fn number(&self) -> u64 {
-        self.frame.regs.rax
+        <Arch as ArchSyscall>::syscall_number(self.frame)
     }
 
     pub fn arg(&self, index: usize) -> u64 {
-        match index {
-            0 => self.frame.regs.rdi,
-            1 => self.frame.regs.rsi,
-            2 => self.frame.regs.rdx,
-            3 => self.frame.regs.r10,
-            4 => self.frame.regs.r8,
-            5 => self.frame.regs.r9,
-            _ => 0,
-        }
+        <Arch as ArchSyscall>::syscall_arg(self.frame, index)
     }
 
     pub fn set_ret(&mut self, value: u64) {
-        self.frame.regs.rax = value;
+        <Arch as ArchSyscall>::set_syscall_ret(self.frame, value);
     }
 }
 

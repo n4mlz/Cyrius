@@ -9,8 +9,8 @@ use self::trap::gdt;
 use bootloader_api::BootInfo;
 
 use crate::arch::api::{
-    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchThread, ArchTrap, HeapRegionError,
-    InterruptInitError, UserStackError,
+    ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchSyscall, ArchThread, ArchTrap,
+    HeapRegionError, InterruptInitError, UserImageError, UserStackError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
 use crate::mem::addr::{AddrRange, VirtAddr};
@@ -43,6 +43,28 @@ impl ArchTrap for X86_64 {
 
     fn handle_exception(info: crate::trap::TrapInfo, frame: &mut Self::Frame) -> bool {
         trap::handle_exception(info, frame)
+    }
+}
+
+impl ArchSyscall for X86_64 {
+    fn syscall_number(frame: &trap::TrapFrame) -> u64 {
+        frame.regs.rax
+    }
+
+    fn syscall_arg(frame: &trap::TrapFrame, index: usize) -> u64 {
+        match index {
+            0 => frame.regs.rdi,
+            1 => frame.regs.rsi,
+            2 => frame.regs.rdx,
+            3 => frame.regs.r10,
+            4 => frame.regs.r8,
+            5 => frame.regs.r9,
+            _ => 0,
+        }
+    }
+
+    fn set_syscall_ret(frame: &mut trap::TrapFrame, value: u64) {
+        frame.regs.rax = value;
     }
 }
 
@@ -90,6 +112,7 @@ impl ArchThread for X86_64 {
     type Context = thread::Context;
     type AddressSpace = thread::AddressSpace;
     type UserStack = thread::UserStack;
+    type UserImage = thread::UserImage;
 
     fn save_context(frame: &crate::trap::CurrentTrapFrame) -> Self::Context {
         thread::Context::from_trap(frame)
@@ -130,5 +153,18 @@ impl ArchThread for X86_64 {
 
     fn update_privilege_stack(stack_top: VirtAddr) {
         gdt::set_privilege_stack(stack_top);
+    }
+
+    fn map_user_image(
+        space: &Self::AddressSpace,
+        base: VirtAddr,
+        payload: &[u8],
+        perms: crate::mem::addr::MemPerm,
+    ) -> Result<Self::UserImage, UserImageError> {
+        thread::UserImage::map(space, base, payload, perms)
+    }
+
+    fn user_image_entry(image: &Self::UserImage) -> VirtAddr {
+        image.entry()
     }
 }

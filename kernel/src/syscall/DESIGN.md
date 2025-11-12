@@ -15,6 +15,7 @@
 - `SyscallTable` is a trait implemented by the Host and Linux tables. Dispatch returns `SyscallOutcome`, allowing a table to request termination after handling (e.g., `_exit`).
 - The Host table is a stub for now and always returns `Unsupported`, while `LinuxSyscallTable` implements `write`, `getpid`, and `_exit`.
 - Linux syscall decoding currently matches the x86-64 numbering (`write=1`, `getpid=39`, `exit=60`). Policy validation is performed before any handler executes so the denial path cannot leak partial state.
+- Architecture-specific register shuffling lives behind `ArchSyscall`; the generic dispatcher never references concrete register names and therefore remains portable once other architectures implement the trait.
 
 ## Policies
 - `SyscallPolicy::Minimal` permits only `write`/`exit`, while `Full` allows every implemented Linux syscall. The enum exposes `as_str()` for logging so CLI output (`policy=full`) stays consistent with the docs.

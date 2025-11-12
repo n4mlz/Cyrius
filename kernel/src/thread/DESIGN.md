@@ -13,7 +13,7 @@
 - Shutdown stops the timer and re-disables interrupts. Multiprocessor support and per-CPU schedulers remain future work.
 
 ## Thread Model
-- `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, scheduling state (`Ready`, `Running`, `Idle`), plus ABI/policy metadata copied from the owning process so the syscall dispatcher can inspect it during context switches.
+- `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, scheduling state (`Ready`, `Running`, `Idle`), plus ABI/policy metadata copied from the owning process so the syscall dispatcher can inspect it during context switches. User threads also keep a `UserStack` and `UserImage` so dropping the thread automatically tears down both resources.
 - Kernel threads receive dedicated stacks allocated via `KernelStack`; the bootstrap thread represents the boot CPU and reuses its existing stack.
 - User threads layer a lazily allocated `UserStack` (via `ArchThread::UserStack`) on top of the kernel stack so ring transitions land on a thread-private stack while user-mode execution stays in the lower half of the address space.
 - Context restoration calls `ArchThread::update_privilege_stack` when the next thread is user-mode, keeping `TSS.rsp0` in sync with the scheduled kernel stack.
