@@ -19,6 +19,12 @@
 - Context restoration calls `ArchThread::update_privilege_stack` when the next thread is user-mode, keeping `TSS.rsp0` in sync with the scheduled kernel stack.
 - Address spaces are reference-counted handles cloned from the owning process; the scheduler switches CR3 via `ArchThread::activate_address_space` using these handles.
 - Thread creation uses `ArchThread::bootstrap_kernel_context` to seed an architecture-specific context that returns into Rust when first scheduled.
+- `ThreadControl::apply_syscall_profile` refreshes ABI/policy metadata from the process table and notifies the syscall dispatcher on every context switch, so the `int 0x80` handler always knows which table/policy to consult.
+
+## Lifecycle and Cleanup
+- Threads that call `_exit` or trigger a policy denial are removed from the runnable set via `Scheduler::terminate_current`, which mirrors the timer preemption logic but never pushes the retiring thread back into the ready queue.
+- Retired `ThreadControl`s (and their kernel stacks) are stashed in a `zombies` vector until the scheduler runs on a different stack; each scheduling pass drains the vector to safely drop the stacks without freeing the memory backing the active interrupt stack.
+- Process bookkeeping stays consistent by calling `PROCESS_TABLE.detach_thread` before parking the zombie, keeping PID/thread lists aligned with the scheduler state.
 
 ## Interaction with Other Subsystems
 - Requires the process subsystem to be initialised first; `Scheduler::init` calls `PROCESS_TABLE.init_kernel()` and records the kernel PID.

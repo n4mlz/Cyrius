@@ -123,6 +123,8 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
         .start_periodic(SYSTEM_TIMER_TICKS)
         .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
 
+    crate::syscall::init();
+
     INTERRUPTS.enable();
 }
 

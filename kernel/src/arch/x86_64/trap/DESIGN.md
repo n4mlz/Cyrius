@@ -9,6 +9,7 @@
 - `set_privilege_stack` updates `TSS.rsp0` on every context switch so user→kernel transitions enter on the scheduled thread's kernel stack, while a fallback ring-0 stack remains available for bootstrap paths.
 - `idt` populates exception vectors with dedicated stubs and assigns IST indices where architectural guidance recommends hardened stacks.
 - The IDT exposes vector `0x80` with DPL=3, providing an initial software interrupt entry point for user mode before the syscall MSRs are wired up.
+- `syscall::init` registers an interrupt-service routine for vector `0x80` via `ArchInterrupt::syscall_vector()`, so the generic interrupt controller forwards software traps straight into the syscall dispatcher.
 - `init()` loads both tables during early boot and must run per-CPU prior to enabling interrupts.
 
 ## Trap Stubs

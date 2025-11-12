@@ -157,4 +157,5 @@ pub trait ArchInterrupt {
 
     fn timer() -> &'static Self::Timer;
     fn timer_vector() -> u8;
+    fn syscall_vector() -> u8;
 }

@@ -80,6 +80,10 @@ impl ArchInterrupt for X86_64 {
     fn timer_vector() -> u8 {
         interrupt::TIMER_VECTOR
     }
+
+    fn syscall_vector() -> u8 {
+        trap::SYSCALL_VECTOR
+    }
 }
 
 impl ArchThread for X86_64 {

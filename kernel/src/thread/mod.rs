@@ -10,7 +10,7 @@ use crate::arch::{
 use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
 use crate::mem::addr::VirtAddr;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
-use crate::syscall::{AbiFlavor, SyscallPolicy};
+use crate::syscall::{self, AbiFlavor, SyscallPolicy};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
@@ -78,6 +78,12 @@ impl Scheduler {
         inner.idle = Some(idle.id);
         inner.threads.push(idle);
         inner.initialised = true;
+
+        if let Some(current) = inner.current
+            && let Some(thread) = inner.thread_mut(current)
+        {
+            thread.apply_syscall_profile();
+        }
         Ok(())
     }
 
@@ -191,6 +197,7 @@ impl Scheduler {
 
         let (next_ctx, next_space, next_stack, next_is_user) = {
             let mut inner = self.inner.lock();
+            inner.reap_zombies();
             let current_id = match inner.current {
                 Some(id) => id,
                 None => return,
@@ -221,6 +228,7 @@ impl Scheduler {
                     } else {
                         ThreadState::Running
                     };
+                    thread.apply_syscall_profile();
                     (
                         thread.context.clone(),
                         thread.address_space.clone(),
@@ -231,6 +239,61 @@ impl Scheduler {
                 .expect("next thread must exist");
 
             (ctx, space, stack_top, is_user)
+        };
+
+        if next_is_user && let Some(stack_top) = next_stack {
+            <Arch as ArchThread>::update_privilege_stack(stack_top);
+        }
+
+        unsafe {
+            <Arch as ArchThread>::activate_address_space(&next_space);
+            <Arch as ArchThread>::restore_context(frame, &next_ctx);
+        }
+    }
+
+    pub fn terminate_current(&self, frame: &mut CurrentTrapFrame, _exit_code: i32) {
+        let (next_ctx, next_space, next_stack, next_is_user) = {
+            let mut inner = self.inner.lock();
+            inner.reap_zombies();
+
+            let current_id = match inner.current {
+                Some(id) => id,
+                None => return,
+            };
+
+            let idle_id = inner.idle.expect("idle thread must exist");
+
+            if current_id == idle_id {
+                return;
+            }
+
+            let Some(thread) = inner.remove_thread(current_id) else {
+                return;
+            };
+            let process = thread.process_id();
+            let _ = PROCESS_TABLE.detach_thread(process, thread.id);
+            inner.zombies.push(thread);
+
+            let next_id = inner.ready.pop_front().unwrap_or(idle_id);
+            inner.current = Some(next_id);
+
+            inner
+                .thread_mut(next_id)
+                .map(|thread| {
+                    thread.state = if next_id == idle_id {
+                        ThreadState::Idle
+                    } else {
+                        ThreadState::Running
+                    };
+                    thread.apply_syscall_profile();
+                    (
+                        thread.context.clone(),
+                        thread.address_space.clone(),
+                        thread.kernel_stack_top(),
+                        thread.is_user(),
+                    )
+                })
+                .expect("next thread must exist")
         };
 
         if next_is_user && let Some(stack_top) = next_stack {
@@ -275,6 +338,7 @@ struct SchedulerInner {
     next_tid: ThreadId,
     initialised: bool,
     kernel_process: Option<ProcessId>,
+    zombies: Vec<ThreadControl>,
 }
 
 impl SchedulerInner {
@@ -287,11 +351,26 @@ impl SchedulerInner {
             next_tid: 1,
             initialised: false,
             kernel_process: None,
+            zombies: Vec::new(),
         }
     }
 
     fn thread_mut(&mut self, id: ThreadId) -> Option<&mut ThreadControl> {
         self.threads.iter_mut().find(|thread| thread.id == id)
+    }
+
+    fn remove_thread(&mut self, id: ThreadId) -> Option<ThreadControl> {
+        if let Some(pos) = self.threads.iter().position(|thread| thread.id == id) {
+            Some(self.threads.swap_remove(pos))
+        } else {
+            None
+        }
+    }
+
+    fn reap_zombies(&mut self) {
+        if !self.zombies.is_empty() {
+            self.zombies.clear();
+        }
     }
 
     fn spawn_user_thread(
@@ -347,7 +426,7 @@ enum ThreadKind {
 struct ThreadControl {
     id: ThreadId,
     _name: &'static str,
-    _process: ProcessId,
+    process: ProcessId,
     context: <Arch as ArchThread>::Context,
     address_space: <Arch as ArchThread>::AddressSpace,
     kernel_stack: Option<KernelStack>,
@@ -375,7 +454,7 @@ impl ThreadControl {
         Ok(Self {
             id,
             _name: name,
-            _process: process,
+            process,
             context,
             address_space,
             kernel_stack: Some(stack),
@@ -387,6 +466,7 @@ impl ThreadControl {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn user(
         id: ThreadId,
         process: ProcessId,
@@ -413,7 +493,7 @@ impl ThreadControl {
         Ok(Self {
             id,
             _name: name,
-            _process: process,
+            process,
             context,
             address_space,
             kernel_stack: Some(kernel_stack),
@@ -446,7 +526,7 @@ impl ThreadControl {
         Ok(Self {
             id,
             _name: "idle",
-            _process: process,
+            process,
             context,
             address_space,
             kernel_stack: Some(stack),
@@ -467,7 +547,7 @@ impl ThreadControl {
         Self {
             id,
             _name: name,
-            _process: process,
+            process,
             context: <Arch as ArchThread>::Context::default(),
             address_space,
             kernel_stack: None,
@@ -477,6 +557,29 @@ impl ThreadControl {
             abi: AbiFlavor::Host,
             policy: SyscallPolicy::Full,
         }
+    }
+
+    fn process_id(&self) -> ProcessId {
+        self.process
+    }
+
+    fn refresh_syscall_metadata(&mut self) {
+        if let Some(abi) = PROCESS_TABLE.abi(self.process) {
+            self.abi = abi;
+        }
+        if let Some(policy) = PROCESS_TABLE.policy(self.process) {
+            self.policy = policy;
+        }
+    }
+
+    fn apply_syscall_profile(&mut self) {
+        self.refresh_syscall_metadata();
+        syscall::activate_thread(syscall::ThreadActivation {
+            thread_id: self.id,
+            process_id: self.process,
+            abi: self.abi,
+            policy: self.policy,
+        });
     }
 }
 
