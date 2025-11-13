@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use core::{convert::TryFrom, mem::size_of};
+use core::{convert::TryFrom, fmt, mem::size_of};
 
 use crate::arch::{
     Arch,
@@ -33,6 +33,20 @@ pub enum LoaderError {
     Image(UserImageError),
 }
 
+impl fmt::Display for LoaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidElf(msg) => write!(f, "invalid ELF: {msg}"),
+            Self::UnsupportedElf(msg) => write!(f, "unsupported ELF: {msg}"),
+            Self::AddressOverflow => f.write_str("ELF entry or segment address overflowed"),
+            Self::SegmentOutOfBounds => f.write_str("ELF segment exceeds payload bounds"),
+            Self::SegmentTooLarge => f.write_str("ELF segment exceeds kernel limits"),
+            Self::NoLoadableSegments => f.write_str("ELF contains no loadable segments"),
+            Self::Image(err) => write!(f, "user image mapping failed: {err:?}"),
+        }
+    }
+}
+
 impl From<UserImageError> for LoaderError {
     fn from(err: UserImageError) -> Self {
         Self::Image(err)
@@ -49,8 +63,8 @@ impl LoadedImage {
         self.entry
     }
 
-    pub fn into_parts(self) -> (<Arch as ArchThread>::UserImage, VirtAddr) {
-        (self.image, self.entry)
+    pub fn into_user_image(self) -> <Arch as ArchThread>::UserImage {
+        self.image
     }
 }
 
@@ -212,7 +226,10 @@ fn parse_program_header(bytes: &[u8]) -> ElfProgramHeader {
 }
 
 fn perms_from_flags(flags: u32) -> MemPerm {
-    let mut perms = MemPerm::USER.union(MemPerm::READ);
+    let mut perms = MemPerm::USER;
+    if flags & PF_R != 0 {
+        perms = perms.union(MemPerm::READ);
+    }
     if flags & PF_X != 0 {
         perms = perms.union(MemPerm::EXEC);
     }

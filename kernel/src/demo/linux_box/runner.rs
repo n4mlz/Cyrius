@@ -1,3 +1,5 @@
+use core::fmt;
+
 use crate::demo::linux_box::catalog::{LINUX_DEMOS, LinuxDemoSpec};
 use crate::demo::linux_box::loader;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
@@ -11,6 +13,18 @@ pub enum RunError {
     AddressSpaceMissing,
     Loader(loader::LoaderError),
     Spawn(SpawnError),
+}
+
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownDemo => f.write_str("requested demo is not registered"),
+            Self::Process(err) => write!(f, "failed to create process: {err:?}"),
+            Self::AddressSpaceMissing => f.write_str("process missing address space"),
+            Self::Loader(err) => write!(f, "failed to load demo image: {err}"),
+            Self::Spawn(err) => write!(f, "failed to spawn demo thread: {err:?}"),
+        }
+    }
 }
 
 pub fn demos() -> &'static [LinuxDemoSpec] {
@@ -33,7 +47,8 @@ pub fn run_demo(name: &str, policy_override: Option<SyscallPolicy>) -> Result<Pr
         .ok_or(RunError::AddressSpaceMissing)?;
 
     let image = loader::load(pid, &space, spec.payload).map_err(RunError::Loader)?;
-    let (user_image, entry) = image.into_parts();
+    let entry = image.entry();
+    let user_image = image.into_user_image();
 
     SCHEDULER
         .spawn_user_thread(pid, spec.name, entry, 0, Some(user_image))
