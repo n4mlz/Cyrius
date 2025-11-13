@@ -7,6 +7,7 @@
 
 ## Boot-Time Responsibilities
 - Instantiate a lazily-initialised global `Ns16550` UART on the standard COM1 port, backing the early console.
+- Flip the CR0/CR4 feature bits (via `ArchPlatform::init_cpu_features`) so x87/SSE instructions are usable by user-mode binaries, running `FNINIT` once the control registers are configured.
 - Install trap infrastructure by loading GDT/IDT and wiring naked assembly stubs that bridge into the generic trap dispatcher.
 - Locate the kernel heap by scanning the bootloader memory map for the largest aligned usable region, then translating it via the physical memory offset.
 

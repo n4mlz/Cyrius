@@ -6,7 +6,7 @@
 - Expose thin wrappers that allow higher-level subsystems (scheduler, interrupts, traps, console) to remain generic and testable.
 
 ## Trait Surfaces
-- **ArchPlatform**: static metadata (e.g. architecture name) used for logging and capability reporting.
+- **ArchPlatform**: static metadata (e.g. architecture name) used for logging and capability reporting, plus hooks (`init_cpu_features`) for early CPU configuration before other subsystems start.
 - **ArchDevice**: ties into the device layer by exposing a console UART instance used by the global `println!` macros.
 - **ArchTrap**: hands back the concrete trap frame type and initialises GDT/IDT state.
 - **ArchMemory**: discovers the kernel heap virtual range based on bootloader-provided memory maps.

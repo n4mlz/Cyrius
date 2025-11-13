@@ -25,7 +25,7 @@ pub mod util;
 
 use crate::arch::{
     Arch,
-    api::{ArchDevice, ArchMemory},
+    api::{ArchDevice, ArchMemory, ArchPlatform},
 };
 #[cfg(not(test))]
 use crate::demo::linux_box::spawn_shell_thread;
@@ -47,7 +47,7 @@ const BOOTLOADER_CONFIG: BootloaderConfig = {
     config
 };
 
-const SYSTEM_TIMER_TICKS: TimerTicks = TimerTicks::new(10_000_000);
+const SYSTEM_TIMER_TICKS: TimerTicks = TimerTicks::new(1_500_000);
 
 #[cfg(not(test))]
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
@@ -77,6 +77,8 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     Arch::console()
         .init()
         .unwrap_or_else(|err| panic!("failed to initialise console: {err:?}"));
+
+    Arch::init_cpu_features();
 
     let heap_range = {
         let info: &'static BootInfo = &*boot_info;

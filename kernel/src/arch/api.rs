@@ -6,6 +6,9 @@ use crate::trap::TrapInfo;
 
 pub trait ArchPlatform {
     fn name() -> &'static str;
+
+    /// Perform early CPU/SoC feature configuration required before other subsystems start.
+    fn init_cpu_features() {}
 }
 
 pub trait ArchDevice {

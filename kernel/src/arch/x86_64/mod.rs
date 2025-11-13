@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod interrupt;
 pub mod mem;
+mod cpu;
 mod syscall;
 mod thread;
 mod trap;
@@ -23,6 +24,10 @@ pub struct X86_64;
 impl ArchPlatform for X86_64 {
     fn name() -> &'static str {
         "x86_64"
+    }
+
+    fn init_cpu_features() {
+        cpu::init_features();
     }
 }
 
