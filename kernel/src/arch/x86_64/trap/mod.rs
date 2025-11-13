@@ -2,9 +2,10 @@ mod context;
 pub(crate) mod gdt;
 mod handlers;
 mod idt;
-mod stubs;
+pub(super) mod stubs;
 
 pub use context::{GeneralRegisters, TrapFrame};
+pub(super) use stubs::dispatch_trap;
 
 use crate::trap::{TrapInfo, TrapOrigin};
 

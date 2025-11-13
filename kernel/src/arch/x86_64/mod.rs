@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod interrupt;
 pub mod mem;
+mod syscall;
 mod thread;
 mod trap;
 
@@ -10,7 +11,7 @@ use bootloader_api::BootInfo;
 
 use crate::arch::api::{
     ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchSyscall, ArchThread, ArchTrap,
-    HeapRegionError, InterruptInitError, UserImageError, UserStackError,
+    HeapRegionError, InterruptInitError, UserImageError, UserSegment, UserStackError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
 use crate::mem::addr::{AddrRange, VirtAddr};
@@ -47,6 +48,10 @@ impl ArchTrap for X86_64 {
 }
 
 impl ArchSyscall for X86_64 {
+    fn init_syscall() {
+        self::syscall::init();
+    }
+
     fn syscall_number(frame: &trap::TrapFrame) -> u64 {
         frame.regs.rax
     }
@@ -153,15 +158,15 @@ impl ArchThread for X86_64 {
 
     fn update_privilege_stack(stack_top: VirtAddr) {
         gdt::set_privilege_stack(stack_top);
+        self::syscall::update_kernel_stack(stack_top);
     }
 
     fn map_user_image(
         space: &Self::AddressSpace,
-        base: VirtAddr,
-        payload: &[u8],
-        perms: crate::mem::addr::MemPerm,
+        segments: &[UserSegment<'_>],
+        entry: VirtAddr,
     ) -> Result<Self::UserImage, UserImageError> {
-        thread::UserImage::map(space, base, payload, perms)
+        thread::UserImage::map(space, segments, entry)
     }
 
     fn user_image_entry(image: &Self::UserImage) -> VirtAddr {

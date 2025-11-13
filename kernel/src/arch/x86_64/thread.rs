@@ -1,6 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::convert::TryFrom;
 
+use crate::arch::api::UserSegment;
 use crate::arch::x86_64::mem::address_space::{self, AddressSpace as InnerAddressSpace};
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr};
 use crate::mem::paging::{FrameAllocator, PageTableOps, UnmapError};
@@ -155,6 +156,12 @@ unsafe impl Send for UserStack {}
 #[derive(Clone)]
 pub struct UserImage {
     space: AddressSpace,
+    segments: Vec<SegmentMapping>,
+    entry: VirtAddr,
+}
+
+#[derive(Clone)]
+struct SegmentMapping {
     base: VirtAddr,
     size: usize,
 }
@@ -162,86 +169,105 @@ pub struct UserImage {
 impl UserImage {
     pub(crate) fn map(
         space: &AddressSpace,
-        base: VirtAddr,
-        payload: &[u8],
-        perms: MemPerm,
+        segments: &[UserSegment<'_>],
+        entry: VirtAddr,
     ) -> Result<Self, crate::arch::api::UserImageError> {
-        if base.as_raw() == 0 || !base.as_raw().is_multiple_of(USER_IMAGE_ALIGNMENT) {
-            return Err(crate::arch::api::UserImageError::InvalidBase);
+        if segments.is_empty() {
+            return Err(crate::arch::api::UserImageError::EmptyImage);
         }
-        let requested = payload.len().max(PageSize::SIZE_4K.bytes());
-        let size = align_up_usize(requested, USER_IMAGE_ALIGNMENT);
-        let mut mapped_pages = Vec::new();
+
+        let mut mapped_segments: Vec<SegmentMapping> = Vec::new();
         let map_result = space.inner().with_table(|table, allocator| {
-            for offset in (0..size).step_by(PageSize::SIZE_4K.bytes()) {
-                let addr = base
-                    .checked_add(offset)
-                    .ok_or(crate::arch::api::UserImageError::SizeOverflow)?;
-                let page = Page::new(addr, PageSize::SIZE_4K);
-                let frame = allocator
-                    .allocate(PageSize::SIZE_4K)
-                    .ok_or(crate::arch::api::UserImageError::OutOfMemory)?;
-                let perms_with_write = perms.union(MemPerm::WRITE);
-                if let Err(err) = table.map(page, frame, perms_with_write, allocator) {
-                    allocator.deallocate(frame);
-                    rollback_user_mapping(table, allocator, &mapped_pages);
-                    return Err(crate::arch::api::UserImageError::MapFailed(err));
+            for spec in segments {
+                if spec.mem_size == 0 {
+                    continue;
                 }
-                mapped_pages.push(addr);
+
+                let (aligned_base, span) = segment_span(spec)?;
+                if span == 0 {
+                    continue;
+                }
+                if mapped_segments.iter().any(|mapped| {
+                    ranges_overlap(
+                        mapped.base.as_raw(),
+                        mapped.size,
+                        aligned_base.as_raw(),
+                        span,
+                    )
+                }) {
+                    return Err(crate::arch::api::UserImageError::OverlappingSegment);
+                }
+
+                let mut mapped_pages = Vec::new();
+                for offset in (0..span).step_by(PageSize::SIZE_4K.bytes()) {
+                    let addr = aligned_base
+                        .checked_add(offset)
+                        .ok_or(crate::arch::api::UserImageError::SizeOverflow)?;
+                    let page = Page::new(addr, PageSize::SIZE_4K);
+                    let frame = allocator
+                        .allocate(PageSize::SIZE_4K)
+                        .ok_or(crate::arch::api::UserImageError::OutOfMemory)?;
+                    let perms_with_write = spec.perms.union(MemPerm::WRITE);
+                    if let Err(err) = table.map(page, frame, perms_with_write, allocator) {
+                        allocator.deallocate(frame);
+                        rollback_user_mapping(table, allocator, &mapped_pages);
+                        return Err(crate::arch::api::UserImageError::MapFailed(err));
+                    }
+                    mapped_pages.push(addr);
+                }
+
+                mapped_segments.push(SegmentMapping {
+                    base: aligned_base,
+                    size: span,
+                });
+            }
+            if mapped_segments.is_empty() {
+                return Err(crate::arch::api::UserImageError::EmptyImage);
             }
             Ok(())
         });
 
-        map_result?;
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(payload.as_ptr(), base.into_mut_ptr(), payload.len());
-            let padding = size.saturating_sub(payload.len());
-            if padding > 0 {
-                core::ptr::write_bytes(base.into_mut_ptr().add(payload.len()), 0, padding);
-            }
+        if let Err(err) = map_result {
+            unmap_segments(space, &mapped_segments);
+            return Err(err);
         }
 
-        if !perms.contains(MemPerm::WRITE) {
-            space.inner().with_table(|table, _allocator| {
-                for offset in (0..size).step_by(PageSize::SIZE_4K.bytes()) {
-                    let addr = base.checked_add(offset).expect("user image addr overflow");
-                    let page = Page::new(addr, PageSize::SIZE_4K);
-                    if let Err(err) = table.update_permissions(page, perms) {
-                        panic!("failed to update user image permissions: {err:?}");
-                    }
+        for spec in segments {
+            if spec.mem_size == 0 {
+                continue;
+            }
+
+            unsafe {
+                core::ptr::write_bytes(spec.base.into_mut_ptr(), 0, spec.mem_size);
+                if !spec.data.is_empty() {
+                    core::ptr::copy_nonoverlapping(
+                        spec.data.as_ptr(),
+                        spec.base.into_mut_ptr(),
+                        spec.data.len(),
+                    );
                 }
-            });
+            }
+
+            if !spec.perms.contains(MemPerm::WRITE) {
+                update_segment_permissions(space, spec);
+            }
         }
 
         Ok(Self {
             space: space.clone(),
-            base,
-            size,
+            segments: mapped_segments,
+            entry,
         })
     }
 
     pub(crate) fn entry(&self) -> VirtAddr {
-        self.base
+        self.entry
     }
 }
 
 impl Drop for UserImage {
     fn drop(&mut self) {
-        self.space.inner().with_table(|table, allocator| {
-            for offset in (0..self.size).step_by(PageSize::SIZE_4K.bytes()) {
-                let addr = self
-                    .base
-                    .checked_add(offset)
-                    .expect("user image addr overflow");
-                let page = Page::new(addr, PageSize::SIZE_4K);
-                match table.unmap(page) {
-                    Ok(frame) => allocator.deallocate(frame),
-                    Err(UnmapError::NotMapped) => {}
-                    Err(err) => panic!("failed to unmap user image page: {err:?}"),
-                }
-            }
-        });
+        unmap_segments(&self.space, &self.segments);
     }
 }
 
@@ -364,6 +390,11 @@ fn align_down_u64(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
+fn align_down_usize(value: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two(), "alignment must be power of two");
+    value & !(align - 1)
+}
+
 fn align_up_usize(value: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two(), "alignment must be power of two");
     (value + align - 1) & !(align - 1)
@@ -380,4 +411,85 @@ fn rollback_user_mapping(
             allocator.deallocate(frame);
         }
     }
+}
+
+fn segment_span(
+    spec: &UserSegment<'_>,
+) -> Result<(VirtAddr, usize), crate::arch::api::UserImageError> {
+    if spec.mem_size == 0 {
+        return Ok((VirtAddr::NULL, 0));
+    }
+
+    let base_raw = spec.base.as_raw();
+    if base_raw == 0 {
+        return Err(crate::arch::api::UserImageError::InvalidBase);
+    }
+
+    let aligned_base = align_down_usize(base_raw, USER_IMAGE_ALIGNMENT);
+    if aligned_base == 0 {
+        return Err(crate::arch::api::UserImageError::InvalidBase);
+    }
+
+    let end_unaligned = base_raw
+        .checked_add(spec.mem_size)
+        .ok_or(crate::arch::api::UserImageError::SizeOverflow)?;
+    let end = align_up_usize(end_unaligned, USER_IMAGE_ALIGNMENT);
+    if end <= aligned_base {
+        return Err(crate::arch::api::UserImageError::SizeOverflow);
+    }
+
+    Ok((VirtAddr::new(aligned_base), end - aligned_base))
+}
+
+fn update_segment_permissions(space: &AddressSpace, spec: &UserSegment<'_>) {
+    let (aligned_base, span) =
+        segment_span(spec).expect("segment span must be valid when permissions are updated");
+    if span == 0 {
+        return;
+    }
+
+    space.inner().with_table(|table, _allocator| {
+        for offset in (0..span).step_by(PageSize::SIZE_4K.bytes()) {
+            let addr = aligned_base
+                .checked_add(offset)
+                .expect("segment addr overflow");
+            let page = Page::new(addr, PageSize::SIZE_4K);
+            if let Err(err) = table.update_permissions(page, spec.perms) {
+                panic!("failed to update user image permissions: {err:?}");
+            }
+        }
+    });
+}
+
+fn unmap_segments(space: &AddressSpace, segments: &[SegmentMapping]) {
+    if segments.is_empty() {
+        return;
+    }
+
+    space.inner().with_table(|table, allocator| {
+        for segment in segments {
+            for offset in (0..segment.size).step_by(PageSize::SIZE_4K.bytes()) {
+                let addr = segment
+                    .base
+                    .checked_add(offset)
+                    .expect("segment addr overflow");
+                let page = Page::new(addr, PageSize::SIZE_4K);
+                match table.unmap(page) {
+                    Ok(frame) => allocator.deallocate(frame),
+                    Err(UnmapError::NotMapped) => {}
+                    Err(err) => panic!("failed to unmap user image page: {err:?}"),
+                }
+            }
+        }
+    });
+}
+
+fn ranges_overlap(a_start: usize, a_size: usize, b_start: usize, b_size: usize) -> bool {
+    let a_end = a_start
+        .checked_add(a_size)
+        .expect("segment end overflow (existing)");
+    let b_end = b_start
+        .checked_add(b_size)
+        .expect("segment end overflow (new)");
+    a_start < b_end && b_start < a_end
 }

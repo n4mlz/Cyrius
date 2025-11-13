@@ -1,12 +1,12 @@
 # Syscall Layer Design Notes
 
 ## Scope
-- Provide a single entry point for all syscall traps (currently via `int 0x80`) and route them to ABI-specific tables.
+- Provide a single entry point for all syscall traps (legacy `int 0x80` as well as the fast-path `SYSCALL` MSR) and route them to ABI-specific tables.
 - Expose `AbiFlavor`/`SyscallPolicy` so the process/thread subsystems can describe how each container should be treated.
 - Supply a thin policy mechanism that mimics seccomp for the Linux Box demo without constraining the long-term design.
 
 ## Dispatcher
-- `syscall::init()` registers a dedicated interrupt handler with the generic interrupt controller using `ArchInterrupt::syscall_vector()` and must run after interrupts are initialised.
+- `syscall::init()` registers a dedicated interrupt handler with the generic interrupt controller using `ArchInterrupt::syscall_vector()` and, in parallel, asks the architecture layer to arm the `SYSCALL` MSRs so either entry path funnels into the same dispatcher. It must run after interrupts are initialised.
 - `ThreadControl::apply_syscall_profile()` calls `syscall::activate_thread`, binding the currently scheduled thread to a concrete syscall table plus policy metadata. The scheduler refreshes that binding on every context switch.
 - `SyscallDispatcher` stores the active binding behind a `SpinLock` and, when invoked, builds a `SyscallContext` around the current trap frame, forwarding the call to the bound table.
 - Errors are reported via `SyscallError` and mapped to simple exit codes; unsupported or denied syscalls forcibly terminate the offending thread so the shell can recover.
@@ -26,6 +26,6 @@
 - Cleanup of kernel stacks happens asynchronously via the scheduler's zombie list, so syscall handlers can request termination without worrying about which stack they are currently executing on.
 
 ## Future Work
-- Replace the software interrupt path with `SYSCALL/SYSRET` once MSR programming is available, letting `ThreadControl::apply_syscall_profile` configure per-thread MSRs.
+- Tighten the `SYSCALL` path with per-CPU state (e.g., `swapgs`-backed TLS) and consider returning via `sysret` once the scheduling model dictates.
 - Expand the Linux table with the minimum set required by the demo binaries (e.g., `rt_sigreturn`) and plumb proper errno semantics instead of hard-coded exit codes.
 - Allow host ABI implementations to register their own tables so the kernel can surface management syscalls without going through the Linux compatibility layer.

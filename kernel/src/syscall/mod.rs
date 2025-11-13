@@ -94,6 +94,7 @@ pub struct ThreadRuntime {
 
 pub fn init() {
     DISPATCHER.init();
+    <Arch as ArchSyscall>::init_syscall();
 }
 
 pub fn activate_thread(ctx: ThreadActivation) {

@@ -22,8 +22,8 @@ prompt is `OS>` and currently understands the following commands:
 ```
 OS> linux-box ls
 #=> NAME    TYPE    STATE   CMD
-#   demo1   linux   ready   ./demo1.bin
-#   demo2   linux   ready   ./demo2.bin
+#   demo1   linux   ready   ./demo1.elf
+#   demo2   linux   ready   ./demo2.elf
 
 OS> linux-box run --policy=minimal demo1
 step1: hello

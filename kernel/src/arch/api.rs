@@ -38,6 +38,14 @@ pub trait ArchMemory {
     ) -> Result<AddrRange<VirtAddr>, HeapRegionError>;
 }
 
+/// Describes a loadable user segment mapped into an address space.
+pub struct UserSegment<'a> {
+    pub base: VirtAddr,
+    pub data: &'a [u8],
+    pub mem_size: usize,
+    pub perms: MemPerm,
+}
+
 /// Architecture-specific thread context management.
 pub trait ArchThread {
     type Context: Clone;
@@ -95,9 +103,8 @@ pub trait ArchThread {
     /// Map a user payload at a fixed base address with the requested permissions.
     fn map_user_image(
         space: &Self::AddressSpace,
-        base: VirtAddr,
-        payload: &[u8],
-        perms: MemPerm,
+        segments: &[UserSegment<'_>],
+        entry: VirtAddr,
     ) -> Result<Self::UserImage, UserImageError>;
 
     /// Return the entry point for a mapped user image.
@@ -124,6 +131,8 @@ pub enum UserStackError {
 pub enum UserImageError {
     InvalidBase,
     SizeOverflow,
+    EmptyImage,
+    OverlappingSegment,
     AddressSpaceExhausted,
     MapFailed(MapError),
     OutOfMemory,
@@ -182,6 +191,8 @@ pub trait ArchInterrupt {
 }
 
 pub trait ArchSyscall: ArchTrap {
+    fn init_syscall() {}
+
     fn syscall_number(frame: &<Self as ArchTrap>::Frame) -> u64;
     fn syscall_arg(frame: &<Self as ArchTrap>::Frame, index: usize) -> u64;
     fn set_syscall_ret(frame: &mut <Self as ArchTrap>::Frame, value: u64);

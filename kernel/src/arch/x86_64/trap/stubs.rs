@@ -168,7 +168,7 @@ define_trap_stub_no_error!(interrupt_timer, super::super::interrupt::TIMER_VECTO
 define_trap_stub_no_error!(software_interrupt_syscall, super::SYSCALL_VECTOR);
 
 #[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn dispatch_trap(vector: u8, frame: *mut TrapFrame, has_error: u8) {
+pub(crate) unsafe extern "C" fn dispatch_trap(vector: u8, frame: *mut TrapFrame, has_error: u8) {
     let frame = unsafe { &mut *frame };
     let info = build_trap_info(vector, has_error != 0);
     crate::trap::dispatch(info, frame);
