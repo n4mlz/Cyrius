@@ -1,3 +1,5 @@
+mod fat;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -197,17 +199,18 @@ pub fn prepare_test_fat_image() -> Result<PathBuf> {
     let image_bytes = BYTES_PER_SECTOR * TOTAL_SECTORS as usize;
     let mut image = vec![0u8; image_bytes];
 
-    write_boot_sector(
-        &mut image[..BYTES_PER_SECTOR],
-        BYTES_PER_SECTOR as u16,
-        SECTORS_PER_CLUSTER,
-        RESERVED_SECTORS,
-        NUM_FATS,
+    let boot_cfg = fat::BootSectorConfig {
+        bytes_per_sector: BYTES_PER_SECTOR as u16,
+        sectors_per_cluster: SECTORS_PER_CLUSTER,
+        reserved_sectors: RESERVED_SECTORS,
+        fats: NUM_FATS,
         fat_size,
-        MEDIA_DESCRIPTOR,
-        TOTAL_SECTORS,
-        ROOT_CLUSTER,
-    );
+        media: MEDIA_DESCRIPTOR,
+        total_sectors: TOTAL_SECTORS,
+        root_cluster: ROOT_CLUSTER,
+    };
+
+    write_boot_sector(&mut image[..BYTES_PER_SECTOR], &boot_cfg);
     write_fsinfo(&mut image[BYTES_PER_SECTOR..BYTES_PER_SECTOR * 2]);
 
     let fat_offset = BYTES_PER_SECTOR * RESERVED_SECTORS as usize;
@@ -307,7 +310,7 @@ fn compute_fat_size(
             .saturating_sub(u32::from(fats) * fat_size);
         let clusters = data_sectors / u32::from(sectors_per_cluster);
         let fat_bytes = (clusters + 2) * 4;
-        let required_sectors = (fat_bytes + bytes_per_sector - 1) / bytes_per_sector;
+        let required_sectors = fat_bytes.div_ceil(bytes_per_sector);
         if required_sectors <= fat_size {
             return fat_size;
         }
@@ -315,28 +318,18 @@ fn compute_fat_size(
     }
 }
 
-fn write_boot_sector(
-    sector: &mut [u8],
-    bytes_per_sector: u16,
-    sectors_per_cluster: u8,
-    reserved_sectors: u16,
-    fats: u8,
-    fat_size: u32,
-    media: u8,
-    total_sectors: u32,
-    root_cluster: u32,
-) {
+fn write_boot_sector(sector: &mut [u8], cfg: &fat::BootSectorConfig) {
     sector.fill(0);
     sector[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
     sector[3..11].copy_from_slice(b"CYRIUSOS");
-    sector[11..13].copy_from_slice(&bytes_per_sector.to_le_bytes());
-    sector[13] = sectors_per_cluster;
-    sector[14..16].copy_from_slice(&reserved_sectors.to_le_bytes());
-    sector[16] = fats;
-    sector[21] = media;
-    sector[32..36].copy_from_slice(&total_sectors.to_le_bytes());
-    sector[36..40].copy_from_slice(&fat_size.to_le_bytes());
-    sector[44..48].copy_from_slice(&root_cluster.to_le_bytes());
+    sector[11..13].copy_from_slice(&cfg.bytes_per_sector.to_le_bytes());
+    sector[13] = cfg.sectors_per_cluster;
+    sector[14..16].copy_from_slice(&cfg.reserved_sectors.to_le_bytes());
+    sector[16] = cfg.fats;
+    sector[21] = cfg.media;
+    sector[32..36].copy_from_slice(&cfg.total_sectors.to_le_bytes());
+    sector[36..40].copy_from_slice(&cfg.fat_size.to_le_bytes());
+    sector[44..48].copy_from_slice(&cfg.root_cluster.to_le_bytes());
     sector[48..50].copy_from_slice(&1u16.to_le_bytes()); // FSInfo
     sector[50..52].copy_from_slice(&6u16.to_le_bytes()); // Backup boot sector
     sector[64] = 0x80; // Drive number
