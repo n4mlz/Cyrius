@@ -11,7 +11,7 @@
 
 ## VFS Behaviour
 - `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths
-  (e.g. `/fat`). Path resolution picks the longest matching mount prefix and resolves the tail from
+  (e.g. `/mnt`). Path resolution picks the longest matching mount prefix and resolves the tail from
   that mount’s root.
 - `VfsPath` normalises out empty/`.` segments and rejects `..` to avoid partial relative semantics
   until a full path resolution policy is in place.
@@ -31,5 +31,5 @@
 ## MemFS (Writable)
 - An in-memory tree of directories/files backed by `SpinLock`-protected vectors, offering simple
   create/read/write/truncate/remove operations.
-- Used as the writable root while FAT32 is mounted read-only (e.g. under `/fat`) for image/asset
+- Used as the writable root while FAT32 is mounted read-only (e.g. under `/mnt`) for image/asset
   ingestion.

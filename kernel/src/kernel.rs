@@ -195,9 +195,9 @@ fn init_filesystems() {
             match FatFileSystem::new(shared) {
                 Ok(fs) => {
                     let fat_root: alloc::sync::Arc<dyn crate::fs::Directory> = fs.root_dir();
-                    let mount_path = VfsPath::parse("/fat").expect("mount path");
+                    let mount_path = VfsPath::parse("/mnt").expect("mount path");
                     if mount_at(mount_path, fat_root).is_ok() {
-                        println!("[vfs] mounted FAT32 at /fat from {name}");
+                        println!("[vfs] mounted FAT32 at /mnt from {name}");
                         mounted = true;
                         break;
                     }

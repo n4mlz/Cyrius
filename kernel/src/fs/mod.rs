@@ -190,7 +190,7 @@ mod tests {
                 if let Ok(fs) = FatFileSystem::new(shared) {
                     let root: Arc<dyn Directory> = fs.root_dir();
                     force_replace_root(MemDirectory::new());
-                    mount_at(VfsPath::parse("/fat").unwrap(), root).expect("mount fat");
+                    mount_at(VfsPath::parse("/mnt").unwrap(), root).expect("mount fat");
                     mounted = true;
                     break;
                 }
@@ -198,7 +198,7 @@ mod tests {
         });
         assert!(mounted, "no FAT32-capable block device found");
 
-        let path = "/fat/HELLO.TXT";
+        let path = "/mnt/HELLO.TXT";
         let pid = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let fd = PROCESS_TABLE.open_path(pid, path).expect("open fd");
         let mut buf = [0u8; 64];
@@ -245,7 +245,7 @@ mod tests {
         let root = MemDirectory::new();
         force_replace_root(root.clone());
         let fat = MemDirectory::new();
-        mount_at(VfsPath::parse("/fat").unwrap(), fat.clone()).expect("mount fat");
+        mount_at(VfsPath::parse("/mnt").unwrap(), fat.clone()).expect("mount fat");
 
         let root_file = root.create_file("root.txt").expect("root file");
         let fat_file = fat.create_file("fat.txt").expect("fat file");
@@ -268,7 +268,7 @@ mod tests {
 
         let fat_read =
             with_vfs(
-                |vfs| match vfs.open_absolute(&VfsPath::parse("/fat/fat.txt").unwrap())? {
+                |vfs| match vfs.open_absolute(&VfsPath::parse("/mnt/fat.txt").unwrap())? {
                     NodeRef::File(f) => {
                         let mut buf = [0u8; 8];
                         let n = f.read_at(0, &mut buf)?;

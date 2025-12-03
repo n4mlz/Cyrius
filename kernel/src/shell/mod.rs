@@ -234,7 +234,7 @@ mod tests {
     #[kernel_test_case]
     fn parse_commands() {
         assert_eq!(parse_command("ls"), Command::Ls(None));
-        assert_eq!(parse_command("ls /fat"), Command::Ls(Some("/fat")));
+        assert_eq!(parse_command("ls /mnt"), Command::Ls(Some("/mnt")));
         assert_eq!(parse_command("cd /"), Command::Cd("/"));
         assert_eq!(parse_command("cat a"), Command::Cat("a"));
         assert_eq!(parse_command("rm a"), Command::Rm("a"));

@@ -1,5 +1,3 @@
-mod fat;
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -8,7 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions};
 use serde_json::Value;
+use std::io::{Seek, SeekFrom};
 
 pub fn build_kernel(release: bool) -> Result<PathBuf> {
     let mut cmd = Command::new("cargo");
@@ -199,7 +199,7 @@ pub fn prepare_test_fat_image() -> Result<PathBuf> {
     let image_bytes = BYTES_PER_SECTOR * TOTAL_SECTORS as usize;
     let mut image = vec![0u8; image_bytes];
 
-    let boot_cfg = fat::BootSectorConfig {
+    let boot_cfg = BootSectorConfig {
         bytes_per_sector: BYTES_PER_SECTOR as u16,
         sectors_per_cluster: SECTORS_PER_CLUSTER,
         reserved_sectors: RESERVED_SECTORS,
@@ -242,6 +242,45 @@ pub fn prepare_test_fat_image() -> Result<PathBuf> {
 
     fs::write(&path, &image)
         .with_context(|| format!("write FAT32 test image {}", path.display()))?;
+
+    Ok(path)
+}
+
+pub fn prepare_host_mnt_image() -> Result<PathBuf> {
+    const IMAGE_PATH: &str = "target/mnt.img";
+    const BYTES_PER_SECTOR: u16 = 512;
+    const IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+    let path = PathBuf::from(IMAGE_PATH);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .with_context(|| format!("open image {}", path.display()))?;
+    file.set_len(IMAGE_BYTES)
+        .with_context(|| format!("set length for {}", path.display()))?;
+
+    let opts = FormatVolumeOptions::new()
+        .bytes_per_sector(BYTES_PER_SECTOR)
+        .fat_type(FatType::Fat32);
+    fatfs::format_volume(&mut file, opts)
+        .with_context(|| format!("format FAT32 image {}", path.display()))?;
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| "rewind image after format")?;
+    let fs =
+        FileSystem::new(file, FsOptions::new()).with_context(|| "mount formatted mnt image")?;
+
+    let host_dir = Path::new("mnt");
+    if host_dir.exists() {
+        copy_dir_into_fs(&fs, host_dir, "/")?;
+    }
 
     Ok(path)
 }
@@ -318,7 +357,7 @@ fn compute_fat_size(
     }
 }
 
-fn write_boot_sector(sector: &mut [u8], cfg: &fat::BootSectorConfig) {
+fn write_boot_sector(sector: &mut [u8], cfg: &BootSectorConfig) {
     sector.fill(0);
     sector[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
     sector[3..11].copy_from_slice(b"CYRIUSOS");
@@ -362,6 +401,67 @@ fn write_fat(fat: &mut [u8], media: u8, root_cluster: u32, file_cluster: u32) {
     set_entry(1, 0x0FFFFFFF);
     set_entry(root_cluster as usize, 0x0FFFFFFF);
     set_entry(file_cluster as usize, 0x0FFFFFFF);
+}
+
+type FatfsFs = FileSystem<std::fs::File>;
+
+fn copy_dir_into_fs(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
+    if dest != "/" {
+        let _ = fs.root_dir().create_dir(dest);
+    }
+    walk_dir(fs, host, dest)?;
+    Ok(())
+}
+
+fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
+    for entry in fs::read_dir(host).with_context(|| format!("read_dir {}", host.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid utf-8 in filename"))?
+            .to_string();
+        let dest_path = if dest == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", dest, name)
+        };
+
+        if entry.file_type()?.is_dir() {
+            let _ = fs.root_dir().create_dir(&dest_path);
+            walk_dir(fs, &path, &dest_path)?;
+        } else if entry.file_type()?.is_file() {
+            let mut src =
+                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+            let mut dst = match fs.root_dir().create_file(&dest_path) {
+                Ok(f) => f,
+                Err(_) => {
+                    let mut f = fs
+                        .root_dir()
+                        .open_file(&dest_path)
+                        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    f.truncate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    f
+                }
+            };
+            std::io::copy(&mut src, &mut dst)
+                .with_context(|| format!("copy {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct BootSectorConfig {
+    bytes_per_sector: u16,
+    sectors_per_cluster: u8,
+    reserved_sectors: u16,
+    fats: u8,
+    fat_size: u32,
+    media: u8,
+    total_sectors: u32,
+    root_cluster: u32,
 }
 
 fn write_root_directory(
