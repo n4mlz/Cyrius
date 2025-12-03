@@ -130,10 +130,12 @@ fn is_lower_canonical(addr: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::kernel_test_case;
+    use crate::{println, test::kernel_test_case};
 
     #[kernel_test_case]
     fn rejects_null_with_len() {
+        println!("[test] rejects_null_with_len");
+
         let ptr = VirtAddr::new(core::ptr::null::<u8>() as usize);
         assert_eq!(
             validate_user_range(ptr, 8),
@@ -143,12 +145,16 @@ mod tests {
 
     #[kernel_test_case]
     fn allows_zero_len_null() {
+        println!("[test] allows_zero_len_null");
+
         let ptr = VirtAddr::new(0);
         assert_eq!(validate_user_range(ptr, 0), Ok(()));
     }
 
     #[kernel_test_case]
     fn detects_overflow() {
+        println!("[test] detects_overflow");
+
         let ptr = VirtAddr::new(USER_SPACE_LIMIT - 4);
         assert_eq!(
             validate_user_range(ptr, 8),
@@ -158,6 +164,8 @@ mod tests {
 
     #[kernel_test_case]
     fn misalignment_error() {
+        println!("[test] misalignment_error");
+
         let ptr = VirtAddr::new(3);
         let result = with_user_slice::<u32, _, _>(ptr, 1, |_slice| ());
         assert!(matches!(
@@ -168,6 +176,8 @@ mod tests {
 
     #[kernel_test_case]
     fn totalsize_overflow() {
+        println!("[test] totalsize_overflow");
+
         let ptr = VirtAddr::new(0x1000);
         let result = with_user_slice::<u64, _, _>(ptr, usize::MAX / 2, |_slice| ());
         assert_eq!(result, Err(UserAccessError::AddressOverflow));

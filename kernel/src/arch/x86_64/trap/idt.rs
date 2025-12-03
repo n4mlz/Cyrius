@@ -4,10 +4,11 @@ use crate::util::lazylock::LazyLock;
 
 use super::gdt::{IST_INDEX_DOUBLE_FAULT, IST_INDEX_MACHINE_CHECK, IST_INDEX_NMI};
 use super::stubs::{
-    exception_0, exception_1, exception_2, exception_3, exception_4, exception_5, exception_6,
-    exception_7, exception_8, exception_10, exception_11, exception_12, exception_13, exception_14,
-    exception_16, exception_17, exception_18, exception_19, exception_20, exception_21,
-    exception_28, exception_29, exception_30, interrupt_timer, software_interrupt_syscall,
+    EXTERNAL_INTERRUPT_STUBS, exception_0, exception_1, exception_2, exception_3, exception_4,
+    exception_5, exception_6, exception_7, exception_8, exception_10, exception_11, exception_12,
+    exception_13, exception_14, exception_16, exception_17, exception_18, exception_19,
+    exception_20, exception_21, exception_28, exception_29, exception_30, interrupt_timer,
+    software_interrupt_syscall,
 };
 
 static IDT: LazyLock<InterruptDescriptorTable, fn() -> InterruptDescriptorTable> =
@@ -75,6 +76,10 @@ fn build_idt() -> InterruptDescriptorTable {
         idt[super::SYSCALL_VECTOR]
             .set_handler_addr(VirtAddr::from_ptr(software_interrupt_syscall as *const ()))
             .set_privilege_level(PrivilegeLevel::Ring3);
+        for (offset, stub) in EXTERNAL_INTERRUPT_STUBS.iter().enumerate() {
+            let vector = crate::interrupt::DEVICE_VECTOR_BASE + offset as u8;
+            idt[vector].set_handler_addr(VirtAddr::from_ptr(*stub as *const ()));
+        }
     }
     idt
 }

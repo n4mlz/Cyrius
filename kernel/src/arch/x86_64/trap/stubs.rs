@@ -167,6 +167,88 @@ define_trap_stub_with_error!(exception_30, 30);
 define_trap_stub_no_error!(interrupt_timer, super::super::interrupt::TIMER_VECTOR);
 define_trap_stub_no_error!(software_interrupt_syscall, super::SYSCALL_VECTOR);
 
+define_trap_stub_no_error!(interrupt_external_0, crate::interrupt::DEVICE_VECTOR_BASE);
+define_trap_stub_no_error!(
+    interrupt_external_1,
+    crate::interrupt::DEVICE_VECTOR_BASE + 1
+);
+define_trap_stub_no_error!(
+    interrupt_external_2,
+    crate::interrupt::DEVICE_VECTOR_BASE + 2
+);
+define_trap_stub_no_error!(
+    interrupt_external_3,
+    crate::interrupt::DEVICE_VECTOR_BASE + 3
+);
+define_trap_stub_no_error!(
+    interrupt_external_4,
+    crate::interrupt::DEVICE_VECTOR_BASE + 4
+);
+define_trap_stub_no_error!(
+    interrupt_external_5,
+    crate::interrupt::DEVICE_VECTOR_BASE + 5
+);
+define_trap_stub_no_error!(
+    interrupt_external_6,
+    crate::interrupt::DEVICE_VECTOR_BASE + 6
+);
+define_trap_stub_no_error!(
+    interrupt_external_7,
+    crate::interrupt::DEVICE_VECTOR_BASE + 7
+);
+define_trap_stub_no_error!(
+    interrupt_external_8,
+    crate::interrupt::DEVICE_VECTOR_BASE + 8
+);
+define_trap_stub_no_error!(
+    interrupt_external_9,
+    crate::interrupt::DEVICE_VECTOR_BASE + 9
+);
+define_trap_stub_no_error!(
+    interrupt_external_10,
+    crate::interrupt::DEVICE_VECTOR_BASE + 10
+);
+define_trap_stub_no_error!(
+    interrupt_external_11,
+    crate::interrupt::DEVICE_VECTOR_BASE + 11
+);
+define_trap_stub_no_error!(
+    interrupt_external_12,
+    crate::interrupt::DEVICE_VECTOR_BASE + 12
+);
+define_trap_stub_no_error!(
+    interrupt_external_13,
+    crate::interrupt::DEVICE_VECTOR_BASE + 13
+);
+define_trap_stub_no_error!(
+    interrupt_external_14,
+    crate::interrupt::DEVICE_VECTOR_BASE + 14
+);
+define_trap_stub_no_error!(
+    interrupt_external_15,
+    crate::interrupt::DEVICE_VECTOR_BASE + 15
+);
+
+pub(super) const EXTERNAL_INTERRUPT_STUBS: [unsafe extern "C" fn() -> !;
+    crate::interrupt::DEVICE_VECTOR_COUNT] = [
+    interrupt_external_0,
+    interrupt_external_1,
+    interrupt_external_2,
+    interrupt_external_3,
+    interrupt_external_4,
+    interrupt_external_5,
+    interrupt_external_6,
+    interrupt_external_7,
+    interrupt_external_8,
+    interrupt_external_9,
+    interrupt_external_10,
+    interrupt_external_11,
+    interrupt_external_12,
+    interrupt_external_13,
+    interrupt_external_14,
+    interrupt_external_15,
+];
+
 #[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn dispatch_trap(vector: u8, frame: *mut TrapFrame, has_error: u8) {
     let frame = unsafe { &mut *frame };

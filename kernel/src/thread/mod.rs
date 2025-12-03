@@ -491,11 +491,14 @@ fn idle_thread() -> ! {
 mod tests {
     use super::*;
     use crate::mem::addr::VirtAddr;
+    use crate::println;
     use crate::process::PROCESS_TABLE;
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
     fn user_thread_context_uses_ring3_segments() {
+        println!("[test] user_thread_context_uses_ring3_segments");
+
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
             .create_user_process("user-test")
