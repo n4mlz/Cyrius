@@ -17,6 +17,7 @@ pub mod fs;
 pub mod interrupt;
 pub mod mem;
 pub mod process;
+pub mod shell;
 #[cfg(test)]
 pub mod test;
 pub mod thread;
@@ -141,17 +142,25 @@ fn initialise_scheduler() {
         .init()
         .unwrap_or_else(|err| panic!("failed to initialise scheduler: {err:?}"));
 
-    SCHEDULER
-        .spawn_kernel_thread("worker-a", scheduler_worker_a)
-        .unwrap_or_else(|err| panic!("failed to spawn worker-a: {err:?}"));
+    // SCHEDULER
+    //     .spawn_kernel_thread("worker-a", scheduler_worker_a)
+    //     .unwrap_or_else(|err| panic!("failed to spawn worker-a: {err:?}"));
 
-    SCHEDULER
-        .spawn_kernel_thread("worker-b", scheduler_worker_b)
-        .unwrap_or_else(|err| panic!("failed to spawn worker-b: {err:?}"));
+    // SCHEDULER
+    //     .spawn_kernel_thread("worker-b", scheduler_worker_b)
+    //     .unwrap_or_else(|err| panic!("failed to spawn worker-b: {err:?}"));
+
+    init_shell();
 
     SCHEDULER
         .start()
         .unwrap_or_else(|err| panic!("failed to start scheduler: {err:?}"));
+}
+
+fn init_shell() {
+    if let Err(err) = crate::shell::spawn_shell() {
+        println!("[shell] failed to start shell: {err:?}");
+    }
 }
 
 fn scheduler_worker_a() -> ! {

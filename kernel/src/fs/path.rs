@@ -83,6 +83,21 @@ impl VfsPath {
             components: comps,
         })
     }
+
+    pub fn to_string(&self) -> String {
+        let mut out = String::new();
+        if self.absolute {
+            out.push('/');
+        }
+        let mut iter = self.components.iter().peekable();
+        while let Some(comp) = iter.next() {
+            out.push_str(comp.as_str());
+            if iter.peek().is_some() {
+                out.push('/');
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

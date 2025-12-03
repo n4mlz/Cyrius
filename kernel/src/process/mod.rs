@@ -257,6 +257,34 @@ impl ProcessTable {
         let _ = file.write_at(0, data)?;
         Ok(())
     }
+
+    pub fn create_dir(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+        let name = abs
+            .components()
+            .last()
+            .ok_or(VfsError::InvalidPath)?
+            .as_str()
+            .to_string();
+        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
+            NodeRef::Directory(dir) => Ok(dir),
+            NodeRef::File(_) => Err(VfsError::NotDirectory),
+        })?;
+        match dir.create_dir(&name) {
+            Ok(_) => Ok(()),
+            Err(VfsError::AlreadyExists) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn cwd(&self, pid: ProcessId) -> Result<VfsPath, VfsError> {
+        let inner = self.inner.lock();
+        let process = inner.process(pid).ok_or(VfsError::NotFound)?;
+        Ok(process.fs.cwd.clone())
+    }
 }
 
 impl Default for ProcessTable {
