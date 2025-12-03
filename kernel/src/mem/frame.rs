@@ -28,6 +28,11 @@ impl RegionCursor {
             return None;
         }
 
+        // Skip regions starting at address 0 to avoid NULL pointer issues
+        if region.start == 0 {
+            return None;
+        }
+
         let start = align_up(region.start, FRAME_SIZE)?;
         let end = align_down(region.end, FRAME_SIZE);
 
