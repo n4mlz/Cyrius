@@ -252,30 +252,32 @@ mod tests {
         let _ = root_file.write_at(0, b"root").expect("write root");
         let _ = fat_file.write_at(0, b"fat").expect("write fat");
 
-        let root_read = with_vfs(|vfs| match vfs
-            .open_absolute(&VfsPath::parse("/root.txt").unwrap())?
-        {
-            NodeRef::File(f) => {
-                let mut buf = [0u8; 8];
-                let n = f.read_at(0, &mut buf)?;
-                Ok(buf[..n].to_vec())
-            }
-            _ => Err(VfsError::NotFile),
-        })
-        .expect("read root");
+        let root_read =
+            with_vfs(
+                |vfs| match vfs.open_absolute(&VfsPath::parse("/root.txt").unwrap())? {
+                    NodeRef::File(f) => {
+                        let mut buf = [0u8; 8];
+                        let n = f.read_at(0, &mut buf)?;
+                        Ok(buf[..n].to_vec())
+                    }
+                    _ => Err(VfsError::NotFile),
+                },
+            )
+            .expect("read root");
         assert_eq!(root_read, b"root".to_vec());
 
-        let fat_read = with_vfs(|vfs| match vfs
-            .open_absolute(&VfsPath::parse("/fat/fat.txt").unwrap())?
-        {
-            NodeRef::File(f) => {
-                let mut buf = [0u8; 8];
-                let n = f.read_at(0, &mut buf)?;
-                Ok(buf[..n].to_vec())
-            }
-            _ => Err(VfsError::NotFile),
-        })
-        .expect("read fat");
+        let fat_read =
+            with_vfs(
+                |vfs| match vfs.open_absolute(&VfsPath::parse("/fat/fat.txt").unwrap())? {
+                    NodeRef::File(f) => {
+                        let mut buf = [0u8; 8];
+                        let n = f.read_at(0, &mut buf)?;
+                        Ok(buf[..n].to_vec())
+                    }
+                    _ => Err(VfsError::NotFile),
+                },
+            )
+            .expect("read fat");
         assert_eq!(fat_read, b"fat".to_vec());
     }
 }

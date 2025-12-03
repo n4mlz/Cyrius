@@ -52,7 +52,6 @@ impl From<FatError> for VfsError {
 }
 
 pub struct FatFileSystem<D: BlockDevice + Send> {
-    volume: Arc<FatVolume<D>>,
     root: Arc<FatDirectory<D>>,
 }
 
@@ -76,10 +75,9 @@ impl<D: BlockDevice + Send> FatFileSystem<D> {
         let chain = volume.cluster_chain(volume.bpb.root_cluster)?;
         let root = Arc::new(FatDirectory {
             volume: volume.clone(),
-            cluster: volume.bpb.root_cluster,
             chain,
         });
-        Ok(Self { volume, root })
+        Ok(Self { root })
     }
 
     pub fn root_dir(&self) -> Arc<FatDirectory<D>> {
@@ -155,7 +153,7 @@ impl<D: BlockDevice + Send> FatVolume<D> {
             .checked_add(buf.len() as u64)
             .ok_or(FatError::Corrupted)?;
         let end_usize: usize = end.try_into().map_err(|_| FatError::Corrupted)?;
-        let end_block = (end_usize + block_size - 1) / block_size;
+        let end_block = end_usize.div_ceil(block_size);
         let block_count = end_block
             .checked_sub(start_block)
             .ok_or(FatError::Corrupted)?;
@@ -227,7 +225,6 @@ impl<D: BlockDevice + Send> FatVolume<D> {
 }
 
 struct FatCache {
-    sector_size: usize,
     cached_sector: Option<u32>,
     data: Box<[u8]>,
 }
@@ -235,7 +232,6 @@ struct FatCache {
 impl FatCache {
     fn new(sector_size: usize) -> Self {
         Self {
-            sector_size,
             cached_sector: None,
             data: vec![0u8; sector_size].into_boxed_slice(),
         }
@@ -276,7 +272,6 @@ struct BiosParameterBlock {
     sectors_per_cluster: u8,
     reserved_sector_count: u16,
     num_fats: u8,
-    total_sectors_32: u32,
     fat_size_32: u32,
     root_cluster: u32,
 }
@@ -306,7 +301,7 @@ impl BiosParameterBlock {
             return Err(FatError::InvalidBootSector);
         }
 
-        let total_sectors = if total_sectors_16 != 0 {
+        let _total_sectors = if total_sectors_16 != 0 {
             u32::from(total_sectors_16)
         } else {
             total_sectors_32
@@ -327,7 +322,6 @@ impl BiosParameterBlock {
             sectors_per_cluster,
             reserved_sector_count,
             num_fats,
-            total_sectors_32: total_sectors,
             fat_size_32: fat_size,
             root_cluster,
         })
@@ -340,7 +334,6 @@ impl BiosParameterBlock {
 
 pub struct FatDirectory<D: BlockDevice + Send> {
     volume: Arc<FatVolume<D>>,
-    cluster: u32,
     chain: Vec<u32>,
 }
 
@@ -395,7 +388,6 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
                     return match entry.kind {
                         FileType::Directory => Ok(NodeRef::Directory(Arc::new(FatDirectory {
                             volume: self.volume.clone(),
-                            cluster: entry.first_cluster,
                             chain: self
                                 .volume
                                 .cluster_chain(entry.first_cluster)

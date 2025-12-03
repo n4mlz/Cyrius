@@ -35,6 +35,12 @@ impl ProcessFs {
     }
 }
 
+impl Default for ProcessFs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Global table that tracks processes and their associated threads.
 ///
 /// # Implementation note
