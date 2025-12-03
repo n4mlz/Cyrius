@@ -12,6 +12,7 @@
 - **process/thread**: execution and scheduling primitives built atop architecture contexts.
 - **trap**: global trap dispatcher and logging with architecture-specific frames.
 - **util**: shared primitives (spin locks, lazy init, stream helpers) leveraged across modules.
+- **fs**: minimal VFS abstraction with read-only FAT32 support and a global file descriptor table.
 
 ## Design Principles
 - Keep subsystem boundaries explicit; cross-module dependencies must be routed through trait contracts to simplify future architecture additions.

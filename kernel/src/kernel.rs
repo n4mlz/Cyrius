@@ -7,11 +7,13 @@
 
 extern crate alloc;
 
+use alloc::string::ToString;
 use core::convert::TryFrom;
 use core::panic::PanicInfo;
 
 pub mod arch;
 pub mod device;
+pub mod fs;
 pub mod interrupt;
 pub mod mem;
 pub mod process;
@@ -25,8 +27,10 @@ use crate::arch::{
     Arch,
     api::{ArchDevice, ArchMemory},
 };
+use crate::device::block::SharedBlockDevice;
 use crate::device::char::uart::Uart;
 use crate::device::virtio::block;
+use crate::fs::{fat32::FatFileSystem, mount_root};
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
 use crate::mem::addr::{AddrRange, PhysAddr};
 use crate::mem::allocator;
@@ -128,6 +132,8 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     if discovered_blocks > 0 {
         println!("[blk] discovered {discovered_blocks} virtio block device(s)",);
     }
+
+    init_filesystems();
 }
 
 fn initialise_scheduler() {
@@ -166,6 +172,33 @@ fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
         }
         counter = counter.wrapping_add(1);
         core::hint::spin_loop();
+    }
+}
+
+fn init_filesystems() {
+    let mut mounted = false;
+    block::with_devices(|devices| {
+        for dev in devices {
+            let shared = SharedBlockDevice::from_arc(dev.clone());
+            let name = shared.label().to_string();
+            match FatFileSystem::new(shared) {
+                Ok(fs) => {
+                    let root: alloc::sync::Arc<dyn crate::fs::Directory> = fs.root_dir();
+                    if mount_root(root).is_ok() {
+                        println!("[vfs] mounted FAT32 root from {name}");
+                        mounted = true;
+                        break;
+                    }
+                }
+                Err(err) => {
+                    println!("[vfs] skipped {name}: {:?}", err);
+                }
+            }
+        }
+    });
+
+    if !mounted {
+        println!("[vfs] no FAT32 root mounted");
     }
 }
 
