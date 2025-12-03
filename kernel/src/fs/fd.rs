@@ -2,8 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::{File, VfsError, VfsPath, with_vfs};
-use crate::util::lazylock::LazyLock;
+use super::{File, VfsError};
 use crate::util::spinlock::SpinLock;
 
 pub type Fd = u32;
@@ -20,6 +19,15 @@ impl OpenFile {
         self.offset = self.offset.checked_add(read).ok_or(VfsError::Corrupted)?;
         Ok(read)
     }
+
+    pub fn write(&mut self, data: &[u8]) -> Result<usize, VfsError> {
+        let written = self.file.write_at(self.offset, data)?;
+        self.offset = self
+            .offset
+            .checked_add(written)
+            .ok_or(VfsError::Corrupted)?;
+        Ok(written)
+    }
 }
 
 pub struct FdTable {
@@ -35,8 +43,7 @@ impl FdTable {
         }
     }
 
-    pub fn open_at_root(&self, path: &VfsPath) -> Result<Fd, VfsError> {
-        let file = with_vfs(|vfs| vfs.open_file(path))?;
+    pub fn open_file(&self, file: Arc<dyn File>) -> Result<Fd, VfsError> {
         let mut guard = self.inner.lock();
         let fd = guard.allocate_fd(self.next_fd.fetch_add(1, Ordering::AcqRel));
         guard.set(fd, OpenFile { file, offset: 0 })?;
@@ -47,6 +54,12 @@ impl FdTable {
         let mut guard = self.inner.lock();
         let file = guard.get_mut(fd)?;
         file.read(buf)
+    }
+
+    pub fn write(&self, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
+        let mut guard = self.inner.lock();
+        let file = guard.get_mut(fd)?;
+        file.write(data)
     }
 
     pub fn close(&self, fd: Fd) -> Result<(), VfsError> {
@@ -106,5 +119,3 @@ impl FdTableInner {
         }
     }
 }
-
-pub static OPEN_FILE_TABLE: LazyLock<FdTable> = LazyLock::new_const(FdTable::new);

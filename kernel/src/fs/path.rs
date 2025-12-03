@@ -46,6 +46,43 @@ impl VfsPath {
     pub fn components(&self) -> &[PathComponent] {
         &self.components
     }
+
+    pub fn root() -> Self {
+        Self {
+            absolute: true,
+            components: Vec::new(),
+        }
+    }
+
+    pub fn join(&self, other: &VfsPath) -> Result<Self, VfsError> {
+        if other.is_absolute() {
+            return Ok(other.clone());
+        }
+        let mut components = self.components.clone();
+        for comp in other.components.iter() {
+            components.push(comp.clone());
+        }
+        Ok(Self {
+            absolute: self.absolute,
+            components,
+        })
+    }
+
+    pub fn push(&mut self, component: PathComponent) {
+        self.components.push(component);
+    }
+
+    pub fn parent(&self) -> Option<Self> {
+        if self.components.is_empty() {
+            return None;
+        }
+        let mut comps = self.components.clone();
+        comps.pop();
+        Some(Self {
+            absolute: self.absolute,
+            components: comps,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

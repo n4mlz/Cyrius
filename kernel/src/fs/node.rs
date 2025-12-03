@@ -47,6 +47,16 @@ pub trait File: Send + Sync {
 
     /// Reads up to `buf.len()` bytes starting from `offset`. Returns the number of bytes read.
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError>;
+
+    /// Writes up to `data.len()` bytes starting from `offset`. Returns the number of bytes written.
+    fn write_at(&self, _offset: usize, _data: &[u8]) -> Result<usize, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Truncates or extends the file to `len` bytes.
+    fn truncate(&self, _len: usize) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
 }
 
 pub trait Directory: Send + Sync {
@@ -57,4 +67,19 @@ pub trait Directory: Send + Sync {
 
     /// Locates a child entry by name.
     fn lookup(&self, name: &PathComponent) -> Result<NodeRef, VfsError>;
+
+    /// Creates a new empty file entry and returns its handle.
+    fn create_file(&self, _name: &str) -> Result<Arc<dyn File>, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Creates a new directory and returns it.
+    fn create_dir(&self, _name: &str) -> Result<Arc<dyn Directory>, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Removes a file or directory entry.
+    fn remove(&self, _name: &str) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
 }

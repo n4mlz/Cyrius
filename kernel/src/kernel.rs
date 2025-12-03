@@ -30,7 +30,7 @@ use crate::arch::{
 use crate::device::block::SharedBlockDevice;
 use crate::device::char::uart::Uart;
 use crate::device::virtio::block;
-use crate::fs::{fat32::FatFileSystem, mount_root};
+use crate::fs::{VfsPath, fat32::FatFileSystem, memfs::MemDirectory, mount_at, mount_root};
 use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
 use crate::mem::addr::{AddrRange, PhysAddr};
 use crate::mem::allocator;
@@ -176,6 +176,8 @@ fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
 }
 
 fn init_filesystems() {
+    let root = MemDirectory::new();
+    mount_root(root.clone()).expect("mount memfs root");
     let mut mounted = false;
     block::with_devices(|devices| {
         for dev in devices {
@@ -183,9 +185,10 @@ fn init_filesystems() {
             let name = shared.label().to_string();
             match FatFileSystem::new(shared) {
                 Ok(fs) => {
-                    let root: alloc::sync::Arc<dyn crate::fs::Directory> = fs.root_dir();
-                    if mount_root(root).is_ok() {
-                        println!("[vfs] mounted FAT32 root from {name}");
+                    let fat_root: alloc::sync::Arc<dyn crate::fs::Directory> = fs.root_dir();
+                    let mount_path = VfsPath::parse("/fat").expect("mount path");
+                    if mount_at(mount_path, fat_root).is_ok() {
+                        println!("[vfs] mounted FAT32 at /fat from {name}");
                         mounted = true;
                         break;
                     }

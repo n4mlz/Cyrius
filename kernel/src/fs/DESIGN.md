@@ -1,21 +1,22 @@
 # Filesystem Module Design Notes
 
 ## Scope
-- Provides a minimal read-only VFS surface: path parsing (absolute only, rejects `..`), a global
-  root mount, and basic metadata exposure.
-- Exposes two core traits: `Directory` (lookup/list) and `File` (read-only, offset-based), wrapped
-  in `NodeRef` so callers can resolve paths without leaking concrete filesystem types.
-- A lightweight file descriptor table (`FdTable`) tracks per-handle offsets; it is currently global
-  and detached from process state, acting as the future integration point for per-process tables.
+- Provides a read/write VFS surface with mount support: path parsing (absolute or relative to cwd,
+  rejects `..`), a root mount, and basic metadata exposure.
+- Exposes core traits: `Directory` (lookup/list/create/remove) and `File` (read/write/truncate,
+  offset-based), wrapped in `NodeRef` so callers can resolve paths without leaking concrete
+  filesystem types.
+- Each process owns its own `FdTable` and current working directory; `open` binds a file descriptor
+  to that process at allocation time.
 
 ## VFS Behaviour
-- `mount_root` installs a single root filesystem; test-only helpers can replace it to keep tests
-  isolated. Path resolution walks the mount tree starting at root and fails fast on non-directory
-  traversal.
+- `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths
+  (e.g. `/fat`). Path resolution picks the longest matching mount prefix and resolves the tail from
+  that mount’s root.
 - `VfsPath` normalises out empty/`.` segments and rejects `..` to avoid partial relative semantics
   until a full path resolution policy is in place.
-- `OPEN_FILE_TABLE` increments offsets on successful reads, enabling simple sequential access; write
-  and mmap are intentionally absent until a page cache exists.
+- Process FDs advance offsets on successful reads/writes. Write/mmap are supported only by
+  filesystems that opt in (e.g. memfs); read-only filesystems return `ReadOnly`.
 
 ## FAT32 Driver (Read-Only)
 - `FatFileSystem` wraps a shared `BlockDevice` (via `SharedBlockDevice`); only 512-byte logical
@@ -26,3 +27,9 @@
   single-sector cache to avoid repeated device traffic.
 - The driver is read-only and marks missing features (write, fsync) for future extension once page
   cache and transactional updates are defined.
+
+## MemFS (Writable)
+- An in-memory tree of directories/files backed by `SpinLock`-protected vectors, offering simple
+  create/read/write/truncate/remove operations.
+- Used as the writable root while FAT32 is mounted read-only (e.g. under `/fat`) for image/asset
+  ingestion.
