@@ -259,6 +259,16 @@ impl AddressSpace {
     pub unsafe fn activate(&self) {
         unsafe { self.inner.activate() };
     }
+
+    pub fn with_table<F, R>(&self, f: F) -> R
+    where
+        F: FnMut(
+            &mut crate::arch::x86_64::mem::paging::X86PageTable<crate::mem::mapper::OffsetMapper>,
+            &mut crate::mem::frame::FrameAllocatorGuard<'_>,
+        ) -> R,
+    {
+        self.inner.with_table(f)
+    }
 }
 
 fn virt_to_u64(addr: VirtAddr) -> u64 {
