@@ -256,8 +256,23 @@ impl AddressSpace {
         &self.inner
     }
 
+    /// # Safety
+    ///
+    /// Caller must ensure the provided address space remains valid and mapped
+    /// for the duration of execution, and that switching CR3 here does not
+    /// race with concurrent mutations of the same tables.
     pub unsafe fn activate(&self) {
         unsafe { self.inner.activate() };
+    }
+
+    pub fn with_table<F, R>(&self, f: F) -> R
+    where
+        F: FnMut(
+            &mut crate::arch::x86_64::mem::paging::X86PageTable<crate::mem::mapper::OffsetMapper>,
+            &mut crate::mem::frame::FrameAllocatorGuard<'_>,
+        ) -> R,
+    {
+        self.inner.with_table(f)
     }
 }
 

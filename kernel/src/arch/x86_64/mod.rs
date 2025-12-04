@@ -1,11 +1,13 @@
 pub mod bus;
 pub mod interrupt;
+pub mod loader;
 pub mod mem;
 pub mod pci;
 pub mod syscall;
 mod thread;
 mod trap;
 
+pub use thread::AddressSpace;
 pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
 
 use self::trap::gdt;
@@ -135,4 +137,8 @@ impl ArchThread for X86_64 {
     fn update_privilege_stack(stack_top: VirtAddr) {
         gdt::set_privilege_stack(stack_top);
     }
+}
+
+impl crate::arch::api::ArchPlatformHooks for X86_64 {
+    type LinuxElfPlatform = loader::X86LinuxElfPlatform;
 }
