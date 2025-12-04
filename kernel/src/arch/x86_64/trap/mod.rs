@@ -13,7 +13,7 @@ pub(super) fn init() {
     idt::load();
 }
 
-pub(super) const SYSCALL_VECTOR: u8 = 0x80;
+pub const SYSCALL_VECTOR: u8 = 0x80;
 
 pub(super) fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
     handlers::handle_exception(info, frame)

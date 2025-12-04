@@ -10,12 +10,14 @@
 - **interrupt**: vector registration, trap dispatch, and timer orchestration.
 - **mem**: address wrappers, heap allocator, and paging interfaces.
 - **process/thread**: execution and scheduling primitives built atop architecture contexts.
+- **syscall**: ABI-aware syscall dispatch, wired to the trap layer via `int 0x80` on x86_64.
 - **trap**: global trap dispatcher and logging with architecture-specific frames.
 - **util**: shared primitives (spin locks, lazy init, stream helpers) leveraged across modules.
 - **fs**: minimal VFS abstraction with read-only FAT32 support and a global file descriptor table.
 
 ## Design Principles
 - Keep subsystem boundaries explicit; cross-module dependencies must be routed through trait contracts to simplify future architecture additions.
+- Syscall dispatch selects a table based on the ABI recorded for the currently scheduled thread; the scheduler programs this before restoring a context.
 - Prioritise determinism and clarity over premature optimisation; most components use `SpinLock` for now with clear extension points for finer-grained concurrency.
 - Provide kernel tests under `#[cfg(test)]` wherever feasible to validate invariants without full system boot.
 

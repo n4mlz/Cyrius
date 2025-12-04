@@ -2,8 +2,11 @@ pub mod bus;
 pub mod interrupt;
 pub mod mem;
 pub mod pci;
+pub mod syscall;
 mod thread;
 mod trap;
+
+pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
 
 use self::trap::gdt;
 
