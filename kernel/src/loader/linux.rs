@@ -2,11 +2,10 @@ use alloc::{vec, vec::Vec};
 use core::convert::TryFrom;
 use core::mem::size_of;
 
-use crate::arch::{Arch, api::ArchThread};
 use crate::fs::{NodeRef, VfsError, VfsPath, with_vfs};
+use crate::loader::{AddressSpaceExt, DefaultLinuxElfPlatform, LinuxElfPlatform};
 use crate::mem::addr::{MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr};
 use crate::mem::paging::{FrameAllocator, MapError, PageTableOps};
-use crate::loader::AddressSpaceExt;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 
 const ELF_MAGIC: &[u8; 4] = b"\x7FELF";
@@ -14,16 +13,14 @@ const ELF_CLASS_64: u8 = 2;
 const ELF_DATA_LSB: u8 = 1;
 const ELF_VERSION_CURRENT: u8 = 1;
 const ELF_TYPE_EXEC: u16 = 2;
-const ELF_MACHINE_X86_64: u16 = 0x3E;
 const PT_LOAD: u32 = 1;
 
-const PAGE_SIZE: usize = PageSize::SIZE_4K.bytes();
 const DEFAULT_STACK_SIZE: usize = 32 * 1024;
 
 /// Linux ELF image loaded into a process address space.
-pub struct LinuxProgram {
+pub struct LinuxProgram<S> {
     pub entry: VirtAddr,
-    pub user_stack: <Arch as ArchThread>::UserStack,
+    pub user_stack: S,
     pub stack_pointer: VirtAddr,
 }
 
@@ -65,19 +62,33 @@ impl From<crate::arch::api::UserStackError> for LinuxLoadError {
 }
 
 /// Load a static, non-PIE 64-bit ELF into the target process address space.
-pub fn load_elf(pid: ProcessId, raw_path: &str) -> Result<LinuxProgram, LinuxLoadError> {
+pub fn load_elf(
+    pid: ProcessId,
+    raw_path: &str,
+) -> Result<LinuxProgram<<DefaultLinuxElfPlatform as LinuxElfPlatform>::UserStack>, LinuxLoadError>
+{
+    load_elf_with_platform::<DefaultLinuxElfPlatform>(pid, raw_path)
+}
+
+pub fn load_elf_with_platform<P>(
+    pid: ProcessId,
+    raw_path: &str,
+) -> Result<LinuxProgram<P::UserStack>, LinuxLoadError>
+where
+    P: LinuxElfPlatform<AddressSpace = crate::arch::x86_64::AddressSpace>,
+{
     let abs = resolve_path(pid, raw_path)?;
     let elf_bytes = read_file(&abs)?;
-    let elf = ElfFile::parse(&elf_bytes)?;
+    let elf = ElfFile::parse::<P>(&elf_bytes)?;
 
-    let space = PROCESS_TABLE
+    let space: P::AddressSpace = PROCESS_TABLE
         .address_space(pid)
         .ok_or(LinuxLoadError::Process(ProcessError::NotFound))?;
 
-    map_segments(&space, &elf, &elf_bytes)?;
+    map_segments::<P>(&space, &elf, &elf_bytes)?;
 
-    let user_stack = <Arch as ArchThread>::allocate_user_stack(&space, DEFAULT_STACK_SIZE)?;
-    let stack_top = <Arch as ArchThread>::user_stack_top(&user_stack);
+    let user_stack = P::allocate_user_stack(&space, DEFAULT_STACK_SIZE)?;
+    let stack_top = P::user_stack_top(&user_stack);
     let stack_pointer = initialise_minimal_stack(stack_top);
 
     Ok(LinuxProgram {
@@ -116,20 +127,20 @@ fn read_file(path: &VfsPath) -> Result<Vec<u8>, LinuxLoadError> {
     }
 }
 
-fn map_segments(
-    space: &<Arch as ArchThread>::AddressSpace,
+fn map_segments<P: LinuxElfPlatform>(
+    space: &P::AddressSpace,
     elf: &ElfFile,
     image: &[u8],
 ) -> Result<(), LinuxLoadError> {
     space.with_page_table(|table, allocator| {
         for seg in &elf.segments {
-            map_single_segment(table, allocator, seg, image)?;
+            map_single_segment::<_, _, P>(table, allocator, seg, image)?;
         }
         Ok(())
     })
 }
 
-fn map_single_segment<T: PageTableOps, A: FrameAllocator>(
+fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: LinuxElfPlatform>(
     table: &mut T,
     allocator: &mut A,
     seg: &ProgramSegment,
@@ -143,20 +154,22 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator>(
     let target_perms = perms_from_flags(seg.flags);
     let map_perms = target_perms | MemPerm::WRITE;
 
-    let start = align_down(seg.vaddr.as_raw(), PAGE_SIZE);
+    let page_size = P::page_size();
+    let start = align_down(seg.vaddr.as_raw(), page_size);
     let end = align_up(
         seg.vaddr
             .as_raw()
             .checked_add(seg.mem_size)
             .ok_or(LinuxLoadError::SizeOverflow)?,
-        PAGE_SIZE,
+        page_size,
     );
 
-    for addr in (start..end).step_by(PAGE_SIZE) {
+    let page_sz = PageSize(page_size);
+    for addr in (start..end).step_by(page_size) {
         let virt = VirtAddr::new(addr);
-        let page = Page::new(virt, PageSize::SIZE_4K);
+        let page = Page::new(virt, page_sz);
         let frame = allocator
-            .allocate(PageSize::SIZE_4K)
+            .allocate(page_sz)
             .ok_or(LinuxLoadError::FrameAllocationFailed)?;
         table.map(page, frame, map_perms, allocator)?;
     }
@@ -192,8 +205,8 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator>(
     }
 
     if !target_perms.contains(MemPerm::WRITE) {
-        for addr in (start..end).step_by(PAGE_SIZE) {
-            let page = Page::new(VirtAddr::new(addr), PageSize::SIZE_4K);
+        for addr in (start..end).step_by(page_size) {
+            let page = Page::new(VirtAddr::new(addr), page_sz);
             table.update_permissions(page, target_perms)?;
         }
     }
@@ -260,8 +273,8 @@ struct ProgramSegment {
 }
 
 impl ElfFile {
-    fn parse(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
-        let header = ElfHeader::parse(bytes)?;
+    fn parse<P: LinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+        let header = ElfHeader::parse::<P>(bytes)?;
         let mut segments = Vec::new();
         let phoff = usize::try_from(header.ph_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
         let ent_size = usize::from(header.ph_entry_size);
@@ -310,7 +323,7 @@ struct ElfHeader {
 }
 
 impl ElfHeader {
-    fn parse(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+    fn parse<P: LinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
         if bytes.len() < 64 {
             return Err(LinuxLoadError::InvalidElf("file too small"));
         }
@@ -331,7 +344,7 @@ impl ElfHeader {
         if e_type != ELF_TYPE_EXEC {
             return Err(LinuxLoadError::InvalidElf("unsupported type"));
         }
-        if e_machine != ELF_MACHINE_X86_64 {
+        if e_machine != P::machine_id() {
             return Err(LinuxLoadError::InvalidElf("unsupported machine"));
         }
         let entry = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
@@ -369,6 +382,7 @@ struct ProgramHeader {
     vaddr: u64,
     file_size: u64,
     mem_size: u64,
+    #[allow(dead_code)]
     align: u64,
 }
 
@@ -414,10 +428,11 @@ impl ProgramHeader {
 mod tests {
     use alloc::vec;
 
+    use crate::arch::{Arch, api::ArchThread};
     use crate::fs::{Directory, memfs::MemDirectory};
     use crate::mem::addr::VirtIntoPtr;
-    use crate::test::kernel_test_case;
     use crate::println;
+    use crate::test::kernel_test_case;
 
     use super::*;
 
@@ -464,7 +479,7 @@ mod tests {
         buf[5] = ELF_DATA_LSB;
         buf[6] = ELF_VERSION_CURRENT;
         buf[16..18].copy_from_slice(&ELF_TYPE_EXEC.to_le_bytes());
-        buf[18..20].copy_from_slice(&ELF_MACHINE_X86_64.to_le_bytes());
+        buf[18..20].copy_from_slice(&DefaultLinuxElfPlatform::machine_id().to_le_bytes());
         buf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
         buf[24..32].copy_from_slice(&(0x400080u64).to_le_bytes()); // e_entry
         buf[32..40].copy_from_slice(&(64u64).to_le_bytes()); // e_phoff
