@@ -82,6 +82,11 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
         .init()
         .unwrap_or_else(|err| panic!("failed to initialise console: {err:?}"));
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::init_cpu_features();
+    }
+
     let heap_range = {
         let info: &'static BootInfo = &*boot_info;
         <Arch as ArchMemory>::locate_kernel_heap(info)

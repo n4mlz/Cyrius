@@ -9,6 +9,7 @@
 - Maps each loadable segment into the target process address space with `USER` permissions derived from ELF `p_flags` (R/W/X). Backing frames are freshly allocated via the global frame allocator.
 - Copies file-backed bytes to the mapped region and zero-fills the remaining `p_memsz - p_filesz` portion for `.bss`.
 - Rewrites `syscall` instructions (`0x0f 0x05`) in executable segments into `int 0x80` so we can reuse the existing software-interrupt path until proper `SYSCALL/SYSRET` MSR plumbing is added.
+- Before mapping a new image, any existing mappings in the target segment range are unmapped and frames are returned to the allocator. This allows repeated loads in the shared kernel address space without colliding at fixed ELF virtual addresses.
 - Builds a minimal SysV-style stack: `argc=0`, `argv[0]=NULL`, `envp[0]=NULL`, `AT_NULL` terminator. The stack pointer is 16-byte aligned before pushing.
 - Segments are initially mapped writable to populate contents, then write permission is dropped if the ELF flags omit it so CR0.WP=1 でもロード時に落ちない。
 - The loader writes directly to user virtual addresses, assuming the kernel shares the active address space with the target process. Once per-process address-space isolation is introduced, we will need a staging map (or copy-on-write) path.

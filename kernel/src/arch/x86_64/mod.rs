@@ -6,6 +6,7 @@ pub mod pci;
 pub mod syscall;
 mod thread;
 mod trap;
+mod xsave;
 
 pub use thread::AddressSpace;
 pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
@@ -26,6 +27,12 @@ use crate::mem::addr::{AddrRange, VirtAddr};
 use self::bus::Pio;
 
 pub struct X86_64;
+
+/// Enable FPU/SSE for user code by configuring CR0/CR4. This is a coarse initialisation and does
+/// not yet save/restore FPU state per thread.
+pub fn init_cpu_features() {
+    xsave::enable_sse();
+}
 
 impl ArchPlatform for X86_64 {
     fn name() -> &'static str {

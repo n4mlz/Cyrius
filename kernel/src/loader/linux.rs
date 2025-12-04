@@ -168,6 +168,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     );
 
     let page_sz = PageSize(page_size);
+    clear_segment_range(table, allocator, start, end, page_sz);
     for addr in (start..end).step_by(page_size) {
         let virt = VirtAddr::new(addr);
         let page = Page::new(virt, page_sz);
@@ -271,6 +272,21 @@ fn rewrite_syscalls(seg: &ProgramSegment) {
             }
         }
         offset = offset.saturating_add(1);
+    }
+}
+
+fn clear_segment_range<T: PageTableOps, A: FrameAllocator>(
+    table: &mut T,
+    allocator: &mut A,
+    start: usize,
+    end: usize,
+    page_sz: PageSize,
+) {
+    for addr in (start..end).step_by(page_sz.bytes()) {
+        let page = Page::new(VirtAddr::new(addr), page_sz);
+        if let Ok(frame) = table.unmap(page) {
+            allocator.deallocate(frame);
+        }
     }
 }
 
