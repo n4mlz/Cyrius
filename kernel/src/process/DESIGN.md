@@ -18,6 +18,7 @@
 - `ProcessState` currently exposes only `Active`. Expanded lifecycle states (e.g. `Sleeping`, `Zombie`) are still future work.
 - Fields prefixed with `_` are reserved for upcoming functionality, so they remain even if unused today.
 - `Process::user` mirrors kernel setup for now, provisioning a PID for user-mode threads while still sharing the kernel address space until proper duplication arrives.
+- `abi` tracks whether the process should use the host or Linux syscall table; the linux-box launcher sets this to `Abi::Linux` for Linux guests so the scheduler can switch tables on context changes.
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.
@@ -40,6 +41,7 @@
   - letting the scheduler reactivate a process-specific address space on context switches.
 - User-process creation already allocates a distinct PID and thread list but continues to reference the shared kernel mappings until the paging layer exposes copy-on-write cloning.
 - When Linux compatibility arrives, each `Process` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
+- The linux-box launcher uses the per-process ABI to redirect traps from launched ELF binaries into the Linux syscall table.
 
 ## Error Model and Synchronization
 - `ProcessError` signals precondition violations and internal consistency issues to callers such as the scheduler.

@@ -15,10 +15,10 @@ pub mod arch;
 pub mod device;
 pub mod fs;
 pub mod interrupt;
+pub mod kernel_proc;
 pub mod loader;
 pub mod mem;
 pub mod process;
-pub mod shell;
 pub mod syscall;
 #[cfg(test)]
 pub mod test;
@@ -163,7 +163,7 @@ fn initialise_scheduler() {
 }
 
 fn init_shell() {
-    if let Err(err) = crate::shell::spawn_shell() {
+    if let Err(err) = crate::kernel_proc::shell::spawn_shell() {
         println!("[shell] failed to start shell: {err:?}");
     }
 }

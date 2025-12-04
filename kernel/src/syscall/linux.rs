@@ -1,4 +1,9 @@
-use super::{SysError, SysResult, SyscallInvocation};
+use super::{DispatchResult, SysError, SysResult, SyscallInvocation};
+
+use crate::arch::Arch;
+use crate::arch::api::ArchDevice;
+use crate::thread::SCHEDULER;
+use crate::util::stream::WriteOps;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,12 +32,12 @@ impl LinuxSyscall {
 }
 
 /// Minimal Linux syscall table supporting write/getpid/exit placeholders.
-pub fn dispatch(invocation: &SyscallInvocation) -> SysResult {
+pub fn dispatch(invocation: &SyscallInvocation) -> DispatchResult {
     match LinuxSyscall::from_raw(invocation.number) {
-        Some(LinuxSyscall::Write) => handle_write(invocation),
-        Some(LinuxSyscall::GetPid) => handle_getpid(invocation),
+        Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
+        Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
-        None => Err(SysError::NotImplemented),
+        None => DispatchResult::Completed(Err(SysError::NotImplemented)),
     }
 }
 
@@ -46,21 +51,90 @@ pub fn encode_result(result: SysResult) -> u64 {
     }
 }
 
-fn handle_write(_invocation: &SyscallInvocation) -> SysResult {
-    Err(SysError::NotImplemented)
+fn handle_write(invocation: &SyscallInvocation) -> SysResult {
+    const MAX_WRITE: usize = 4096;
+
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    if fd != 1 && fd != 2 {
+        return Err(SysError::InvalidArgument);
+    }
+    let ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let len = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let len = usize::try_from(len).map_err(|_| SysError::InvalidArgument)?;
+    if len == 0 {
+        return Ok(0);
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len.min(MAX_WRITE)) };
+    let console = Arch::console();
+    let written = console.write(bytes).unwrap_or(0);
+    Ok(written as u64)
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
-    Err(SysError::NotImplemented)
+    let pid = SCHEDULER
+        .current_process_id()
+        .ok_or(SysError::InvalidArgument)?;
+    Ok(pid)
 }
 
-fn handle_exit(_invocation: &SyscallInvocation) -> SysResult {
-    Err(SysError::NotImplemented)
+fn handle_exit(invocation: &SyscallInvocation) -> DispatchResult {
+    let code = invocation.arg(0).unwrap_or(0) as i32;
+    DispatchResult::Terminate(code)
 }
 
 fn errno_for(err: SysError) -> u16 {
     match err {
         SysError::NotImplemented => LinuxErrno::NoSys as u16,
         SysError::InvalidArgument => LinuxErrno::InvalidArgument as u16,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::println;
+    use crate::process::PROCESS_TABLE;
+    use crate::test::kernel_test_case;
+    use crate::thread::SCHEDULER;
+
+    #[kernel_test_case]
+    fn write_rejects_non_standard_fd() {
+        println!("[test] write_rejects_non_standard_fd");
+
+        let invocation = SyscallInvocation::new(LinuxSyscall::Write as u64, [3, 0, 1, 0, 0, 0]);
+        match dispatch(&invocation) {
+            DispatchResult::Completed(Err(SysError::InvalidArgument)) => {}
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn getpid_returns_current_process_id() {
+        println!("[test] getpid_returns_current_process_id");
+
+        let kernel_pid = PROCESS_TABLE.init_kernel().expect("kernel init");
+        SCHEDULER.init().expect("scheduler init");
+
+        let invocation = SyscallInvocation::new(LinuxSyscall::GetPid as u64, [0; 6]);
+        let result = dispatch(&invocation);
+        match result {
+            DispatchResult::Completed(Ok(pid)) => assert_eq!(pid, kernel_pid),
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn write_reports_length_written() {
+        println!("[test] write_reports_length_written");
+
+        let msg = b"hi";
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::Write as u64,
+            [1, msg.as_ptr() as u64, msg.len() as u64, 0, 0, 0],
+        );
+        match dispatch(&invocation) {
+            DispatchResult::Completed(Ok(written)) => assert_eq!(written, msg.len() as u64),
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
     }
 }

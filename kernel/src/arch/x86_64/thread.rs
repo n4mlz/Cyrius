@@ -208,6 +208,18 @@ impl Context {
         ctx
     }
 
+    pub fn for_user_with_stack_pointer(entry: VirtAddr, stack_pointer: VirtAddr) -> Self {
+        let mut ctx = Self::empty();
+        ctx.rip = virt_to_u64(entry);
+        ctx.rsp = virt_to_u64(stack_pointer);
+        ctx.rflags = RFLAGS_RESERVED | RFLAGS_INTERRUPT_ENABLE;
+
+        let selectors = gdt::selectors();
+        ctx.cs = selectors.user_code.0 as u64;
+        ctx.ss = selectors.user_data.0 as u64;
+        ctx
+    }
+
     fn empty() -> Self {
         Self {
             regs: GeneralRegisters::zero(),

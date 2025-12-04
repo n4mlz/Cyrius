@@ -115,6 +115,13 @@ impl ArchThread for X86_64 {
         thread::Context::for_user(entry, stack_top)
     }
 
+    fn bootstrap_user_context_with_stack_pointer(
+        entry: VirtAddr,
+        stack_pointer: VirtAddr,
+    ) -> Self::Context {
+        thread::Context::for_user_with_stack_pointer(entry, stack_pointer)
+    }
+
     fn current_address_space() -> Self::AddressSpace {
         thread::AddressSpace::current()
     }

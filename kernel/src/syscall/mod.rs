@@ -27,6 +27,12 @@ pub enum SysError {
 
 pub type SysResult = Result<u64, SysError>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DispatchResult {
+    Completed(SysResult),
+    Terminate(i32),
+}
+
 /// Global ABI selection used by the syscall dispatcher. Stored as a raw `u8` so handlers can
 /// update/load without locks; the enum discriminants provide the encoding.
 /// The scheduler updates this on every context switch so the interrupt handler does not need to
@@ -42,9 +48,9 @@ pub fn current_abi() -> Abi {
 }
 
 /// Dispatch a syscall for the given ABI.
-pub fn dispatch(abi: Abi, invocation: &SyscallInvocation) -> SysResult {
+pub fn dispatch(abi: Abi, invocation: &SyscallInvocation) -> DispatchResult {
     match abi {
-        Abi::Host => host::dispatch(invocation),
+        Abi::Host => DispatchResult::Completed(host::dispatch(invocation)),
         Abi::Linux => linux::dispatch(invocation),
     }
 }
@@ -84,11 +90,19 @@ mod tests {
         let invocation = SyscallInvocation::new(0xFFFF, [0; 6]);
 
         set_current_abi(Abi::Host);
-        let host_val = encode_result(current_abi(), dispatch(current_abi(), &invocation));
+        let host_val = match dispatch(current_abi(), &invocation) {
+            DispatchResult::Completed(res) => encode_result(current_abi(), res),
+            DispatchResult::Terminate(_) => panic!("host dispatch should not terminate"),
+        };
         assert_eq!(host_val, host::encode_result(Err(SysError::NotImplemented)));
 
         set_current_abi(Abi::Linux);
-        let linux_val = encode_result(current_abi(), dispatch(current_abi(), &invocation));
+        let linux_val = match dispatch(current_abi(), &invocation) {
+            DispatchResult::Completed(res) => encode_result(current_abi(), res),
+            DispatchResult::Terminate(_) => {
+                panic!("linux dispatch should not terminate for ENOSYS")
+            }
+        };
         assert_eq!(
             linux_val,
             linux::encode_result(Err(SysError::NotImplemented))
