@@ -3,6 +3,7 @@ pub mod interrupt;
 pub mod loader;
 pub mod mem;
 pub mod pci;
+pub mod loader;
 pub mod syscall;
 mod thread;
 mod trap;
