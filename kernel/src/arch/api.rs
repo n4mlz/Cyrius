@@ -98,6 +98,41 @@ pub trait ArchThread {
     fn update_privilege_stack(stack_top: VirtAddr);
 }
 
+/// Page table access helper used by architecture-agnostic loaders.
+pub trait ArchPageTableAccess {
+    type PageTable<'a>: crate::mem::paging::PageTableOps
+    where
+        Self: 'a;
+
+    type Allocator<'a>: crate::mem::paging::FrameAllocator
+    where
+        Self: 'a;
+
+    fn with_page_table<R>(
+        &self,
+        f: impl FnMut(&mut Self::PageTable<'_>, &mut Self::Allocator<'_>) -> R,
+    ) -> R;
+}
+
+/// Platform hooks for Linux ELF loading.
+pub trait ArchLinuxElfPlatform {
+    type AddressSpace: ArchPageTableAccess;
+    type UserStack;
+
+    fn machine_id() -> u16;
+    fn page_size() -> usize;
+    fn allocate_user_stack(
+        space: &Self::AddressSpace,
+        size: usize,
+    ) -> Result<Self::UserStack, UserStackError>;
+    fn user_stack_top(stack: &Self::UserStack) -> VirtAddr;
+}
+
+/// Provides architecture-specific platform hooks for loaders.
+pub trait ArchPlatformHooks {
+    type LinuxElfPlatform: ArchLinuxElfPlatform;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterruptInitError {
     MissingPhysicalMapping,

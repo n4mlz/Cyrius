@@ -2,8 +2,9 @@ use alloc::{vec, vec::Vec};
 use core::convert::TryFrom;
 use core::mem::size_of;
 
+use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
 use crate::fs::{NodeRef, VfsError, VfsPath, with_vfs};
-use crate::loader::{AddressSpaceExt, DefaultLinuxElfPlatform, LinuxElfPlatform};
+use crate::loader::DefaultLinuxElfPlatform;
 use crate::mem::addr::{MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr};
 use crate::mem::paging::{FrameAllocator, MapError, PageTableOps};
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
@@ -65,8 +66,10 @@ impl From<crate::arch::api::UserStackError> for LinuxLoadError {
 pub fn load_elf(
     pid: ProcessId,
     raw_path: &str,
-) -> Result<LinuxProgram<<DefaultLinuxElfPlatform as LinuxElfPlatform>::UserStack>, LinuxLoadError>
-{
+) -> Result<
+    LinuxProgram<<DefaultLinuxElfPlatform as ArchLinuxElfPlatform>::UserStack>,
+    LinuxLoadError,
+> {
     load_elf_with_platform::<DefaultLinuxElfPlatform>(pid, raw_path)
 }
 
@@ -75,7 +78,7 @@ pub fn load_elf_with_platform<P>(
     raw_path: &str,
 ) -> Result<LinuxProgram<P::UserStack>, LinuxLoadError>
 where
-    P: LinuxElfPlatform<AddressSpace = crate::arch::x86_64::AddressSpace>,
+    P: ArchLinuxElfPlatform<AddressSpace = crate::arch::x86_64::AddressSpace>,
 {
     let abs = resolve_path(pid, raw_path)?;
     let elf_bytes = read_file(&abs)?;
@@ -127,7 +130,7 @@ fn read_file(path: &VfsPath) -> Result<Vec<u8>, LinuxLoadError> {
     }
 }
 
-fn map_segments<P: LinuxElfPlatform>(
+fn map_segments<P: ArchLinuxElfPlatform>(
     space: &P::AddressSpace,
     elf: &ElfFile,
     image: &[u8],
@@ -140,7 +143,7 @@ fn map_segments<P: LinuxElfPlatform>(
     })
 }
 
-fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: LinuxElfPlatform>(
+fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatform>(
     table: &mut T,
     allocator: &mut A,
     seg: &ProgramSegment,
@@ -273,7 +276,7 @@ struct ProgramSegment {
 }
 
 impl ElfFile {
-    fn parse<P: LinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+    fn parse<P: ArchLinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
         let header = ElfHeader::parse::<P>(bytes)?;
         let mut segments = Vec::new();
         let phoff = usize::try_from(header.ph_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
@@ -323,7 +326,7 @@ struct ElfHeader {
 }
 
 impl ElfHeader {
-    fn parse<P: LinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+    fn parse<P: ArchLinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
         if bytes.len() < 64 {
             return Err(LinuxLoadError::InvalidElf("file too small"));
         }

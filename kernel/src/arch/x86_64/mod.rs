@@ -138,3 +138,7 @@ impl ArchThread for X86_64 {
         gdt::set_privilege_stack(stack_top);
     }
 }
+
+impl crate::arch::api::ArchPlatformHooks for X86_64 {
+    type LinuxElfPlatform = loader::X86LinuxElfPlatform;
+}
