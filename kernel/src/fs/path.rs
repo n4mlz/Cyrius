@@ -2,6 +2,7 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
+use core::fmt;
 
 use super::VfsError;
 
@@ -83,20 +84,21 @@ impl VfsPath {
             components: comps,
         })
     }
+}
 
-    pub fn to_string(&self) -> String {
-        let mut out = String::new();
+impl fmt::Display for VfsPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.absolute {
-            out.push('/');
+            write!(f, "/")?;
         }
         let mut iter = self.components.iter().peekable();
         while let Some(comp) = iter.next() {
-            out.push_str(comp.as_str());
+            write!(f, "{}", comp.as_str())?;
             if iter.peek().is_some() {
-                out.push('/');
+                write!(f, "/")?;
             }
         }
-        out
+        Ok(())
     }
 }
 

@@ -163,14 +163,17 @@ fn init_shell() {
     }
 }
 
+#[allow(dead_code)]
 fn scheduler_worker_a() -> ! {
     scheduler_worker_loop("worker-a", 'A')
 }
 
+#[allow(dead_code)]
 fn scheduler_worker_b() -> ! {
     scheduler_worker_loop("worker-b", 'B')
 }
 
+#[allow(dead_code)]
 fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
     const PRINT_INTERVAL: u64 = 1_000_000;
     let mut counter: u64 = 0;

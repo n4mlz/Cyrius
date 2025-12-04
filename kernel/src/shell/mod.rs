@@ -65,7 +65,7 @@ fn shell_loop(pid: ProcessId) -> ! {
 }
 
 pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellError> {
-    let cmd = parse_command(line.trim_end_matches(|c| c == '\n' || c == '\r'));
+    let cmd = parse_command(line.trim_end_matches(['\n', '\r']));
     match cmd {
         Command::Ls(path) => shell_ls(pid, path).map(|entries| Some(format_ls(entries))),
         Command::Cd(path) => {
@@ -143,10 +143,6 @@ fn shell_mkdir(pid: ProcessId, path: &str) -> Result<(), ShellError> {
 fn shell_pwd(pid: ProcessId) -> Result<String, ShellError> {
     let cwd = PROCESS_TABLE.cwd(pid).map_err(ShellError::Fs)?;
     Ok(cwd.to_string())
-}
-
-fn shell_help() {
-    println!("{}", help_text());
 }
 
 fn parse_command(line: &str) -> Command<'_> {

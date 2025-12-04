@@ -291,7 +291,11 @@ mod tests {
         let pid = PROCESS_TABLE.init_kernel().expect("kernel init");
         let entries = PROCESS_TABLE.list_dir(pid, "/").expect("list root");
         let has_mnt = entries.iter().any(|entry| entry.name == "mnt");
-        assert!(has_mnt, "mount point not visible in / listing: {:?}", entries);
+        assert!(
+            has_mnt,
+            "mount point not visible in / listing: {:?}",
+            entries
+        );
     }
 
     #[kernel_test_case]

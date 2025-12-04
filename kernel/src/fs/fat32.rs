@@ -24,11 +24,10 @@ const FAT32_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const ATTR_LONG_NAME: u8 = 0x0F;
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_VOLUME_ID: u8 = 0x08;
+#[allow(dead_code)]
 const ATTR_ARCHIVE: u8 = 0x20;
 const END_OF_CHAIN: u32 = 0x0FFFFFF8;
 const BAD_CLUSTER: u32 = 0x0FFFFFF7;
-
-const LFN_SEQ_END: u8 = 0x40;
 const LFN_CHARS_PER_ENTRY: usize = 13;
 
 #[derive(Debug)]
@@ -569,15 +568,16 @@ fn parse_long_name(entry: &[u8]) -> Option<(u8, [u16; LFN_CHARS_PER_ENTRY])> {
     }
 
     let mut chunk = [0u16; LFN_CHARS_PER_ENTRY];
-    let mut fill = |start: usize, count: usize, buf: &mut [u16], mut idx: usize| {
+    let fill = |start: usize, count: usize, buf: &mut [u16], idx: usize| {
+        let mut current_idx = idx;
         for pair in entry[start..start + count].chunks_exact(2) {
-            if idx >= buf.len() {
+            if current_idx >= buf.len() {
                 break;
             }
-            buf[idx] = u16::from_le_bytes([pair[0], pair[1]]);
-            idx += 1;
+            buf[current_idx] = u16::from_le_bytes([pair[0], pair[1]]);
+            current_idx += 1;
         }
-        idx
+        current_idx
     };
     let mut written = 0;
     written = fill(1, 10, &mut chunk, written);
@@ -610,7 +610,9 @@ struct LongNameAccumulator {
 
 impl LongNameAccumulator {
     fn new() -> Self {
-        Self { parts: alloc::vec::Vec::new() }
+        Self {
+            parts: alloc::vec::Vec::new(),
+        }
     }
 
     fn clear(&mut self) {
@@ -752,7 +754,7 @@ mod tests {
         }
 
         // Short name entry
-        cluster[32 + 0..32 + 11].copy_from_slice(b"SAMPLE  TXT");
+        cluster[32..32 + 11].copy_from_slice(b"SAMPLE  TXT");
         cluster[32 + 11] = ATTR_ARCHIVE;
         cluster[32 + 26] = 3; // cluster low
         cluster[32 + 28] = 10; // size (arbitrary)
