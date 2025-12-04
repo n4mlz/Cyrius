@@ -15,11 +15,11 @@ pub mod arch;
 pub mod device;
 pub mod fs;
 pub mod interrupt;
+pub mod loader;
 pub mod mem;
 pub mod process;
 pub mod shell;
 pub mod syscall;
-pub mod loader;
 #[cfg(test)]
 pub mod test;
 pub mod thread;
