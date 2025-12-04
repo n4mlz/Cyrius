@@ -3,7 +3,6 @@ pub mod interrupt;
 pub mod loader;
 pub mod mem;
 pub mod pci;
-pub mod loader;
 pub mod syscall;
 mod thread;
 mod trap;
@@ -11,6 +10,7 @@ mod trap;
 pub use thread::AddressSpace;
 pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
 pub use thread::AddressSpace;
+pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
 
 use self::trap::gdt;
 

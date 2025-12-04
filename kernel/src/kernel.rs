@@ -20,7 +20,6 @@ pub mod mem;
 pub mod process;
 pub mod shell;
 pub mod syscall;
-pub mod loader;
 #[cfg(test)]
 pub mod test;
 pub mod thread;
