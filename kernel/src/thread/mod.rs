@@ -10,6 +10,7 @@ use crate::arch::{
 use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
 use crate::mem::addr::VirtAddr;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use crate::syscall;
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
 
@@ -77,6 +78,9 @@ impl Scheduler {
         inner.idle = Some(idle.id);
         inner.threads.push(idle);
         inner.initialised = true;
+        if let Some(abi) = PROCESS_TABLE.abi(kernel_pid) {
+            syscall::set_current_abi(abi);
+        }
         Ok(())
     }
 
@@ -188,7 +192,7 @@ impl Scheduler {
             return;
         }
 
-        let (next_ctx, next_space, next_stack, next_is_user) = {
+        let (next_ctx, next_space, next_stack, next_is_user, next_process) = {
             let mut inner = self.inner.lock();
             let current_id = match inner.current {
                 Some(id) => id,
@@ -212,7 +216,7 @@ impl Scheduler {
             let next_id = inner.ready.pop_front().unwrap_or(idle_id);
             inner.current = Some(next_id);
 
-            let (ctx, space, stack_top, is_user) = inner
+            let (ctx, space, stack_top, is_user, process) = inner
                 .thread_mut(next_id)
                 .map(|thread| {
                     thread.state = if next_id == idle_id {
@@ -225,12 +229,18 @@ impl Scheduler {
                         thread.address_space.clone(),
                         thread.kernel_stack_top(),
                         thread.is_user(),
+                        thread.process_id(),
                     )
                 })
                 .expect("next thread must exist");
 
-            (ctx, space, stack_top, is_user)
+            (ctx, space, stack_top, is_user, process)
         };
+
+        let abi = PROCESS_TABLE
+            .abi(next_process)
+            .unwrap_or(syscall::Abi::Host);
+        syscall::set_current_abi(abi);
 
         if next_is_user && let Some(stack_top) = next_stack {
             <Arch as ArchThread>::update_privilege_stack(stack_top);
@@ -331,7 +341,7 @@ enum ThreadKind {
 struct ThreadControl {
     id: ThreadId,
     _name: &'static str,
-    _process: ProcessId,
+    process: ProcessId,
     context: <Arch as ArchThread>::Context,
     address_space: <Arch as ArchThread>::AddressSpace,
     kernel_stack: Option<KernelStack>,
@@ -357,7 +367,7 @@ impl ThreadControl {
         Ok(Self {
             id,
             _name: name,
-            _process: process,
+            process,
             context,
             address_space,
             kernel_stack: Some(stack),
@@ -391,7 +401,7 @@ impl ThreadControl {
         Ok(Self {
             id,
             _name: name,
-            _process: process,
+            process,
             context,
             address_space,
             kernel_stack: Some(kernel_stack),
@@ -409,6 +419,10 @@ impl ThreadControl {
         matches!(self.kind, ThreadKind::User)
     }
 
+    fn process_id(&self) -> ProcessId {
+        self.process
+    }
+
     fn idle(
         id: ThreadId,
         process: ProcessId,
@@ -422,7 +436,7 @@ impl ThreadControl {
         Ok(Self {
             id,
             _name: "idle",
-            _process: process,
+            process,
             context,
             address_space,
             kernel_stack: Some(stack),
@@ -441,7 +455,7 @@ impl ThreadControl {
         Self {
             id,
             _name: name,
-            _process: process,
+            process,
             context: <Arch as ArchThread>::Context::default(),
             address_space,
             kernel_stack: None,

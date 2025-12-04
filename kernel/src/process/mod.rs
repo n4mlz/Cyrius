@@ -3,6 +3,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{Arch, api::ArchThread};
 use crate::fs::{DirEntry, Fd, FdTable, NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
+use crate::syscall::Abi;
 use crate::thread::ThreadId;
 use crate::util::spinlock::SpinLock;
 
@@ -157,6 +158,18 @@ impl ProcessTable {
     pub fn address_space(&self, pid: ProcessId) -> Option<<Arch as ArchThread>::AddressSpace> {
         let inner = self.inner.lock();
         inner.process(pid).map(|proc| proc.address_space.clone())
+    }
+
+    pub fn abi(&self, pid: ProcessId) -> Option<Abi> {
+        let inner = self.inner.lock();
+        inner.process(pid).map(|proc| proc.abi)
+    }
+
+    pub fn set_abi(&self, pid: ProcessId, abi: Abi) -> Result<(), ProcessError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(ProcessError::NotFound)?;
+        process.abi = abi;
+        Ok(())
     }
 
     pub fn open_path(&self, pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
@@ -324,6 +337,7 @@ struct Process {
     kind: ProcessKind,
     threads: Vec<ThreadId>,
     fs: ProcessFs,
+    abi: Abi,
 }
 
 impl Process {
@@ -336,6 +350,7 @@ impl Process {
             kind: ProcessKind::Kernel,
             threads: Vec::new(),
             fs: ProcessFs::new(),
+            abi: Abi::Host,
         }
     }
 
@@ -348,6 +363,7 @@ impl Process {
             kind: ProcessKind::User,
             threads: Vec::new(),
             fs: ProcessFs::new(),
+            abi: Abi::Host,
         }
     }
 }
@@ -377,7 +393,7 @@ mod tests {
     use alloc::sync::Arc;
 
     use super::*;
-    use crate::{println, test::kernel_test_case};
+    use crate::{println, syscall::Abi, test::kernel_test_case};
 
     #[kernel_test_case]
     fn kernel_process_shares_address_space() {
@@ -410,5 +426,17 @@ mod tests {
             .address_space(pid)
             .expect("user address space clone");
         assert!(Arc::ptr_eq(addr_space.inner(), ref_again.inner()));
+    }
+
+    #[kernel_test_case]
+    fn process_default_abi_is_host() {
+        println!("[test] process_default_abi_is_host");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("abi-proc")
+            .expect("create user process");
+        let abi = PROCESS_TABLE.abi(pid).expect("abi present");
+        assert_eq!(abi, Abi::Host);
     }
 }

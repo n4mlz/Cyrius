@@ -18,6 +18,7 @@ pub mod interrupt;
 pub mod mem;
 pub mod process;
 pub mod shell;
+pub mod syscall;
 #[cfg(test)]
 pub mod test;
 pub mod thread;
@@ -122,6 +123,9 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     INTERRUPTS
         .init(boot_info)
         .unwrap_or_else(|err| panic!("failed to initialise interrupts: {err:?}"));
+
+    crate::arch::x86_64::syscall::init()
+        .unwrap_or_else(|err| panic!("failed to initialise syscalls: {err:?}"));
 
     SYSTEM_TIMER
         .start_periodic(SYSTEM_TIMER_TICKS)

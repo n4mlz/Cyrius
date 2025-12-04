@@ -8,8 +8,9 @@
 - `gdt` installs both ring-0 and ring-3 segment descriptors alongside the TSS entry, allocating three IST stacks (NMI, double-fault, machine-check) from a statically mapped buffer.
 - `set_privilege_stack` updates `TSS.rsp0` on every context switch so user→kernel transitions enter on the scheduled thread's kernel stack, while a fallback ring-0 stack remains available for bootstrap paths.
 - `idt` populates exception vectors with dedicated stubs and assigns IST indices where architectural guidance recommends hardened stacks.
-- The IDT exposes vector `0x80` with DPL=3, providing an initial software interrupt entry point for user mode before the syscall MSRs are wired up.
+- The IDT exposes vector `0x80` with DPL=3, providing an initial software interrupt entry point for user mode before the syscall MSRs are wired up. The vector is registered with the syscall dispatcher so `int 0x80` routes into ABI-aware handling.
 - `init()` loads both tables during early boot and must run per-CPU prior to enabling interrupts.
+- The syscall software interrupt (vector `0x80`) is registered in `arch/x86_64/syscall.rs`, which forwards to the generic syscall dispatcher to keep ABI logic architecture-neutral.
 
 ## Trap Stubs
 - Naked assembly routines in `stubs` save general-purpose registers, normalise error codes, maintain stack alignment for `call`, and end with `iretq`.

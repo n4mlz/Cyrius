@@ -31,6 +31,7 @@
 - `thread_count` is a lightweight helper for statistics and debugging.
 - `address_space(pid)` clones the stored handle so scheduling and memory management components can operate on the same CR3 state.
 - Process lifetime management (e.g. reclaiming a process when its thread list becomes empty) is intentionally deferred.
+- ABI selection for syscall dispatch is stored per-process; on context switch the scheduler looks up the next thread's owning process and programs the syscall dispatcher accordingly.
 
 ## Address Space and ABI Considerations
 - For now every kernel process shares the same kernel address space.
