@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 
 use xtask::{
     ImageKind, TestBuildOptions, TestSelector, build_kernel, build_kernel_tests, image_bios,
-    prepare_test_block_image, run_qemu,
+    prepare_host_mnt_image, prepare_test_block_image, prepare_test_fat_image, run_qemu,
 };
 
 #[derive(Parser)]
@@ -60,7 +60,8 @@ fn main() -> Result<()> {
 fn run_kernel(release: bool) -> Result<()> {
     let kernel = build_kernel(release)?;
     let img = image_bios(&kernel, ImageKind::Run)?;
-    let status = run_qemu(&img, false, None)?;
+    let mnt_image = prepare_host_mnt_image()?;
+    let status = run_qemu(&img, false, &[mnt_image])?;
     if !status.success() {
         bail!("qemu exited with {status}");
     }
@@ -83,8 +84,9 @@ fn run_tests(args: TestArgs) -> Result<()> {
     }
 
     let block_image = prepare_test_block_image()?;
+    let fat_image = prepare_test_fat_image()?;
     let image = image_bios(&test_binary, ImageKind::Test)?;
-    let status = run_qemu(&image, true, Some(&block_image))?;
+    let status = run_qemu(&image, true, &[block_image, fat_image])?;
 
     interpret_test_exit(status)
 }

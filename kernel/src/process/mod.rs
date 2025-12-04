@@ -1,7 +1,8 @@
-use alloc::vec::Vec;
+use alloc::{string::ToString, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{Arch, api::ArchThread};
+use crate::fs::{DirEntry, Fd, FdTable, NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
 use crate::thread::ThreadId;
 use crate::util::spinlock::SpinLock;
 
@@ -14,6 +15,30 @@ pub enum ProcessError {
     NotFound,
     DuplicateThread,
     ThreadNotAttached,
+}
+
+pub struct ProcessFs {
+    pub cwd: VfsPath,
+    pub fd_table: FdTable,
+}
+
+impl ProcessFs {
+    pub fn new() -> Self {
+        Self {
+            cwd: VfsPath::root(),
+            fd_table: FdTable::new(),
+        }
+    }
+
+    pub fn set_cwd(&mut self, path: VfsPath) {
+        self.cwd = path;
+    }
+}
+
+impl Default for ProcessFs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Global table that tracks processes and their associated threads.
@@ -133,6 +158,129 @@ impl ProcessTable {
         let inner = self.inner.lock();
         inner.process(pid).map(|proc| proc.address_space.clone())
     }
+
+    pub fn open_path(&self, pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        let file = with_vfs(|vfs| match vfs.open_absolute(&abs)? {
+            NodeRef::File(file) => Ok(file),
+            NodeRef::Directory(_) => Err(VfsError::NotFile),
+        })?;
+        process.fs.fd_table.open_file(file)
+    }
+
+    pub fn read_fd(&self, pid: ProcessId, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        process.fs.fd_table.read(fd, buf)
+    }
+
+    pub fn write_fd(&self, pid: ProcessId, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        process.fs.fd_table.write(fd, data)
+    }
+
+    pub fn close_fd(&self, pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        process.fs.fd_table.close(fd)
+    }
+
+    pub fn change_dir(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        let dir = with_vfs(|vfs| match vfs.open_absolute(&abs)? {
+            NodeRef::Directory(dir) => Ok(dir),
+            NodeRef::File(_) => Err(VfsError::NotDirectory),
+        })?;
+        process.fs.set_cwd(abs);
+        // Keep dir alive by ensuring mount lookup remains valid; cwd path suffices.
+        drop(dir);
+        Ok(())
+    }
+
+    pub fn list_dir(&self, pid: ProcessId, raw_path: &str) -> Result<Vec<DirEntry>, VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        with_vfs(|vfs| vfs.read_dir(&abs))
+    }
+
+    pub fn remove_path(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+        let name = abs
+            .components()
+            .last()
+            .ok_or(VfsError::InvalidPath)?
+            .as_str()
+            .to_string();
+        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
+            NodeRef::Directory(dir) => Ok(dir),
+            NodeRef::File(_) => Err(VfsError::NotDirectory),
+        })?;
+        dir.remove(&name)
+    }
+
+    pub fn write_path(&self, pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+        let name = abs
+            .components()
+            .last()
+            .ok_or(VfsError::InvalidPath)?
+            .as_str()
+            .to_string();
+        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
+            NodeRef::Directory(dir) => Ok(dir),
+            NodeRef::File(_) => Err(VfsError::NotDirectory),
+        })?;
+        let component = PathComponent::new(name.as_str());
+        let file = match dir.lookup(&component) {
+            Ok(NodeRef::File(f)) => f,
+            Ok(NodeRef::Directory(_)) => return Err(VfsError::NotFile),
+            Err(VfsError::NotFound) => dir.create_file(&name)?,
+            Err(e) => return Err(e),
+        };
+        file.truncate(0)?;
+        let _ = file.write_at(0, data)?;
+        Ok(())
+    }
+
+    pub fn create_dir(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
+        let abs = absolute_path(raw_path, &process.fs.cwd)?;
+        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+        let name = abs
+            .components()
+            .last()
+            .ok_or(VfsError::InvalidPath)?
+            .as_str()
+            .to_string();
+        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
+            NodeRef::Directory(dir) => Ok(dir),
+            NodeRef::File(_) => Err(VfsError::NotDirectory),
+        })?;
+        match dir.create_dir(&name) {
+            Ok(_) => Ok(()),
+            Err(VfsError::AlreadyExists) => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn cwd(&self, pid: ProcessId) -> Result<VfsPath, VfsError> {
+        let inner = self.inner.lock();
+        let process = inner.process(pid).ok_or(VfsError::NotFound)?;
+        Ok(process.fs.cwd.clone())
+    }
 }
 
 impl Default for ProcessTable {
@@ -175,6 +323,7 @@ struct Process {
     #[allow(dead_code)]
     kind: ProcessKind,
     threads: Vec<ThreadId>,
+    fs: ProcessFs,
 }
 
 impl Process {
@@ -186,6 +335,7 @@ impl Process {
             _state: ProcessState::Active,
             kind: ProcessKind::Kernel,
             threads: Vec::new(),
+            fs: ProcessFs::new(),
         }
     }
 
@@ -197,7 +347,17 @@ impl Process {
             _state: ProcessState::Active,
             kind: ProcessKind::User,
             threads: Vec::new(),
+            fs: ProcessFs::new(),
         }
+    }
+}
+
+fn absolute_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
+    let path = VfsPath::parse(raw)?;
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        cwd.join(&path)
     }
 }
 

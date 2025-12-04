@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 
 use crate::device::block::BlockDevice;
 use crate::device::virtio::pci::{self, VirtioPciTransport};
@@ -23,11 +23,11 @@ const MIN_QUEUE_SIZE: u16 = 3;
 const VIRTIO_SECTOR_SIZE: u32 = 512;
 const DEFAULT_BLOCK_SIZE: u32 = 512;
 
-const fn block_registry_init() -> SpinLock<Vec<VirtioPciBlkDevice>> {
+const fn block_registry_init() -> SpinLock<Vec<Arc<SpinLock<VirtioPciBlkDevice>>>> {
     SpinLock::new(Vec::new())
 }
 
-static BLOCK_DEVICES: LazyLock<SpinLock<Vec<VirtioPciBlkDevice>>> =
+static BLOCK_DEVICES: LazyLock<SpinLock<Vec<Arc<SpinLock<VirtioPciBlkDevice>>>>> =
     LazyLock::new_const(block_registry_init);
 
 fn fail_status<T: Transport>(transport: &mut T, err: VirtioBlkError) -> VirtioBlkError {
@@ -47,7 +47,7 @@ pub fn probe_pci_devices() -> usize {
         let name = format!("virtio-blk{}", existing + added);
         match VirtioBlkDevice::new(name, transport) {
             Ok(device) => {
-                guard.push(device);
+                guard.push(Arc::new(SpinLock::new(device)));
                 added += 1;
             }
             Err(err) => {
@@ -59,9 +59,11 @@ pub fn probe_pci_devices() -> usize {
     added
 }
 
-pub fn with_devices<R>(f: impl FnOnce(&mut [VirtioPciBlkDevice]) -> R) -> R {
-    let mut guard = BLOCK_DEVICES.get().lock();
-    f(guard.as_mut_slice())
+pub fn with_devices<R>(f: impl FnOnce(&[Arc<SpinLock<VirtioPciBlkDevice>>]) -> R) -> R {
+    let guard = BLOCK_DEVICES.get().lock();
+    let devices = guard.clone();
+    drop(guard);
+    f(devices.as_slice())
 }
 
 pub trait VirtioBlkTransport: Transport {
@@ -850,7 +852,7 @@ mod tests {
                 !devices.is_empty(),
                 "virtio-blk integration test requires a block device"
             );
-            let device = &mut devices[0];
+            let mut device = devices[0].lock();
 
             let block_size = device.block_size() as usize;
             let mut read_buf = vec![0u8; block_size];

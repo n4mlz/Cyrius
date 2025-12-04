@@ -16,6 +16,8 @@
 - `flush` is synchronous and only required to succeed if the hardware advertises explicit flush
   support. Drivers are allowed to return `Error::Unsupported` when the device lacks the feature.
 - `is_read_only` enables higher layers to short-circuit write attempts without probing error paths.
+- `SharedBlockDevice` wraps an `Arc<SpinLock<T>>` to share a single driver instance across
+  subsystems (e.g. VFS) without moving it out of the device registry.
 
 ## Future Work
 - Introduce asynchronous submission helpers (e.g. futures/channel based) built on top of the
