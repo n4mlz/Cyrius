@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions};
 use serde_json::Value;
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 
 pub fn build_kernel(release: bool) -> Result<PathBuf> {
     let mut cmd = Command::new("cargo");
@@ -249,7 +249,7 @@ pub fn prepare_test_fat_image() -> Result<PathBuf> {
 pub fn prepare_host_mnt_image() -> Result<PathBuf> {
     const IMAGE_PATH: &str = "target/mnt.img";
     const BYTES_PER_SECTOR: u16 = 512;
-    const IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+    const IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
     let path = PathBuf::from(IMAGE_PATH);
     if let Some(parent) = path.parent() {
@@ -269,11 +269,26 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
 
     let opts = FormatVolumeOptions::new()
         .bytes_per_sector(BYTES_PER_SECTOR)
+        .bytes_per_cluster(u32::from(BYTES_PER_SECTOR))
         .fat_type(FatType::Fat32);
     fatfs::format_volume(&mut file, opts)
         .with_context(|| format!("format FAT32 image {}", path.display()))?;
     file.seek(SeekFrom::Start(0))
         .with_context(|| "rewind image after format")?;
+
+    let mut boot_sector = [0u8; 512];
+    file.read_exact(&mut boot_sector)
+        .with_context(|| "read boot sector for FAT type check")?;
+    let fs_marker = &boot_sector[82..90];
+    if fs_marker != b"FAT32   " {
+        bail!(
+            "formatted host mnt image is not FAT32 (fs marker: {:?})",
+            str::from_utf8(fs_marker).unwrap_or("<invalid>")
+        );
+    }
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| "rewind image after FAT32 check")?;
+
     let fs =
         FileSystem::new(file, FsOptions::new()).with_context(|| "mount formatted mnt image")?;
 

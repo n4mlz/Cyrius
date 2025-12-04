@@ -3,7 +3,8 @@
 //! # Implicit dependency
 //! Assumes the underlying block device uses a 512-byte logical sector, matching the test images
 //! generated in `xtask`. Larger sector sizes are rejected during mount to avoid partial-sector
-//! reads until buffering support is added.
+//! reads until buffering support is added. Only FAT32 BPBs are accepted; FAT12/16 layouts are
+//! rejected early because the kernel does not implement their directory layout.
 
 use alloc::{
     boxed::Box,
@@ -301,28 +302,22 @@ impl BiosParameterBlock {
             return Err(FatError::InvalidBootSector);
         }
 
-        let _total_sectors = if total_sectors_16 != 0 {
-            u32::from(total_sectors_16)
-        } else {
-            total_sectors_32
-        };
-
-        let fat_size = if fat_size_16 != 0 {
-            u32::from(fat_size_16)
-        } else {
-            fat_size_32
-        };
-
-        if fat_size == 0 {
+        if fat_size_16 != 0 || total_sectors_16 != 0 {
             return Err(FatError::InvalidBootSector);
         }
+
+        if fat_size_32 == 0 || root_cluster < 2 {
+            return Err(FatError::InvalidBootSector);
+        }
+
+        let _total_sectors = total_sectors_32;
 
         Ok(Self {
             bytes_per_sector,
             sectors_per_cluster,
             reserved_sector_count,
             num_fats,
-            fat_size_32: fat_size,
+            fat_size_32,
             root_cluster,
         })
     }
@@ -557,4 +552,59 @@ fn normalise_name(raw: &str) -> String {
     raw.chars()
         .map(|c| c.to_ascii_uppercase())
         .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::println;
+    use crate::test::kernel_test_case;
+
+    fn base_fat32_boot_sector() -> [u8; 512] {
+        let mut sector = [0u8; 512];
+        sector[510..512].copy_from_slice(&FAT32_SIGNATURE);
+        sector[11..13].copy_from_slice(&512u16.to_le_bytes()); // bytes_per_sector
+        sector[13] = 1; // sectors_per_cluster
+        sector[14..16].copy_from_slice(&32u16.to_le_bytes()); // reserved sectors
+        sector[16] = 1; // number of FATs
+        sector[32..36].copy_from_slice(&4096u32.to_le_bytes()); // total sectors
+        sector[36..40].copy_from_slice(&64u32.to_le_bytes()); // fat_size_32
+        sector[44..48].copy_from_slice(&2u32.to_le_bytes()); // root_cluster
+        sector
+    }
+
+    #[kernel_test_case]
+    fn bpb_rejects_fat16_layout() {
+        println!("[test] bpb_rejects_fat16_layout");
+
+        let mut sector = base_fat32_boot_sector();
+        sector[22..24].copy_from_slice(&1u16.to_le_bytes()); // fat_size_16 set -> should be rejected
+        assert!(matches!(
+            BiosParameterBlock::parse(&sector),
+            Err(FatError::InvalidBootSector)
+        ));
+    }
+
+    #[kernel_test_case]
+    fn bpb_rejects_invalid_root_cluster() {
+        println!("[test] bpb_rejects_invalid_root_cluster");
+
+        let mut sector = base_fat32_boot_sector();
+        sector[44..48].copy_from_slice(&1u32.to_le_bytes()); // root cluster must start from 2
+        assert!(matches!(
+            BiosParameterBlock::parse(&sector),
+            Err(FatError::InvalidBootSector)
+        ));
+    }
+
+    #[kernel_test_case]
+    fn bpb_accepts_minimal_fat32() {
+        println!("[test] bpb_accepts_minimal_fat32");
+
+        let sector = base_fat32_boot_sector();
+        let parsed = BiosParameterBlock::parse(&sector).expect("parse valid fat32 bpb");
+        assert_eq!(parsed.bytes_per_sector, 512);
+        assert_eq!(parsed.sectors_per_cluster, 1);
+        assert_eq!(parsed.root_cluster, 2);
+    }
 }

@@ -23,6 +23,8 @@
   sectors are accepted to keep the initial implementation simple.
 - Short names (8.3) are supported; long filename entries are skipped. Comparisons are normalised to
   ASCII uppercase.
+- The BPB is validated strictly as FAT32 (rejects FAT12/16 by requiring zeroed FAT16 fields and a
+  root cluster number >= 2) to avoid mounting incompatible images.
 - Directory and file nodes cache their cluster chains eagerly; FAT lookups are served from a
   single-sector cache to avoid repeated device traffic.
 - The driver is read-only and marks missing features (write, fsync) for future extension once page
