@@ -24,8 +24,12 @@ const FAT32_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const ATTR_LONG_NAME: u8 = 0x0F;
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_VOLUME_ID: u8 = 0x08;
+const ATTR_ARCHIVE: u8 = 0x20;
 const END_OF_CHAIN: u32 = 0x0FFFFFF8;
 const BAD_CLUSTER: u32 = 0x0FFFFFF7;
+
+const LFN_SEQ_END: u8 = 0x40;
+const LFN_CHARS_PER_ENTRY: usize = 13;
 
 #[derive(Debug)]
 pub enum FatError {
@@ -379,7 +383,7 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
                 if entry.first_cluster < 2 {
                     continue;
                 }
-                if entry.name == target {
+                if entry.cmp_name == target {
                     return match entry.kind {
                         FileType::Directory => Ok(NodeRef::Directory(Arc::new(FatDirectory {
                             volume: self.volume.clone(),
@@ -454,6 +458,7 @@ impl<D: BlockDevice + Send + 'static> File for FatFile<D> {
 #[derive(Debug, Clone)]
 struct ParsedDirEntry {
     name: String,
+    cmp_name: String,
     kind: FileType,
     first_cluster: u32,
     file_size: u32,
@@ -476,11 +481,16 @@ impl ParsedDirEntry {
 struct DirectoryEntries<'a> {
     data: &'a [u8],
     index: usize,
+    long_name: LongNameAccumulator,
 }
 
 impl<'a> DirectoryEntries<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, index: 0 }
+        Self {
+            data,
+            index: 0,
+            long_name: LongNameAccumulator::new(),
+        }
     }
 }
 
@@ -496,14 +506,23 @@ impl<'a> Iterator for DirectoryEntries<'a> {
                 return None;
             }
             if entry[0] == 0xE5 {
+                self.long_name.clear();
                 continue;
             }
             let attr = entry[11];
             if attr & ATTR_LONG_NAME == ATTR_LONG_NAME {
+                match parse_long_name(entry) {
+                    Some((seq, chunk)) => self.long_name.push(seq, chunk),
+                    None => self.long_name.clear(),
+                }
                 continue;
             }
 
-            let name = parse_short_name(&entry[0..11]);
+            let display_name = self
+                .long_name
+                .take_string()
+                .unwrap_or_else(|| parse_short_name(&entry[0..11]));
+            let cmp_name = normalise_name(&display_name);
             let cluster_high = u16::from_le_bytes([entry[20], entry[21]]) as u32;
             let cluster_low = u16::from_le_bytes([entry[26], entry[27]]) as u32;
             let first_cluster = (cluster_high << 16) | cluster_low;
@@ -514,8 +533,10 @@ impl<'a> Iterator for DirectoryEntries<'a> {
                 FileType::File
             };
 
+            self.long_name.clear();
             return Some(Ok(ParsedDirEntry {
-                name,
+                name: display_name,
+                cmp_name,
                 kind,
                 first_cluster,
                 file_size,
@@ -537,6 +558,35 @@ fn parse_short_name(raw: &[u8]) -> String {
     }
 }
 
+fn parse_long_name(entry: &[u8]) -> Option<(u8, [u16; LFN_CHARS_PER_ENTRY])> {
+    if entry.len() < 32 {
+        return None;
+    }
+    let seq = entry[0];
+    let order = seq & 0x1F;
+    if order == 0 {
+        return None;
+    }
+
+    let mut chunk = [0u16; LFN_CHARS_PER_ENTRY];
+    let mut fill = |start: usize, count: usize, buf: &mut [u16], mut idx: usize| {
+        for pair in entry[start..start + count].chunks_exact(2) {
+            if idx >= buf.len() {
+                break;
+            }
+            buf[idx] = u16::from_le_bytes([pair[0], pair[1]]);
+            idx += 1;
+        }
+        idx
+    };
+    let mut written = 0;
+    written = fill(1, 10, &mut chunk, written);
+    written = fill(14, 12, &mut chunk, written);
+    let _ = fill(28, 4, &mut chunk, written);
+
+    Some((seq, chunk))
+}
+
 fn trim_spaces(raw: &[u8]) -> String {
     let end = raw
         .iter()
@@ -552,6 +602,59 @@ fn normalise_name(raw: &str) -> String {
     raw.chars()
         .map(|c| c.to_ascii_uppercase())
         .collect::<String>()
+}
+
+struct LongNameAccumulator {
+    parts: alloc::vec::Vec<(u8, [u16; LFN_CHARS_PER_ENTRY])>,
+}
+
+impl LongNameAccumulator {
+    fn new() -> Self {
+        Self { parts: alloc::vec::Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.parts.clear();
+    }
+
+    fn push(&mut self, seq: u8, chunk: [u16; LFN_CHARS_PER_ENTRY]) {
+        self.parts.push((seq & 0x1F, chunk));
+    }
+
+    fn take_string(&self) -> Option<String> {
+        let max_index = self.parts.iter().map(|(idx, _)| *idx).max()?;
+        if max_index == 0 {
+            return None;
+        }
+
+        let mut buf = alloc::vec::Vec::new();
+        buf.resize(max_index as usize * LFN_CHARS_PER_ENTRY, 0xFFFF);
+
+        for (index, chunk) in &self.parts {
+            let pos = index.checked_sub(1)? as usize * LFN_CHARS_PER_ENTRY;
+            if pos >= buf.len() {
+                return None;
+            }
+            for (offset, code) in chunk.iter().enumerate() {
+                let slot = pos + offset;
+                if slot < buf.len() {
+                    buf[slot] = *code;
+                }
+            }
+        }
+
+        let mut out = String::new();
+        for code in buf {
+            if code == 0x0000 || code == 0xFFFF {
+                break;
+            }
+            if let Some(ch) = char::from_u32(code as u32) {
+                out.push(ch);
+            }
+        }
+
+        if out.is_empty() { None } else { Some(out) }
+    }
 }
 
 #[cfg(test)]
@@ -606,5 +709,60 @@ mod tests {
         assert_eq!(parsed.bytes_per_sector, 512);
         assert_eq!(parsed.sectors_per_cluster, 1);
         assert_eq!(parsed.root_cluster, 2);
+    }
+
+    #[kernel_test_case]
+    fn long_filename_is_preserved() {
+        println!("[test] long_filename_is_preserved");
+
+        let mut cluster = [0u8; 64];
+        // LFN entry for "sample.txt"
+        cluster[0] = 0x41; // sequence (last, order 1)
+        cluster[11] = ATTR_LONG_NAME;
+        cluster[26] = 0;
+        cluster[27] = 0;
+        let name_utf16: [u16; 10] = [
+            b's' as u16,
+            b'a' as u16,
+            b'm' as u16,
+            b'p' as u16,
+            b'l' as u16,
+            b'e' as u16,
+            b'.' as u16,
+            b't' as u16,
+            b'x' as u16,
+            b't' as u16,
+        ];
+        // first 5 chars go to bytes 1..11
+        for (i, ch) in name_utf16.iter().take(5).enumerate() {
+            let bytes = ch.to_le_bytes();
+            cluster[1 + i * 2] = bytes[0];
+            cluster[1 + i * 2 + 1] = bytes[1];
+        }
+        // next 6 chars go to bytes 14..26
+        for (i, ch) in name_utf16.iter().skip(5).take(6).enumerate() {
+            let bytes = ch.to_le_bytes();
+            let base = 14 + i * 2;
+            cluster[base] = bytes[0];
+            cluster[base + 1] = bytes[1];
+        }
+        // no remaining chars for bytes 28..32; leave as 0xFFFF (padding)
+        for pair in cluster[28..32].chunks_exact_mut(2) {
+            pair.copy_from_slice(&0xFFFFu16.to_le_bytes());
+        }
+
+        // Short name entry
+        cluster[32 + 0..32 + 11].copy_from_slice(b"SAMPLE  TXT");
+        cluster[32 + 11] = ATTR_ARCHIVE;
+        cluster[32 + 26] = 3; // cluster low
+        cluster[32 + 28] = 10; // size (arbitrary)
+
+        let mut entries = DirectoryEntries::new(&cluster);
+        let parsed = entries.next().expect("first entry").expect("ok");
+        assert_eq!(parsed.name, "sample.txt");
+        assert_eq!(parsed.cmp_name, "SAMPLE.TXT");
+
+        let target = normalise_name("sample.txt");
+        assert_eq!(parsed.cmp_name, target);
     }
 }

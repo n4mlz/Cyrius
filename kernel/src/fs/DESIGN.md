@@ -13,6 +13,8 @@
 - `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths
   (e.g. `/mnt`). Path resolution picks the longest matching mount prefix and resolves the tail from
   that mount’s root.
+- Directory listings include mount points even if the parent directory does not contain an explicit
+  entry, making mounted filesystems visible under their parent (e.g. `/mnt` shows up in `/`).
 - `VfsPath` normalises out empty/`.` segments and rejects `..` to avoid partial relative semantics
   until a full path resolution policy is in place.
 - Process FDs advance offsets on successful reads/writes. Write/mmap are supported only by
@@ -23,6 +25,8 @@
   sectors are accepted to keep the initial implementation simple.
 - Short names (8.3) are supported; long filename entries are skipped. Comparisons are normalised to
   ASCII uppercase.
+- Long filename entries are parsed to preserve mixed-case host names when present; fallback to
+  short-name uppercase normalisation otherwise.
 - The BPB is validated strictly as FAT32 (rejects FAT12/16 by requiring zeroed FAT16 fields and a
   root cluster number >= 2) to avoid mounting incompatible images.
 - Directory and file nodes cache their cluster chains eagerly; FAT lookups are served from a

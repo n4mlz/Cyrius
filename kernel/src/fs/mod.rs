@@ -1,6 +1,6 @@
 //! Virtual filesystem scaffolding with mount support and per-process FD tables.
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
 
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
@@ -76,12 +76,53 @@ impl Vfs {
             .clone()
     }
 
+    pub fn read_dir(&self, path: &VfsPath) -> Result<Vec<DirEntry>, VfsError> {
+        if !path.is_absolute() {
+            return Err(VfsError::InvalidPath);
+        }
+        let (mount, tail) = self.select_mount(path)?;
+        let node = self.resolve_from(mount.root.clone(), tail)?;
+        let dir = match node {
+            NodeRef::Directory(dir) => dir,
+            NodeRef::File(_) => return Err(VfsError::NotDirectory),
+        };
+
+        let mut entries = dir.read_dir()?;
+        self.inject_mount_points(path, &mut entries);
+        Ok(entries)
+    }
+
     pub fn open_absolute(&self, path: &VfsPath) -> Result<NodeRef, VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
         let (mount, tail) = self.select_mount(path)?;
         self.resolve_from(mount.root.clone(), tail)
+    }
+
+    fn inject_mount_points(&self, path: &VfsPath, entries: &mut Vec<DirEntry>) {
+        let base_components = path.components();
+        for mount in &self.mounts {
+            let mount_components = mount.path.components();
+            if mount_components.len() != base_components.len() + 1 {
+                continue;
+            }
+            if !mount_components.starts_with(base_components) {
+                continue;
+            }
+            let name = mount_components[base_components.len()].as_str();
+            let present = entries.iter().any(|entry| entry.name == name);
+            if present {
+                continue;
+            }
+            entries.push(DirEntry {
+                name: name.to_string(),
+                metadata: Metadata {
+                    file_type: FileType::Directory,
+                    size: 0,
+                },
+            });
+        }
     }
 
     fn select_mount<'a, 'b>(
@@ -236,6 +277,21 @@ mod tests {
             root.lookup(&PathComponent::new("note")),
             Err(VfsError::NotFound)
         ));
+    }
+
+    #[kernel_test_case]
+    fn mount_points_visible_in_parent_listing() {
+        println!("[test] mount_points_visible_in_parent_listing");
+
+        let root = MemDirectory::new();
+        force_replace_root(root.clone());
+        let mounted = MemDirectory::new();
+        mount_at(VfsPath::parse("/mnt").unwrap(), mounted).expect("mount memfs at /mnt");
+
+        let pid = PROCESS_TABLE.init_kernel().expect("kernel init");
+        let entries = PROCESS_TABLE.list_dir(pid, "/").expect("list root");
+        let has_mnt = entries.iter().any(|entry| entry.name == "mnt");
+        assert!(has_mnt, "mount point not visible in / listing: {:?}", entries);
     }
 
     #[kernel_test_case]

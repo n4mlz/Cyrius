@@ -206,11 +206,7 @@ impl ProcessTable {
         let mut inner = self.inner.lock();
         let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
         let abs = absolute_path(raw_path, &process.fs.cwd)?;
-        let dir = with_vfs(|vfs| match vfs.open_absolute(&abs)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) => Err(VfsError::NotDirectory),
-        })?;
-        dir.read_dir()
+        with_vfs(|vfs| vfs.read_dir(&abs))
     }
 
     pub fn remove_path(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
