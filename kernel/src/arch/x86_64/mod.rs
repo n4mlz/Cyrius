@@ -10,6 +10,7 @@ mod trap;
 
 pub use thread::AddressSpace;
 pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
+pub use thread::AddressSpace;
 
 use self::trap::gdt;
 
