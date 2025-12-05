@@ -10,8 +10,6 @@ mod xsave;
 
 pub use thread::AddressSpace;
 pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
-pub use thread::AddressSpace;
-pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
 
 use self::trap::gdt;
 
