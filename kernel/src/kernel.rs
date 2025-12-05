@@ -15,10 +15,10 @@ pub mod arch;
 pub mod device;
 pub mod fs;
 pub mod interrupt;
+pub mod kernel_proc;
 pub mod loader;
 pub mod mem;
 pub mod process;
-pub mod shell;
 pub mod syscall;
 #[cfg(test)]
 pub mod test;
@@ -81,6 +81,11 @@ fn init_runtime(boot_info: &'static mut BootInfo) {
     Arch::console()
         .init()
         .unwrap_or_else(|err| panic!("failed to initialise console: {err:?}"));
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::arch::x86_64::init_cpu_features();
+    }
 
     let heap_range = {
         let info: &'static BootInfo = &*boot_info;
@@ -163,7 +168,7 @@ fn initialise_scheduler() {
 }
 
 fn init_shell() {
-    if let Err(err) = crate::shell::spawn_shell() {
+    if let Err(err) = crate::kernel_proc::shell::spawn_shell() {
         println!("[shell] failed to start shell: {err:?}");
     }
 }

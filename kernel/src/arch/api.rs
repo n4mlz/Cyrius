@@ -73,6 +73,18 @@ pub trait ArchThread {
     /// Build an initial user-mode context that resumes execution at `entry` on the supplied stack.
     fn bootstrap_user_context(entry: VirtAddr, user_stack_top: VirtAddr) -> Self::Context;
 
+    /// Build an initial user-mode context that resumes execution at `entry` using the provided
+    /// stack pointer.
+    ///
+    /// Default implementation reuses `bootstrap_user_context`, but architectures are free to honour
+    /// the caller-specified pointer without further adjustment.
+    fn bootstrap_user_context_with_stack_pointer(
+        entry: VirtAddr,
+        user_stack_pointer: VirtAddr,
+    ) -> Self::Context {
+        Self::bootstrap_user_context(entry, user_stack_pointer)
+    }
+
     /// Return a handle to the currently active address space.
     fn current_address_space() -> Self::AddressSpace;
 

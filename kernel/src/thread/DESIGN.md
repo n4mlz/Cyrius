@@ -10,12 +10,14 @@
 - `init` creates the kernel bootstrap thread (`ThreadControl::bootstrap`) and an idle thread, and registers them with the process subsystem using PID0.
 - `start` installs `SchedulerDispatch` on the system timer and enables interrupts through the architecture layer; repeated invocations return `AlreadyStarted`.
 - Timer ticks call `on_timer_tick`, which saves the current thread context, requeues non-idle threads, selects the next runnable thread, activates its address space, and restores CPU context.
+- Synchronous exits (e.g., Linux `_exit`) reuse the same scheduling path via `terminate_current`, which saves context, marks the thread `Terminated`, detaches it from the owning process, and immediately switches to the next runnable thread.
 - Shutdown stops the timer and re-disables interrupts. Multiprocessor support and per-CPU schedulers remain future work.
 
 ## Thread Model
-- `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, and scheduling state (`Ready`, `Running`, `Idle`).
+- `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, and scheduling state (`Ready`, `Running`, `Idle`, `Terminated`).
 - Kernel threads receive dedicated stacks allocated via `KernelStack`; the bootstrap thread represents the boot CPU and reuses its existing stack.
 - User threads layer a lazily allocated `UserStack` (via `ArchThread::UserStack`) on top of the kernel stack so ring transitions land on a thread-private stack while user-mode execution stays in the lower half of the address space.
+- User threads can also be seeded with a pre-built user stack pointer (used by the Linux ELF loader) via `spawn_user_thread_with_stack`; this bypasses the default top-of-stack calculation and honours the loader’s prepared layout.
 - Context restoration calls `ArchThread::update_privilege_stack` when the next thread is user-mode, keeping `TSS.rsp0` in sync with the scheduled kernel stack.
 - Address spaces are reference-counted handles cloned from the owning process; the scheduler switches CR3 via `ArchThread::activate_address_space` using these handles.
 - Thread creation uses `ArchThread::bootstrap_kernel_context` to seed an architecture-specific context that returns into Rust when first scheduled.

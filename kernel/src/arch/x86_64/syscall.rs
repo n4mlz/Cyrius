@@ -1,5 +1,6 @@
 use crate::interrupt::{INTERRUPTS, InterruptError, InterruptServiceRoutine};
 use crate::syscall::{self, SyscallInvocation};
+use crate::thread::SCHEDULER;
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 
 use super::SYSCALL_VECTOR;
@@ -26,7 +27,13 @@ impl InterruptServiceRoutine for SyscallHandler {
                 frame.regs.r9,
             ],
         );
-        let result = syscall::dispatch(abi, &invocation);
-        frame.regs.rax = syscall::encode_result(abi, result);
+        match syscall::dispatch(abi, &invocation) {
+            syscall::DispatchResult::Completed(result) => {
+                frame.regs.rax = syscall::encode_result(abi, result);
+            }
+            syscall::DispatchResult::Terminate(_code) => {
+                SCHEDULER.terminate_current(frame);
+            }
+        }
     }
 }

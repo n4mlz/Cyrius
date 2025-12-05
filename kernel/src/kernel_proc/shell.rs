@@ -6,7 +6,10 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::fs::DirEntry;
+use crate::kernel_proc::linux_box;
+use crate::loader::linux::LinuxLoadError;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use crate::thread::SpawnError;
 use crate::{print, println};
 
 const INPUT_BUF: usize = 256;
@@ -19,6 +22,8 @@ pub enum ShellError {
     NotFile,
     Utf8,
     UnknownCommand,
+    Spawn(SpawnError),
+    Loader(LinuxLoadError),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +36,7 @@ enum Command<'a> {
     Mkdir(&'a str),
     Pwd,
     Help,
+    LinuxBoxRun(&'a str),
     Unknown,
 }
 
@@ -49,7 +55,7 @@ fn shell_thread_entry() -> ! {
 }
 
 fn shell_loop(pid: ProcessId) -> ! {
-    println!("[shell] ready; commands: ls/cd/cat/rm/wt/help");
+    println!("[shell] ready; commands: ls/cd/cat/rm/wt/linux-box/help");
     let console = Arch::console();
     let mut buf = [0u8; INPUT_BUF];
     loop {
@@ -87,6 +93,15 @@ pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellEr
         }
         Command::Pwd => shell_pwd(pid).map(Some),
         Command::Help => Ok(Some(help_text())),
+        Command::LinuxBoxRun(path) => {
+            linux_box::run_and_wait(pid, path).map_err(|err| match err {
+                linux_box::RunError::Process(err) => ShellError::Process(err),
+                linux_box::RunError::Path(err) => ShellError::Fs(err),
+                linux_box::RunError::Loader(err) => ShellError::Loader(err),
+                linux_box::RunError::Spawn(err) => ShellError::Spawn(err),
+            })?;
+            Ok(None)
+        }
         Command::Unknown => Err(ShellError::UnknownCommand),
     }
 }
@@ -164,6 +179,10 @@ fn parse_command(line: &str) -> Command<'_> {
             }
         }
         Some("help") => Command::Help,
+        Some("linux-box") => match (parts.next(), parts.next()) {
+            (Some("run"), Some(path)) => Command::LinuxBoxRun(path),
+            _ => Command::Unknown,
+        },
         Some("") | None => Command::Unknown,
         _ => Command::Unknown,
     }
@@ -183,7 +202,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
 }
 
 fn help_text() -> String {
-    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  help\n"
+    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  help\n  linux-box run <path>\n"
         .to_string()
 }
 
@@ -238,6 +257,10 @@ mod tests {
         assert_eq!(parse_command("help"), Command::Help);
         assert_eq!(parse_command("mkdir /x"), Command::Mkdir("/x"));
         assert_eq!(parse_command("pwd"), Command::Pwd);
+        assert_eq!(
+            parse_command("linux-box run /mnt/demo1.elf"),
+            Command::LinuxBoxRun("/mnt/demo1.elf")
+        );
     }
 
     #[kernel_test_case]

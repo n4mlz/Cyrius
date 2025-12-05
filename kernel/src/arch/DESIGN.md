@@ -12,6 +12,7 @@
 - **ArchMemory**: discovers the kernel heap virtual range based on bootloader-provided memory maps.
 - **ArchThread**: supplies context save/restore, address-space activation, and kernel-thread bootstrap scaffolding.
 - **ArchInterrupt**: bootstraps the interrupt controllers, exposes the architecture timer driver, and installs end-of-interrupt hooks.
+- x86_64 initialisation enables SSE/FPU via CR0/CR4 so user-mode code can execute SIMD instructions; FPU state save/restore is not yet implemented.
 
 ## Error Contracts
 - Dedicated error enums (`HeapRegionError`, `InterruptInitError`, `TimerError`) encode hardware and firmware preconditions that call sites must handle.

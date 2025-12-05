@@ -84,6 +84,13 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Return the process ID of the currently running thread, if any.
+    pub fn current_process_id(&self) -> Option<ProcessId> {
+        let inner = self.inner.lock();
+        let current = inner.current?;
+        inner.thread(current).map(|thread| thread.process_id())
+    }
+
     pub fn spawn_kernel_thread(
         &self,
         name: &'static str,
@@ -129,6 +136,22 @@ impl Scheduler {
         }
 
         inner.spawn_user_thread(process, name, entry, stack_size)
+    }
+
+    pub fn spawn_user_thread_with_stack(
+        &self,
+        process: ProcessId,
+        name: &'static str,
+        entry: VirtAddr,
+        user_stack: <Arch as ArchThread>::UserStack,
+        stack_pointer: VirtAddr,
+    ) -> Result<ThreadId, SpawnError> {
+        let mut inner = self.inner.lock();
+        if !inner.initialised {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        inner.spawn_user_thread_with_stack(process, name, entry, user_stack, stack_pointer)
     }
 
     fn spawn_thread_locked(
@@ -192,28 +215,49 @@ impl Scheduler {
             return;
         }
 
-        let (next_ctx, next_space, next_stack, next_is_user, next_process) = {
+        self.switch_current(frame, SwitchMode::Requeue);
+    }
+
+    /// Terminate the currently running thread and immediately switch to the next runnable one.
+    pub fn terminate_current(&self, frame: &mut CurrentTrapFrame) {
+        if !self.started.load(Ordering::Acquire) {
+            return;
+        }
+
+        self.switch_current(frame, SwitchMode::Terminate);
+    }
+
+    fn switch_current(&self, frame: &mut CurrentTrapFrame, mode: SwitchMode) {
+        let (next_ctx, next_space, next_stack, next_is_user, next_process, detach_target) = {
             let mut inner = self.inner.lock();
             let current_id = match inner.current {
                 Some(id) => id,
                 None => return,
             };
-
             let idle_id = inner.idle.expect("idle thread must exist");
+            let mut detach_target = None;
 
             if let Some(thread) = inner.thread_mut(current_id) {
                 let saved = <Arch as ArchThread>::save_context(frame);
                 thread.context = saved;
 
-                if current_id != idle_id {
-                    thread.state = ThreadState::Ready;
-                    inner.ready.push_back(current_id);
-                } else {
-                    thread.state = ThreadState::Idle;
+                match mode {
+                    SwitchMode::Requeue => {
+                        if current_id != idle_id {
+                            thread.state = ThreadState::Ready;
+                            inner.ready.push_back(current_id);
+                        } else {
+                            thread.state = ThreadState::Idle;
+                        }
+                    }
+                    SwitchMode::Terminate => {
+                        detach_target = Some((thread.process_id(), current_id));
+                        thread.state = ThreadState::Terminated;
+                    }
                 }
             }
 
-            let next_id = inner.ready.pop_front().unwrap_or(idle_id);
+            let next_id = inner.next_runnable(idle_id);
             inner.current = Some(next_id);
 
             let (ctx, space, stack_top, is_user, process) = inner
@@ -234,8 +278,12 @@ impl Scheduler {
                 })
                 .expect("next thread must exist");
 
-            (ctx, space, stack_top, is_user, process)
+            (ctx, space, stack_top, is_user, process, detach_target)
         };
+
+        if let Some((pid, tid)) = detach_target {
+            let _ = PROCESS_TABLE.detach_thread(pid, tid);
+        }
 
         let abi = PROCESS_TABLE
             .abi(next_process)
@@ -257,6 +305,12 @@ impl InterruptServiceRoutine for SchedulerDispatch {
     fn handle(&self, _info: TrapInfo, frame: &mut CurrentTrapFrame) {
         SCHEDULER.on_timer_tick(frame);
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchMode {
+    Requeue,
+    Terminate,
 }
 
 #[derive(Debug)]
@@ -299,8 +353,26 @@ impl SchedulerInner {
         }
     }
 
+    fn thread(&self, id: ThreadId) -> Option<&ThreadControl> {
+        self.threads.iter().find(|thread| thread.id == id)
+    }
+
     fn thread_mut(&mut self, id: ThreadId) -> Option<&mut ThreadControl> {
         self.threads.iter_mut().find(|thread| thread.id == id)
+    }
+
+    fn next_runnable(&mut self, idle_id: ThreadId) -> ThreadId {
+        loop {
+            let candidate = self.ready.pop_front().unwrap_or(idle_id);
+            if candidate == idle_id {
+                return idle_id;
+            }
+            match self.thread(candidate) {
+                Some(thread) if thread.state != ThreadState::Terminated => return candidate,
+                Some(_) => continue,
+                None => continue,
+            }
+        }
     }
 
     fn spawn_user_thread(
@@ -323,6 +395,36 @@ impl SchedulerInner {
         self.threads.push(thread);
         Ok(id)
     }
+
+    fn spawn_user_thread_with_stack(
+        &mut self,
+        process: ProcessId,
+        name: &'static str,
+        entry: VirtAddr,
+        user_stack: <Arch as ArchThread>::UserStack,
+        stack_pointer: VirtAddr,
+    ) -> Result<ThreadId, SpawnError> {
+        let id = self.next_tid;
+        let address_space = PROCESS_TABLE
+            .address_space(process)
+            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
+        let thread = ThreadControl::user_with_stack(
+            id,
+            process,
+            name,
+            entry,
+            address_space,
+            user_stack,
+            stack_pointer,
+        )?;
+        PROCESS_TABLE
+            .attach_thread(process, id)
+            .map_err(SpawnError::Process)?;
+        self.next_tid = id.checked_add(1).expect("thread id overflow");
+        self.ready.push_back(id);
+        self.threads.push(thread);
+        Ok(id)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -330,6 +432,7 @@ enum ThreadState {
     Ready,
     Running,
     Idle,
+    Terminated,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -397,6 +500,32 @@ impl ThreadControl {
             entry,
             <Arch as ArchThread>::user_stack_top(&user_stack),
         );
+
+        Ok(Self {
+            id,
+            _name: name,
+            process,
+            context,
+            address_space,
+            kernel_stack: Some(kernel_stack),
+            user_stack: Some(user_stack),
+            kind: ThreadKind::User,
+            state: ThreadState::Ready,
+        })
+    }
+
+    fn user_with_stack(
+        id: ThreadId,
+        process: ProcessId,
+        name: &'static str,
+        entry: VirtAddr,
+        address_space: <Arch as ArchThread>::AddressSpace,
+        user_stack: <Arch as ArchThread>::UserStack,
+        stack_pointer: VirtAddr,
+    ) -> Result<Self, SpawnError> {
+        let kernel_stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
+        let context =
+            <Arch as ArchThread>::bootstrap_user_context_with_stack_pointer(entry, stack_pointer);
 
         Ok(Self {
             id,

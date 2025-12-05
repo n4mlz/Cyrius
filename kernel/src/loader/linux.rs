@@ -168,6 +168,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     );
 
     let page_sz = PageSize(page_size);
+    clear_segment_range(table, allocator, start, end, page_sz);
     for addr in (start..end).step_by(page_size) {
         let virt = VirtAddr::new(addr);
         let page = Page::new(virt, page_sz);
@@ -205,6 +206,10 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
                 seg.mem_size - seg.file_size,
             );
         }
+    }
+
+    if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
+        rewrite_syscalls(seg);
     }
 
     if !target_perms.contains(MemPerm::WRITE) {
@@ -250,6 +255,39 @@ fn initialise_minimal_stack(stack_top: VirtAddr) -> VirtAddr {
     unsafe { *(sp as *mut u64) = 0 };
 
     VirtAddr::new(sp)
+}
+
+/// Translate Linux `syscall` instructions to `int 0x80` so we can reuse the existing software
+/// interrupt handler until `SYSCALL/SYSRET` is wired up.
+fn rewrite_syscalls(seg: &ProgramSegment) {
+    let mut offset = 0usize;
+    while offset + 1 < seg.file_size {
+        let ptr = unsafe { seg.vaddr.into_mut_ptr().add(offset) };
+        let opcode = unsafe { core::ptr::read(ptr) };
+        let next = unsafe { core::ptr::read(ptr.add(1)) };
+        if opcode == 0x0F && next == 0x05 {
+            unsafe {
+                core::ptr::write(ptr, 0xCD);
+                core::ptr::write(ptr.add(1), 0x80);
+            }
+        }
+        offset = offset.saturating_add(1);
+    }
+}
+
+fn clear_segment_range<T: PageTableOps, A: FrameAllocator>(
+    table: &mut T,
+    allocator: &mut A,
+    start: usize,
+    end: usize,
+    page_sz: PageSize,
+) {
+    for addr in (start..end).step_by(page_sz.bytes()) {
+        let page = Page::new(VirtAddr::new(addr), page_sz);
+        if let Ok(frame) = table.unmap(page) {
+            allocator.deallocate(frame);
+        }
+    }
 }
 
 fn align_down(value: usize, align: usize) -> usize {
@@ -459,7 +497,9 @@ mod tests {
         assert_eq!(program.entry.as_raw(), 0x400080);
         unsafe {
             let first = core::ptr::read(program.entry.into_ptr());
-            assert_eq!(first, 0xAA);
+            let second = core::ptr::read(program.entry.into_ptr().add(1));
+            assert_eq!(first, 0xCD);
+            assert_eq!(second, 0x80);
         }
 
         unsafe {
@@ -520,8 +560,8 @@ mod tests {
         );
 
         // Text contents (align entry point at 0x400080)
-        buf[0x1000 + 0x80] = 0xAA;
-        buf[0x1000 + 0x81] = 0xBB;
+        buf[0x1000 + 0x80] = 0x0F;
+        buf[0x1000 + 0x81] = 0x05;
 
         // Data contents
         buf[0x2000] = 0x11;

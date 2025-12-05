@@ -11,6 +11,10 @@ pub fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
             handle_page_fault(frame);
             true
         }
+        6 => {
+            handle_invalid_opcode(frame);
+            true
+        }
         13 => {
             handle_general_protection(frame);
             true
@@ -50,6 +54,12 @@ fn handle_general_protection(frame: &TrapFrame) {
     println!("[#GP] error_code={:#x}", frame.error_code);
     println!("[#GP] frame={:#?}", frame);
     panic!("general protection fault");
+}
+
+fn handle_invalid_opcode(frame: &TrapFrame) {
+    println!("[#UD] invalid opcode");
+    println!("[#UD] frame={:#?}", frame);
+    panic!("invalid opcode");
 }
 
 fn handle_double_fault(frame: &TrapFrame) {
