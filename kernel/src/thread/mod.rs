@@ -290,10 +290,8 @@ impl Scheduler {
             .unwrap_or(syscall::Abi::Host);
         syscall::set_current_abi(abi);
 
-        if next_is_user {
-            if let Some(stack_top) = next_stack {
-                <Arch as ArchThread>::update_privilege_stack(stack_top);
-            }
+        if next_is_user && let Some(stack_top) = next_stack {
+            <Arch as ArchThread>::update_privilege_stack(stack_top);
         }
 
         unsafe {
