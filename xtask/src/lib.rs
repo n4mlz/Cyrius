@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     str,
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -115,17 +117,88 @@ pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
     }
 }
 
+fn kill_existing_qemu_processes(image: &Path) -> Result<()> {
+    fn kill_qemu_process(pid: u32) {
+        eprintln!("Killing existing QEMU process (PID {})", pid);
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    fn find_pids_from_lsof(image: &Path) -> Vec<u32> {
+        let Ok(output) = Command::new("lsof").arg(image).output() else {
+            return vec![];
+        };
+        if !output.status.success() {
+            return vec![];
+        }
+
+        let stdout = str::from_utf8(&output.stdout).unwrap_or("");
+        stdout
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1)?.parse().ok())
+            .filter(|&pid| {
+                std::fs::read_to_string(format!("/proc/{}/comm", pid))
+                    .map(|comm| comm.trim() == "qemu-system-x86_64")
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn find_pids_from_ps(image: &Path) -> Vec<u32> {
+        let Some(image_str) = image.to_str() else {
+            return vec![];
+        };
+        let Ok(output) = Command::new("ps").args(&["aux"]).output() else {
+            return vec![];
+        };
+        if !output.status.success() {
+            return vec![];
+        }
+
+        let stdout = str::from_utf8(&output.stdout).unwrap_or("");
+        stdout
+            .lines()
+            .filter(|line| line.contains("qemu-system-x86_64") && line.contains(image_str))
+            .filter_map(|line| line.split_whitespace().nth(1)?.parse().ok())
+            .collect()
+    }
+
+    let pids = find_pids_from_lsof(image);
+    let pids = if pids.is_empty() {
+        find_pids_from_ps(image)
+    } else {
+        pids
+    };
+
+    for pid in pids {
+        kill_qemu_process(pid);
+    }
+
+    Ok(())
+}
+
 pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<ExitStatus> {
-    let mut qemu = Command::new("qemu-system-x86_64");
+    let _ = kill_existing_qemu_processes(image);
+
+    if !image.exists() {
+        bail!("QEMU image file does not exist: {}", image.display());
+    }
+
+    for (index, extra) in block_images.iter().enumerate() {
+        if !extra.exists() {
+            bail!("Block image {} does not exist: {}", index, extra.display());
+        }
+    }
+
+    let qemu_path = which::which("qemu-system-x86_64")
+        .with_context(|| "qemu-system-x86_64 not found in PATH. Please install QEMU.")?;
+
+    let mut qemu = Command::new(&qemu_path);
     qemu.args([
-        "-m",
-        "256M",
-        "-serial",
-        "stdio",
-        "-display",
-        "none",
-        "-drive",
-        &format!("format=raw,file={}", image.display()),
+        "-m", "256M",
+        "-serial", "stdio",
+        "-display", "none",
+        "-drive", &format!("format=raw,file={}", image.display()),
     ]);
 
     for (index, extra) in block_images.iter().enumerate() {
@@ -142,8 +215,7 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
 
     if test {
         qemu.args([
-            "-device",
-            "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-no-reboot",
         ]);
     }
@@ -249,7 +321,7 @@ pub fn prepare_test_fat_image() -> Result<PathBuf> {
 pub fn prepare_host_mnt_image() -> Result<PathBuf> {
     const IMAGE_PATH: &str = "target/mnt.img";
     const BYTES_PER_SECTOR: u16 = 512;
-    const IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+    const IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 
     let path = PathBuf::from(IMAGE_PATH);
     if let Some(parent) = path.parent() {
@@ -269,7 +341,6 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
 
     let opts = FormatVolumeOptions::new()
         .bytes_per_sector(BYTES_PER_SECTOR)
-        .bytes_per_cluster(u32::from(BYTES_PER_SECTOR))
         .fat_type(FatType::Fat32);
     fatfs::format_volume(&mut file, opts)
         .with_context(|| format!("format FAT32 image {}", path.display()))?;
@@ -294,7 +365,8 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
 
     let host_dir = Path::new("mnt");
     if host_dir.exists() {
-        copy_dir_into_fs(&fs, host_dir, "/")?;
+        copy_dir_into_fs(&fs, host_dir, "/")
+            .with_context(|| format!("copy directory {}", host_dir.display()))?;
     }
 
     Ok(path)
@@ -420,48 +492,90 @@ fn write_fat(fat: &mut [u8], media: u8, root_cluster: u32, file_cluster: u32) {
 
 type FatfsFs = FileSystem<std::fs::File>;
 
+fn is_fat32_invalid_filename(name: &str) -> bool {
+    name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+}
+
 fn copy_dir_into_fs(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
     if dest != "/" {
         let _ = fs.root_dir().create_dir(dest);
     }
-    walk_dir(fs, host, dest)?;
+    walk_dir(fs, host, dest)
+        .with_context(|| format!("copy directory {} to {}", host.display(), dest))?;
     Ok(())
 }
 
 fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
-    for entry in fs::read_dir(host).with_context(|| format!("read_dir {}", host.display()))? {
-        let entry = entry?;
+    fn resolve_path(path: &Path) -> PathBuf {
+        path.canonicalize()
+            .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    let host_abs = resolve_path(host);
+    if !host_abs.exists() {
+        bail!("host path does not exist: {}", host_abs.display());
+    }
+    if !host_abs.is_dir() {
+        bail!("host path is not a directory: {}", host_abs.display());
+    }
+
+    let entries = fs::read_dir(&host_abs)
+        .with_context(|| format!("read_dir {}", host_abs.display()))?;
+
+    for entry_result in entries {
+        let entry = entry_result
+            .with_context(|| format!("read entry in {}", host_abs.display()))?;
         let path = entry.path();
-        let name = entry
-            .file_name()
+
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                eprintln!("Warning: Failed to get file type for {}: {}", path.display(), e);
+                continue;
+            }
+        };
+
+        let file_name = entry.file_name();
+        let name = file_name
             .to_str()
-            .ok_or_else(|| anyhow::anyhow!("invalid utf-8 in filename"))?
-            .to_string();
+            .ok_or_else(|| anyhow::anyhow!("invalid utf-8 in filename: {}", path.display()))?;
+
+        if is_fat32_invalid_filename(name) {
+            eprintln!("Warning: Skipping {} (contains FAT32-invalid characters)", path.display());
+            continue;
+        }
+
         let dest_path = if dest == "/" {
             format!("/{}", name)
         } else {
             format!("{}/{}", dest, name)
         };
 
-        if entry.file_type()?.is_dir() {
-            let _ = fs.root_dir().create_dir(&dest_path);
-            walk_dir(fs, &path, &dest_path)?;
-        } else if entry.file_type()?.is_file() {
-            let mut src =
-                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+        if file_type.is_dir() {
+            if fs.root_dir().create_dir(&dest_path).is_err() {
+                fs.root_dir().open_dir(&dest_path)
+                    .with_context(|| format!("create or open directory {}", dest_path))?;
+            }
+            walk_dir(fs, &resolve_path(&path), &dest_path)
+                .with_context(|| format!("walk_dir {}", path.display()))?;
+        } else if file_type.is_symlink() {
+            continue;
+        } else if file_type.is_file() {
+            let mut src = std::fs::File::open(&path)
+                .with_context(|| format!("open {}", path.display()))?;
             let mut dst = match fs.root_dir().create_file(&dest_path) {
                 Ok(f) => f,
                 Err(_) => {
-                    let mut f = fs
-                        .root_dir()
-                        .open_file(&dest_path)
-                        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-                    f.truncate().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    let mut f = fs.root_dir().open_file(&dest_path)
+                        .with_context(|| format!("create or open file {}", dest_path))?;
+                    f.truncate()
+                        .with_context(|| format!("truncate {}", dest_path))?;
                     f
                 }
             };
             std::io::copy(&mut src, &mut dst)
-                .with_context(|| format!("copy {}", path.display()))?;
+                .with_context(|| format!("copy {} to {}", path.display(), dest_path))?;
         }
     }
     Ok(())
