@@ -2,8 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
-    str,
-    thread,
+    str, thread,
     time::Duration,
 };
 
@@ -195,10 +194,14 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
 
     let mut qemu = Command::new(&qemu_path);
     qemu.args([
-        "-m", "256M",
-        "-serial", "stdio",
-        "-display", "none",
-        "-drive", &format!("format=raw,file={}", image.display()),
+        "-m",
+        "256M",
+        "-serial",
+        "stdio",
+        "-display",
+        "none",
+        "-drive",
+        &format!("format=raw,file={}", image.display()),
     ]);
 
     for (index, extra) in block_images.iter().enumerate() {
@@ -215,7 +218,8 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
 
     if test {
         qemu.args([
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-device",
+            "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-no-reboot",
         ]);
     }
@@ -493,7 +497,8 @@ fn write_fat(fat: &mut [u8], media: u8, root_cluster: u32, file_cluster: u32) {
 type FatfsFs = FileSystem<std::fs::File>;
 
 fn is_fat32_invalid_filename(name: &str) -> bool {
-    name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+    name.chars()
+        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
 }
 
 fn copy_dir_into_fs(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
@@ -520,18 +525,22 @@ fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
         bail!("host path is not a directory: {}", host_abs.display());
     }
 
-    let entries = fs::read_dir(&host_abs)
-        .with_context(|| format!("read_dir {}", host_abs.display()))?;
+    let entries =
+        fs::read_dir(&host_abs).with_context(|| format!("read_dir {}", host_abs.display()))?;
 
     for entry_result in entries {
-        let entry = entry_result
-            .with_context(|| format!("read entry in {}", host_abs.display()))?;
+        let entry =
+            entry_result.with_context(|| format!("read entry in {}", host_abs.display()))?;
         let path = entry.path();
 
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(e) => {
-                eprintln!("Warning: Failed to get file type for {}: {}", path.display(), e);
+                eprintln!(
+                    "Warning: Failed to get file type for {}: {}",
+                    path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -542,7 +551,10 @@ fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("invalid utf-8 in filename: {}", path.display()))?;
 
         if is_fat32_invalid_filename(name) {
-            eprintln!("Warning: Skipping {} (contains FAT32-invalid characters)", path.display());
+            eprintln!(
+                "Warning: Skipping {} (contains FAT32-invalid characters)",
+                path.display()
+            );
             continue;
         }
 
@@ -554,7 +566,8 @@ fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
 
         if file_type.is_dir() {
             if fs.root_dir().create_dir(&dest_path).is_err() {
-                fs.root_dir().open_dir(&dest_path)
+                fs.root_dir()
+                    .open_dir(&dest_path)
                     .with_context(|| format!("create or open directory {}", dest_path))?;
             }
             walk_dir(fs, &resolve_path(&path), &dest_path)
@@ -562,12 +575,14 @@ fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
         } else if file_type.is_symlink() {
             continue;
         } else if file_type.is_file() {
-            let mut src = std::fs::File::open(&path)
-                .with_context(|| format!("open {}", path.display()))?;
+            let mut src =
+                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
             let mut dst = match fs.root_dir().create_file(&dest_path) {
                 Ok(f) => f,
                 Err(_) => {
-                    let mut f = fs.root_dir().open_file(&dest_path)
+                    let mut f = fs
+                        .root_dir()
+                        .open_file(&dest_path)
                         .with_context(|| format!("create or open file {}", dest_path))?;
                     f.truncate()
                         .with_context(|| format!("truncate {}", dest_path))?;
