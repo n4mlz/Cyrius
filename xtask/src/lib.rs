@@ -194,10 +194,14 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
 
     let mut qemu = Command::new(&qemu_path);
     qemu.args([
-        "-m", "256M",
-        "-serial", "stdio",
-        "-display", "none",
-        "-drive", &format!("format=raw,file={}", image.display()),
+        "-m",
+        "256M",
+        "-serial",
+        "stdio",
+        "-display",
+        "none",
+        "-drive",
+        &format!("format=raw,file={}", image.display()),
     ]);
 
     for (index, extra) in block_images.iter().enumerate() {
@@ -214,7 +218,8 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
 
     if test {
         qemu.args([
-            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-device",
+            "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-no-reboot",
         ]);
     }
