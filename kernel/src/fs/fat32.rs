@@ -399,6 +399,7 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
                                 .map_err(|_| VfsError::Corrupted)?,
                             size: entry.file_size,
                         }))),
+                        FileType::Symlink => Err(VfsError::NotFound),
                     };
                 }
             }

@@ -126,7 +126,9 @@ fn read_file(path: &VfsPath) -> Result<Vec<u8>, LinuxLoadError> {
             }
             Ok(buf)
         }
-        NodeRef::Directory(_) => Err(LinuxLoadError::InvalidElf("path is a directory")),
+        NodeRef::Directory(_) | NodeRef::Symlink(_) => {
+            Err(LinuxLoadError::InvalidElf("path is a directory"))
+        }
     }
 }
 

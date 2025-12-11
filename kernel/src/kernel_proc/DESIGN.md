@@ -9,6 +9,7 @@
 - Tokenisation is whitespace-based; quoted strings are not supported.
 - Errors bubble up from the filesystem (`VfsError`), process table (`ProcessError`), loader (`LinuxLoadError`), and thread spawning (`SpawnError`) without wrapping in an extra linux-box-specific error layer.
 - Runs as a kernel thread associated with a kernel process, reusing the process CWD and FD table for all commands.
+- `tar <archive>` extracts a POSIX tar file into the caller’s current working directory on the writable ramfs mount. Regular files, directories, symlinks, and hard links are supported, paths must be relative (no `..` or absolute prefixes), and checksum validation guards against malformed archives.
 
 ## Linux Box
 - Resolves paths relative to the caller’s CWD, switches the target process ABI to Linux, loads a static ELF64, rewrites `syscall` opcodes to `int 0x80`, and spawns a user thread using the loader-prepared stack pointer.
