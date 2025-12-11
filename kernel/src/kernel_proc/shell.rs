@@ -38,7 +38,7 @@ enum Command<'a> {
     Pwd,
     Help,
     LinuxBoxRun(&'a str),
-    Tar(&'a str),
+    Tar(&'a str, Option<&'a str>),
     Unknown,
 }
 
@@ -104,8 +104,8 @@ pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellEr
             })?;
             Ok(None)
         }
-        Command::Tar(path) => {
-            shell_tar(pid, path)?;
+        Command::Tar(path, dest) => {
+            shell_tar(pid, path, dest)?;
             Ok(None)
         }
         Command::Unknown => Err(ShellError::UnknownCommand),
@@ -166,8 +166,8 @@ fn shell_pwd(pid: ProcessId) -> Result<String, ShellError> {
     Ok(cwd.to_string())
 }
 
-fn shell_tar(pid: ProcessId, path: &str) -> Result<(), ShellError> {
-    tar::extract_to_ramfs(pid, path).map_err(ShellError::Tar)
+fn shell_tar(pid: ProcessId, path: &str, dest: Option<&str>) -> Result<(), ShellError> {
+    tar::extract_to_ramfs(pid, path, dest).map_err(ShellError::Tar)
 }
 
 fn parse_command(line: &str) -> Command<'_> {
@@ -193,7 +193,14 @@ fn parse_command(line: &str) -> Command<'_> {
             (Some("run"), Some(path)) => Command::LinuxBoxRun(path),
             _ => Command::Unknown,
         },
-        Some("tar") => parts.next().map(Command::Tar).unwrap_or(Command::Unknown),
+        Some("tar") => {
+            if let Some(archive) = parts.next() {
+                let dest = parts.next();
+                Command::Tar(archive, dest)
+            } else {
+                Command::Unknown
+            }
+        }
         Some("") | None => Command::Unknown,
         _ => Command::Unknown,
     }
@@ -214,7 +221,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
 }
 
 fn help_text() -> String {
-    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  tar <archive>\n  help\n  linux-box run <path>\n"
+    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  tar <archive> [dest]\n  help\n  linux-box run <path>\n"
         .to_string()
 }
 
@@ -273,7 +280,14 @@ mod tests {
             parse_command("linux-box run /mnt/demo1.elf"),
             Command::LinuxBoxRun("/mnt/demo1.elf")
         );
-        assert_eq!(parse_command("tar bundle.tar"), Command::Tar("bundle.tar"));
+        assert_eq!(
+            parse_command("tar bundle.tar"),
+            Command::Tar("bundle.tar", None)
+        );
+        assert_eq!(
+            parse_command("tar bundle.tar /out"),
+            Command::Tar("bundle.tar", Some("/out"))
+        );
     }
 
     #[kernel_test_case]

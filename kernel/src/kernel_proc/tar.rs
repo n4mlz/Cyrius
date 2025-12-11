@@ -23,9 +23,17 @@ pub enum TarError {
 /// - Assumes the current working directory is backed by a writable filesystem such as the in-memory ramfs.
 /// - Regular files, directories, symlinks, and hard links are supported. Other entry types fail with `UnsupportedType`.
 /// - Archive paths must be relative; absolute paths or `..` segments are rejected by `VfsPath`.
-pub fn extract_to_ramfs(pid: ProcessId, archive_path: &str) -> Result<(), TarError> {
-    let base = PROCESS_TABLE.cwd(pid).map_err(TarError::Fs)?;
-    ensure_dir_exists(&base)?;
+pub fn extract_to_ramfs(
+    pid: ProcessId,
+    archive_path: &str,
+    dest: Option<&str>,
+) -> Result<(), TarError> {
+    let cwd = PROCESS_TABLE.cwd(pid).map_err(TarError::Fs)?;
+    let base = match dest {
+        Some(path) => normalise_path(path, &cwd).map_err(TarError::Fs)?,
+        None => cwd,
+    };
+    TarExtractor::ensure_dir_chain_static(pid, &base)?;
 
     let fd = PROCESS_TABLE
         .open_path(pid, archive_path)
@@ -93,12 +101,16 @@ impl TarExtractor {
     }
 
     fn ensure_dir_chain(&self, target: &VfsPath) -> Result<(), TarError> {
+        Self::ensure_dir_chain_static(self.pid, target)
+    }
+
+    fn ensure_dir_chain_static(pid: ProcessId, target: &VfsPath) -> Result<(), TarError> {
         let mut current = VfsPath::root();
         for component in target.components() {
             current.push(component.clone());
             let raw = current.to_string();
             PROCESS_TABLE
-                .create_dir(self.pid, raw.as_str())
+                .create_dir(pid, raw.as_str())
                 .map_err(TarError::Fs)?;
         }
         Ok(())
@@ -407,4 +419,27 @@ fn resolve_link_target(base: &VfsPath, target: &str) -> Result<VfsPath, TarError
     }
 
     Ok(VfsPath::from_components(true, comps))
+}
+
+fn normalise_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
+    if raw.starts_with('/') {
+        return VfsPath::parse(raw);
+    }
+
+    let mut components = cwd.components().to_vec();
+    for part in raw.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            components.pop();
+            continue;
+        }
+        if part.len() > 255 {
+            return Err(VfsError::NameTooLong);
+        }
+        components.push(PathComponent::new(part));
+    }
+
+    Ok(VfsPath::from_components(true, components))
 }
