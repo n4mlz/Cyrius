@@ -7,7 +7,9 @@ use alloc::{
 
 use crate::util::spinlock::SpinLock;
 
-use super::{DirEntry, Directory, File, FileType, Metadata, NodeRef, PathComponent, VfsError};
+use super::{
+    DirEntry, Directory, File, FileType, Metadata, NodeRef, PathComponent, Symlink, VfsError,
+};
 
 /// Simple in-memory writable filesystem backed by a tree of nodes.
 pub struct MemDirectory {
@@ -36,6 +38,18 @@ impl MemFile {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             data: SpinLock::new(Vec::new()),
+        })
+    }
+}
+
+struct MemSymlink {
+    target: String,
+}
+
+impl MemSymlink {
+    fn new(target: &str) -> Arc<Self> {
+        Arc::new(Self {
+            target: target.to_string(),
         })
     }
 }
@@ -76,6 +90,19 @@ impl File for MemFile {
         let mut data = self.data.lock();
         data.resize(len, 0);
         Ok(())
+    }
+}
+
+impl Symlink for MemSymlink {
+    fn metadata(&self) -> Result<Metadata, VfsError> {
+        Ok(Metadata {
+            file_type: FileType::Symlink,
+            size: self.target.len() as u64,
+        })
+    }
+
+    fn target(&self) -> Result<String, VfsError> {
+        Ok(self.target.clone())
     }
 }
 
@@ -139,5 +166,26 @@ impl Directory for MemDirectory {
         } else {
             Err(VfsError::NotFound)
         }
+    }
+
+    fn create_symlink(&self, name: &str, target: &str) -> Result<Arc<dyn Symlink>, VfsError> {
+        let mut inner = self.inner.lock();
+        if inner.entries.contains_key(name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let link = MemSymlink::new(target);
+        inner
+            .entries
+            .insert(name.to_string(), NodeRef::Symlink(link.clone()));
+        Ok(link)
+    }
+
+    fn link(&self, name: &str, node: NodeRef) -> Result<(), VfsError> {
+        let mut inner = self.inner.lock();
+        if inner.entries.contains_key(name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        inner.entries.insert(name.to_string(), node);
+        Ok(())
     }
 }

@@ -55,6 +55,13 @@ impl VfsPath {
         }
     }
 
+    pub fn from_components(absolute: bool, components: Vec<PathComponent>) -> Self {
+        Self {
+            absolute,
+            components,
+        }
+    }
+
     pub fn join(&self, other: &VfsPath) -> Result<Self, VfsError> {
         if other.is_absolute() {
             return Ok(other.clone());

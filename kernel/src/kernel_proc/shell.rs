@@ -205,6 +205,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
         let kind = match entry.metadata.file_type {
             crate::fs::FileType::Directory => "d",
             crate::fs::FileType::File => "-",
+            crate::fs::FileType::Symlink => "l",
         };
         let line = alloc::format!("{kind} {} {}\n", entry.metadata.size, entry.name);
         out.push_str(&line);
@@ -328,18 +329,55 @@ mod tests {
             .expect("cat")
             .unwrap();
         assert_eq!(content, "hello from tar");
+
+        let sym_content = run_command(pid, "cat /dir/hello.sym")
+            .expect("cat symlink")
+            .unwrap();
+        assert_eq!(sym_content, "hello from tar");
+
+        let hard_content = run_command(pid, "cat /dir/sub/hello.hard")
+            .expect("cat hardlink")
+            .unwrap();
+        assert_eq!(hard_content, "hello from tar");
+
+        let sym_up_content = run_command(pid, "cat /dir/sub/hello.sym.up")
+            .expect("cat symlink up")
+            .unwrap();
+        assert_eq!(sym_up_content, "hello from tar");
     }
 
     fn build_test_tar() -> Vec<u8> {
         let mut archive = Vec::new();
-        let pax_data = build_pax_path_header("dir/hello.txt");
-        archive.extend_from_slice(&build_header("paxhdr", pax_data.len() as u64, b'x'));
-        archive.extend_from_slice(&pax_data);
+        let data = b"hello from tar";
+        archive.extend_from_slice(&build_header(
+            "dir/hello.txt",
+            data.len() as u64,
+            b'0',
+            None,
+        ));
+        archive.extend_from_slice(data);
         pad_to_block(&mut archive);
 
-        let data = b"hello from tar";
-        archive.extend_from_slice(&build_header("ignored.txt", data.len() as u64, b'0'));
-        archive.extend_from_slice(data);
+        archive.extend_from_slice(&build_header("dir/sub/", 0, b'5', None));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header("dir/hello.sym", 0, b'2', Some("hello.txt")));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header(
+            "dir/sub/hello.hard",
+            0,
+            b'1',
+            Some("../hello.txt"),
+        ));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header(
+            "dir/sub/hello.sym.up",
+            0,
+            b'2',
+            Some("../hello.txt"),
+        ));
         pad_to_block(&mut archive);
 
         archive.extend_from_slice(&[0u8; 512]);
@@ -347,12 +385,7 @@ mod tests {
         archive
     }
 
-    fn build_pax_path_header(path: &str) -> Vec<u8> {
-        let content = alloc::format!("25 path={path}\n");
-        content.into_bytes()
-    }
-
-    fn build_header(path: &str, size: u64, kind: u8) -> [u8; 512] {
+    fn build_header(path: &str, size: u64, kind: u8, link: Option<&str>) -> [u8; 512] {
         let mut header = [0u8; 512];
         let name_bytes = path.as_bytes();
         assert!(name_bytes.len() <= 100, "test path too long for header");
@@ -363,6 +396,14 @@ mod tests {
         write_octal(&mut header[124..136], size);
         write_octal(&mut header[136..148], 0);
         header[156] = kind;
+        if let Some(link) = link {
+            let link_bytes = link.as_bytes();
+            assert!(
+                link_bytes.len() <= 100,
+                "test link name too long for header"
+            );
+            header[157..157 + link_bytes.len()].copy_from_slice(link_bytes);
+        }
         header[257..263].copy_from_slice(b"ustar\0");
         header[263..265].copy_from_slice(b"00");
         header[148..156].fill(b' ');

@@ -12,7 +12,7 @@ mod node;
 mod path;
 
 pub use fd::{Fd, FdTable};
-pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef};
+pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};
 pub use path::{PathComponent, VfsPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +81,10 @@ impl Vfs {
             return Err(VfsError::InvalidPath);
         }
         let (mount, tail) = self.select_mount(path)?;
-        let node = self.resolve_from(mount.root.clone(), tail)?;
+        let node = self.resolve_from(mount.root.clone(), Vec::new(), tail, 0)?;
         let dir = match node {
             NodeRef::Directory(dir) => dir,
-            NodeRef::File(_) => return Err(VfsError::NotDirectory),
+            NodeRef::File(_) | NodeRef::Symlink(_) => return Err(VfsError::NotDirectory),
         };
 
         let mut entries = dir.read_dir()?;
@@ -93,11 +93,7 @@ impl Vfs {
     }
 
     pub fn open_absolute(&self, path: &VfsPath) -> Result<NodeRef, VfsError> {
-        if !path.is_absolute() {
-            return Err(VfsError::InvalidPath);
-        }
-        let (mount, tail) = self.select_mount(path)?;
-        self.resolve_from(mount.root.clone(), tail)
+        self.resolve_absolute(path, 0)
     }
 
     fn inject_mount_points(&self, path: &VfsPath, entries: &mut Vec<DirEntry>) {
@@ -139,28 +135,82 @@ impl Vfs {
         Err(VfsError::NotFound)
     }
 
+    fn resolve_absolute(&self, path: &VfsPath, depth: u8) -> Result<NodeRef, VfsError> {
+        if !path.is_absolute() {
+            return Err(VfsError::InvalidPath);
+        }
+        let (mount, tail) = self.select_mount(path)?;
+        self.resolve_from(mount.root.clone(), Vec::new(), tail, depth)
+    }
+
     fn resolve_from(
         &self,
-        mut current: Arc<dyn Directory>,
+        current: Arc<dyn Directory>,
+        mut current_path: Vec<PathComponent>,
         components: &[PathComponent],
+        depth: u8,
     ) -> Result<NodeRef, VfsError> {
+        if depth >= 16 {
+            return Err(VfsError::InvalidPath);
+        }
+
         if components.is_empty() {
             return Ok(NodeRef::Directory(current));
         }
 
-        for (index, component) in components.iter().enumerate() {
-            let node = current.lookup(component)?;
-            if index + 1 == components.len() {
-                return Ok(node);
-            }
-            current = match node {
-                NodeRef::Directory(dir) => dir,
-                NodeRef::File(_) => return Err(VfsError::NotDirectory),
-            };
-        }
+        let (first, rest) = components.split_first().expect("components not empty");
+        let node = current.lookup(first)?;
 
-        Err(VfsError::NotFound)
+        match node {
+            NodeRef::Directory(dir) => {
+                current_path.push(first.clone());
+                self.resolve_from(dir, current_path, rest, depth)
+            }
+            NodeRef::Symlink(link) => {
+                let target_raw = link.target()?;
+                let mut combined_components = resolve_link_components(&current_path, &target_raw)?;
+                if !rest.is_empty() {
+                    combined_components.extend(rest.iter().cloned());
+                }
+                let combined = VfsPath::from_components(true, combined_components);
+                self.resolve_absolute(&combined, depth + 1)
+            }
+            NodeRef::File(file) => {
+                if rest.is_empty() {
+                    Ok(NodeRef::File(file))
+                } else {
+                    Err(VfsError::NotDirectory)
+                }
+            }
+        }
     }
+}
+
+fn resolve_link_components(
+    base: &[PathComponent],
+    target: &str,
+) -> Result<Vec<PathComponent>, VfsError> {
+    let mut components = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base.to_vec()
+    };
+
+    for part in target.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            components.pop().ok_or(VfsError::InvalidPath)?;
+            continue;
+        }
+        if part.len() > 255 {
+            return Err(VfsError::NameTooLong);
+        }
+        components.push(PathComponent::new(part));
+    }
+
+    Ok(components)
 }
 
 pub fn mount_root(root: Arc<dyn Directory>) -> Result<(), VfsError> {

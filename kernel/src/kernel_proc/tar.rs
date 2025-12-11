@@ -1,7 +1,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::fs::{NodeRef, VfsError, VfsPath, with_vfs};
+use crate::fs::{NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
 use crate::process::{PROCESS_TABLE, ProcessId};
 
 const TAR_BLOCK_SIZE: usize = 512;
@@ -21,7 +21,7 @@ pub enum TarError {
 ///
 /// # Notes
 /// - Assumes the current working directory is backed by a writable filesystem such as the in-memory ramfs.
-/// - Only regular files and directories are supported. Other entry types fail with `UnsupportedType`.
+/// - Regular files, directories, symlinks, and hard links are supported. Other entry types fail with `UnsupportedType`.
 /// - Archive paths must be relative; absolute paths or `..` segments are rejected by `VfsPath`.
 pub fn extract_to_ramfs(pid: ProcessId, archive_path: &str) -> Result<(), TarError> {
     let base = PROCESS_TABLE.cwd(pid).map_err(TarError::Fs)?;
@@ -55,6 +55,27 @@ impl TarExtractor {
                     self.ensure_dir_chain(&parent)?;
                     let data = reader.read_entry_data(entry.size)?;
                     self.write_file(&target, &data)?;
+                }
+                TarEntryKind::Symlink { target: link } => {
+                    let parent = target.parent().ok_or(TarError::InvalidArchive)?;
+                    self.ensure_dir_chain(&parent)?;
+                    reader.skip_entry_data(entry.size)?;
+                    PROCESS_TABLE
+                        .symlink(self.pid, &link, target.to_string().as_str())
+                        .map_err(TarError::Fs)?;
+                }
+                TarEntryKind::HardLink { target: src } => {
+                    let parent = target.parent().ok_or(TarError::InvalidArchive)?;
+                    self.ensure_dir_chain(&parent)?;
+                    reader.skip_entry_data(entry.size)?;
+                    let resolved = resolve_link_target(&parent, &src)?;
+                    PROCESS_TABLE
+                        .hard_link(
+                            self.pid,
+                            resolved.to_string().as_str(),
+                            target.to_string().as_str(),
+                        )
+                        .map_err(TarError::Fs)?;
                 }
                 TarEntryKind::Metadata => {
                     unreachable!("metadata entries are filtered in TarReader")
@@ -94,6 +115,7 @@ struct TarReader {
     pid: ProcessId,
     fd: crate::fs::Fd,
     pending_path: Option<String>,
+    pending_linkpath: Option<String>,
 }
 
 impl TarReader {
@@ -102,6 +124,7 @@ impl TarReader {
             pid,
             fd,
             pending_path: None,
+            pending_linkpath: None,
         }
     }
 
@@ -117,11 +140,28 @@ impl TarReader {
             validate_checksum(&header)?;
 
             let name = parse_name(&header)?;
+            let link_name = parse_link_name(&header)?;
             let size = parse_octal(&header[124..136])?;
             let size = usize::try_from(size).map_err(|_| TarError::SizeOverflow)?;
             let kind = match header[156] {
                 0 | b'0' => TarEntryKind::File,
                 b'5' => TarEntryKind::Directory,
+                b'1' => {
+                    let target = self
+                        .pending_linkpath
+                        .take()
+                        .or_else(|| link_name.clone())
+                        .ok_or(TarError::InvalidArchive)?;
+                    TarEntryKind::HardLink { target }
+                }
+                b'2' => {
+                    let target = self
+                        .pending_linkpath
+                        .take()
+                        .or_else(|| link_name.clone())
+                        .ok_or(TarError::InvalidArchive)?;
+                    TarEntryKind::Symlink { target }
+                }
                 b'x' | b'g' => TarEntryKind::Metadata,
                 other => return Err(TarError::UnsupportedType(other)),
             };
@@ -129,9 +169,12 @@ impl TarReader {
             match kind {
                 TarEntryKind::Metadata => {
                     let data = self.read_entry_data(size)?;
-                    if header[156] == b'x' {
-                        if let Some(path) = parse_pax_path(&data)? {
+                    if let Some((path, linkpath)) = parse_pax_fields(&data)? {
+                        if let Some(path) = path {
                             self.pending_path = Some(path);
+                        }
+                        if let Some(linkpath) = linkpath {
+                            self.pending_linkpath = Some(linkpath);
                         }
                     }
                     continue;
@@ -209,13 +252,15 @@ struct TarEntry {
 enum TarEntryKind {
     File,
     Directory,
+    Symlink { target: String },
+    HardLink { target: String },
     Metadata,
 }
 
 fn ensure_dir_exists(path: &VfsPath) -> Result<(), TarError> {
     with_vfs(|vfs| match vfs.open_absolute(path)? {
         NodeRef::Directory(_) => Ok(()),
-        NodeRef::File(_) => Err(VfsError::NotDirectory),
+        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
     })
     .map_err(TarError::Fs)?;
     Ok(())
@@ -243,8 +288,22 @@ fn parse_name(header: &[u8]) -> Result<String, TarError> {
         .map_err(|_| TarError::InvalidUtf8)
 }
 
-fn parse_pax_path(data: &[u8]) -> Result<Option<String>, TarError> {
+fn parse_link_name(header: &[u8]) -> Result<Option<String>, TarError> {
+    let link_bytes = &header[157..257];
+    let trimmed = trim_nul(link_bytes);
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        core::str::from_utf8(&trimmed)
+            .map(|s| Some(s.to_string()))
+            .map_err(|_| TarError::InvalidUtf8)
+    }
+}
+
+fn parse_pax_fields(data: &[u8]) -> Result<Option<(Option<String>, Option<String>)>, TarError> {
     // Lines follow the format "<len> key=value\n"; len is ignored here.
+    let mut path = None;
+    let mut linkpath = None;
     for line in data.split(|b| *b == b'\n') {
         if line.is_empty() {
             continue;
@@ -256,14 +315,27 @@ fn parse_pax_path(data: &[u8]) -> Result<Option<String>, TarError> {
                 let key = &kv[..eq];
                 let value = &kv[eq + 1..];
                 if key == b"path" {
-                    return core::str::from_utf8(value)
-                        .map(|s| Some(s.to_string()))
-                        .map_err(|_| TarError::InvalidUtf8);
+                    path = Some(
+                        core::str::from_utf8(value)
+                            .map(|s| s.to_string())
+                            .map_err(|_| TarError::InvalidUtf8)?,
+                    );
+                } else if key == b"linkpath" {
+                    linkpath = Some(
+                        core::str::from_utf8(value)
+                            .map(|s| s.to_string())
+                            .map_err(|_| TarError::InvalidUtf8)?,
+                    );
                 }
             }
         }
     }
-    Ok(None)
+
+    if path.is_none() && linkpath.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some((path, linkpath)))
+    }
 }
 
 fn parse_octal(field: &[u8]) -> Result<u64, TarError> {
@@ -310,4 +382,29 @@ fn trim_nul(field: &[u8]) -> Vec<u8> {
         end -= 1;
     }
     field[..end].to_vec()
+}
+
+fn resolve_link_target(base: &VfsPath, target: &str) -> Result<VfsPath, TarError> {
+    if target.starts_with('/') {
+        return VfsPath::parse(target).map_err(TarError::Fs);
+    }
+
+    let mut comps: Vec<PathComponent> = base.components().to_vec();
+    for part in target.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if comps.pop().is_none() {
+                return Err(TarError::InvalidArchive);
+            }
+            continue;
+        }
+        if part.len() > 255 {
+            return Err(TarError::Fs(VfsError::NameTooLong));
+        }
+        comps.push(PathComponent::new(part));
+    }
+
+    Ok(VfsPath::from_components(true, comps))
 }

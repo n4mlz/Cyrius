@@ -6,6 +6,7 @@ use super::{PathComponent, VfsError};
 pub enum NodeRef {
     File(Arc<dyn File>),
     Directory(Arc<dyn Directory>),
+    Symlink(Arc<dyn Symlink>),
 }
 
 impl NodeRef {
@@ -13,6 +14,7 @@ impl NodeRef {
         match self {
             NodeRef::File(f) => f.metadata(),
             NodeRef::Directory(d) => d.metadata(),
+            NodeRef::Symlink(s) => s.metadata(),
         }
     }
 
@@ -20,6 +22,7 @@ impl NodeRef {
         match self {
             NodeRef::File(_) => FileType::File,
             NodeRef::Directory(_) => FileType::Directory,
+            NodeRef::Symlink(_) => FileType::Symlink,
         }
     }
 }
@@ -28,6 +31,7 @@ impl NodeRef {
 pub enum FileType {
     File,
     Directory,
+    Symlink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,4 +86,19 @@ pub trait Directory: Send + Sync {
     fn remove(&self, _name: &str) -> Result<(), VfsError> {
         Err(VfsError::ReadOnly)
     }
+
+    /// Creates a symbolic link entry pointing at `target`.
+    fn create_symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn Symlink>, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    /// Inserts a hard link to an existing node.
+    fn link(&self, _name: &str, _node: NodeRef) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+}
+
+pub trait Symlink: Send + Sync {
+    fn metadata(&self) -> Result<Metadata, VfsError>;
+    fn target(&self) -> Result<alloc::string::String, VfsError>;
 }
