@@ -244,27 +244,32 @@ impl ProcessTable {
         let mut inner = self.inner.lock();
         let process = inner.process_mut(pid).ok_or(VfsError::NotFound)?;
         let abs = absolute_path(raw_path, &process.fs.cwd)?;
-        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
-        let name = abs
-            .components()
-            .last()
-            .ok_or(VfsError::InvalidPath)?
-            .as_str()
-            .to_string();
-        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-        })?;
-        let component = PathComponent::new(name.as_str());
-        let file = match dir.lookup(&component) {
-            Ok(NodeRef::File(f)) => f,
-            Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => return Err(VfsError::NotFile),
-            Err(VfsError::NotFound) => dir.create_file(&name)?,
-            Err(e) => return Err(e),
-        };
-        file.truncate(0)?;
-        let _ = file.write_at(0, data)?;
-        Ok(())
+        match with_vfs(|vfs| vfs.open_absolute(&abs)) {
+            Ok(NodeRef::File(f)) => {
+                f.truncate(0)?;
+                let _ = f.write_at(0, data)?;
+                Ok(())
+            }
+            Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
+            Err(VfsError::NotFound) => {
+                let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+                let name = abs
+                    .components()
+                    .last()
+                    .ok_or(VfsError::InvalidPath)?
+                    .as_str()
+                    .to_string();
+                let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
+                    NodeRef::Directory(dir) => Ok(dir),
+                    NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+                })?;
+                let file = dir.create_file(&name)?;
+                file.truncate(0)?;
+                let _ = file.write_at(0, data)?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn create_dir(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
@@ -425,12 +430,26 @@ impl Process {
 }
 
 fn absolute_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
-    let path = VfsPath::parse(raw)?;
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        cwd.join(&path)
+    if raw.starts_with('/') {
+        return VfsPath::parse(raw);
     }
+
+    let mut components = cwd.components().to_vec();
+    for part in raw.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            components.pop();
+            continue;
+        }
+        if part.len() > 255 {
+            return Err(VfsError::NameTooLong);
+        }
+        components.push(PathComponent::new(part));
+    }
+
+    Ok(VfsPath::from_components(true, components))
 }
 
 #[derive(Clone, Copy, Debug)]
