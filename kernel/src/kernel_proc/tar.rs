@@ -39,7 +39,12 @@ pub fn extract_to_ramfs(
         .open_path(pid, archive_path)
         .map_err(TarError::Fs)?;
     let mut reader = TarReader::new(pid, fd);
-    let result = TarExtractor { pid, base }.extract(&mut reader);
+    let result = TarExtractor {
+        pid,
+        base,
+        pending_hardlinks: Vec::new(),
+    }
+    .extract(&mut reader);
     let _ = PROCESS_TABLE.close_fd(pid, fd);
     result
 }
@@ -47,10 +52,17 @@ pub fn extract_to_ramfs(
 struct TarExtractor {
     pid: ProcessId,
     base: VfsPath,
+    pending_hardlinks: Vec<PendingHardLink>,
+}
+
+struct PendingHardLink {
+    link: VfsPath,
+    parent: VfsPath,
+    target: String,
 }
 
 impl TarExtractor {
-    fn extract(&self, reader: &mut TarReader) -> Result<(), TarError> {
+    fn extract(&mut self, reader: &mut TarReader) -> Result<(), TarError> {
         while let Some(entry) = reader.next_entry()? {
             let target = self.target_path(&entry.path)?;
             match entry.kind {
@@ -76,20 +88,18 @@ impl TarExtractor {
                     let parent = target.parent().ok_or(TarError::InvalidArchive)?;
                     self.ensure_dir_chain(&parent)?;
                     reader.skip_entry_data(entry.size)?;
-                    let resolved = resolve_link_target(&parent, &src)?;
-                    PROCESS_TABLE
-                        .hard_link(
-                            self.pid,
-                            resolved.to_string().as_str(),
-                            target.to_string().as_str(),
-                        )
-                        .map_err(TarError::Fs)?;
+                    self.pending_hardlinks.push(PendingHardLink {
+                        link: target.clone(),
+                        parent: parent.clone(),
+                        target: src,
+                    });
                 }
                 TarEntryKind::Metadata => {
                     unreachable!("metadata entries are filtered in TarReader")
                 }
             }
         }
+        self.realise_hardlinks()?;
         Ok(())
     }
 
@@ -120,6 +130,32 @@ impl TarExtractor {
         PROCESS_TABLE
             .write_path(self.pid, path.to_string().as_str(), data)
             .map_err(TarError::Fs)
+    }
+
+    fn realise_hardlinks(&self) -> Result<(), TarError> {
+        for pending in &self.pending_hardlinks {
+            let first = resolve_link_target(&self.base, &pending.parent, pending.target.as_str())?;
+            match PROCESS_TABLE.hard_link(
+                self.pid,
+                first.to_string().as_str(),
+                pending.link.to_string().as_str(),
+            ) {
+                Ok(()) => continue,
+                Err(VfsError::NotFound) => {
+                    let root_rel =
+                        resolve_link_target(&self.base, &self.base, pending.target.as_str())?;
+                    PROCESS_TABLE
+                        .hard_link(
+                            self.pid,
+                            root_rel.to_string().as_str(),
+                            pending.link.to_string().as_str(),
+                        )
+                        .map_err(TarError::Fs)?;
+                }
+                Err(e) => return Err(TarError::Fs(e)),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -396,20 +432,28 @@ fn trim_nul(field: &[u8]) -> Vec<u8> {
     field[..end].to_vec()
 }
 
-fn resolve_link_target(base: &VfsPath, target: &str) -> Result<VfsPath, TarError> {
-    if target.starts_with('/') {
-        return VfsPath::parse(target).map_err(TarError::Fs);
-    }
+fn resolve_link_target(
+    base_root: &VfsPath,
+    link_parent: &VfsPath,
+    target: &str,
+) -> Result<VfsPath, TarError> {
+    let mut comps: Vec<PathComponent> = if target.starts_with('/') {
+        base_root.components().to_vec()
+    } else {
+        link_parent.components().to_vec()
+    };
+    let min_depth = base_root.components().len();
+    let path_str = if target.starts_with('/') { &target[1..] } else { target };
 
-    let mut comps: Vec<PathComponent> = base.components().to_vec();
-    for part in target.split('/') {
+    for part in path_str.split('/') {
         if part.is_empty() || part == "." {
             continue;
         }
         if part == ".." {
-            if comps.pop().is_none() {
+            if comps.len() <= min_depth {
                 return Err(TarError::InvalidArchive);
             }
+            comps.pop();
             continue;
         }
         if part.len() > 255 {
