@@ -101,6 +101,7 @@ struct FatVolume<D: BlockDevice + Send> {
     fat_start: u64,
     data_start: u64,
     cluster_size: u32,
+    max_cluster: u32,
     fat_cache: SpinLock<FatCache>,
 }
 
@@ -118,6 +119,15 @@ impl<D: BlockDevice + Send> FatVolume<D> {
             .checked_add(fat_bytes)
             .ok_or(FatError::Corrupted)?;
         let cluster_size = u32::from(bpb.bytes_per_sector) * u32::from(bpb.sectors_per_cluster);
+        let total_sectors = bpb.total_sectors();
+        let fat_sectors = u64::from(bpb.num_fats) * bpb.fat_size_sectors();
+        let data_sectors = total_sectors
+            .checked_sub(u64::from(bpb.reserved_sector_count) + fat_sectors)
+            .ok_or(FatError::Corrupted)?;
+        let data_clusters: u32 = (data_sectors / u64::from(bpb.sectors_per_cluster))
+            .try_into()
+            .map_err(|_| FatError::Corrupted)?;
+        let max_cluster = data_clusters.saturating_add(1); // clusters start at 2
 
         if cluster_size == 0 {
             return Err(FatError::Corrupted);
@@ -129,6 +139,7 @@ impl<D: BlockDevice + Send> FatVolume<D> {
             fat_start,
             data_start,
             cluster_size,
+            max_cluster,
             fat_cache: SpinLock::new(FatCache::new(bpb.bytes_per_sector as usize)),
         })
     }
@@ -146,36 +157,51 @@ impl<D: BlockDevice + Send> FatVolume<D> {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FatError> {
+        const MAX_BLOCKS_PER_READ: usize = 32; // limit DMA buffer size (~16KiB)
+
         let block_size = self.bpb.bytes_per_sector as usize;
         if buf.is_empty() {
             return Ok(());
         }
 
-        let offset_usize: usize = offset.try_into().map_err(|_| FatError::Corrupted)?;
-        let start_block = offset_usize / block_size;
-        let end = offset
-            .checked_add(buf.len() as u64)
-            .ok_or(FatError::Corrupted)?;
-        let end_usize: usize = end.try_into().map_err(|_| FatError::Corrupted)?;
-        let end_block = end_usize.div_ceil(block_size);
-        let block_count = end_block
-            .checked_sub(start_block)
-            .ok_or(FatError::Corrupted)?;
+        let mut remaining = buf.len();
+        let mut written = 0usize;
+        let mut cursor = offset;
 
-        let mut scratch = vec![0u8; block_count * block_size];
-        {
-            let mut dev = self.device.lock();
-            dev.read_blocks(start_block as u64, &mut scratch)
-                .map_err(|_| FatError::DeviceError)?;
+        while remaining > 0 {
+            let cursor_usize: usize = cursor.try_into().map_err(|_| FatError::Corrupted)?;
+            let start_block = cursor_usize / block_size;
+            let within_block = cursor_usize % block_size;
+
+            let max_bytes = remaining.min(MAX_BLOCKS_PER_READ * block_size - within_block);
+            let block_span = ((within_block + max_bytes).div_ceil(block_size)).max(1);
+
+            let num_blocks = self.device.lock().num_blocks();
+            let end_block = start_block
+                .checked_add(block_span)
+                .ok_or(FatError::Corrupted)?;
+            if u64::try_from(end_block).map_err(|_| FatError::Corrupted)? > num_blocks {
+                return Err(FatError::UnexpectedEof);
+            }
+
+            let mut scratch = vec![0u8; block_span * block_size];
+            {
+                let mut dev = self.device.lock();
+                dev.read_blocks(start_block as u64, &mut scratch)
+                    .map_err(|_| FatError::DeviceError)?;
+            }
+
+            let start = within_block;
+            let end = start + max_bytes;
+            buf[written..written + max_bytes].copy_from_slice(&scratch[start..end]);
+
+            written += max_bytes;
+            remaining -= max_bytes;
+            cursor = cursor
+                .checked_add(max_bytes as u64)
+                .ok_or(FatError::Corrupted)?;
         }
 
-        let start_offset = offset_usize % block_size;
-        let range_start = start_offset;
-        let range_end = start_offset + buf.len();
-        if range_end > scratch.len() {
-            return Err(FatError::UnexpectedEof);
-        }
-        buf.copy_from_slice(&scratch[range_start..range_end]);
         Ok(())
     }
 
@@ -210,6 +236,9 @@ impl<D: BlockDevice + Send> FatVolume<D> {
         loop {
             if current >= END_OF_CHAIN {
                 break;
+            }
+            if current >= self.max_cluster {
+                return Err(FatError::Corrupted);
             }
             chain.push(current);
             let next = self.read_fat_entry(current)?;
@@ -278,6 +307,7 @@ struct BiosParameterBlock {
     num_fats: u8,
     fat_size_32: u32,
     root_cluster: u32,
+    total_sectors_32: u32,
 }
 
 impl BiosParameterBlock {
@@ -313,8 +343,6 @@ impl BiosParameterBlock {
             return Err(FatError::InvalidBootSector);
         }
 
-        let _total_sectors = total_sectors_32;
-
         Ok(Self {
             bytes_per_sector,
             sectors_per_cluster,
@@ -322,11 +350,16 @@ impl BiosParameterBlock {
             num_fats,
             fat_size_32,
             root_cluster,
+            total_sectors_32,
         })
     }
 
     fn fat_size_sectors(&self) -> u64 {
         u64::from(self.fat_size_32)
+    }
+
+    fn total_sectors(&self) -> u64 {
+        u64::from(self.total_sectors_32)
     }
 }
 

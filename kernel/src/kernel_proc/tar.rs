@@ -570,7 +570,7 @@ mod tests {
             .to_string()
     }
 
-    fn mount_sample_tar(pid: ProcessId) -> bool {
+    fn mount_host_tar(pid: ProcessId, file: &str) -> bool {
         let mount_path = VfsPath::parse("/mnt").expect("mount path");
         let mut mounted = false;
         with_devices(|devices| {
@@ -582,10 +582,8 @@ mod tests {
                     if mount_at(mount_path.clone(), root).is_err() {
                         continue;
                     }
-                    if PROCESS_TABLE
-                        .open_path(pid, "/mnt/sample_with_links.tar")
-                        .is_ok()
-                    {
+                    let target_path = alloc::format!("/mnt/{file}");
+                    if PROCESS_TABLE.open_path(pid, target_path.as_str()).is_ok() {
                         mounted = true;
                         break;
                     }
@@ -640,7 +638,7 @@ mod tests {
 
         let pid = setup_process("tar-shell-fat");
         assert!(
-            mount_sample_tar(pid),
+            mount_host_tar(pid, "sample_with_links.tar"),
             "no FAT image containing sample_with_links.tar"
         );
         PROCESS_TABLE
@@ -657,6 +655,32 @@ mod tests {
             read_text(pid, "/documents/readme.txt"),
             "Sample document content.\n"
         );
+
+        force_replace_root(MemDirectory::new());
+    }
+
+    #[kernel_test_case]
+    fn tar_extracts_bundle_from_fat_mount_via_shell() {
+        println!("[test] tar_extracts_bundle_from_fat_mount_via_shell");
+
+        let pid = setup_process("tar-bundle-fat");
+        assert!(
+            mount_host_tar(pid, "bundle.tar"),
+            "no FAT image containing bundle.tar"
+        );
+        PROCESS_TABLE
+            .change_dir(pid, "/mnt")
+            .expect("change directory to /mnt");
+
+        shell::run_command(pid, "tar bundle.tar /out").expect("tar command via shell");
+
+        let whois = read_all(pid, "/out/rootfs/bin/whois");
+        assert!(
+            !whois.is_empty(),
+            "expected whois payload copied from bundle.tar"
+        );
+        let busybox = read_all(pid, "/out/rootfs/bin/busybox");
+        assert_eq!(busybox, whois, "hardlink busybox should mirror whois");
 
         force_replace_root(MemDirectory::new());
     }
