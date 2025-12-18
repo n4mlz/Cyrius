@@ -1,11 +1,13 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::fs::{NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
 use crate::process::{PROCESS_TABLE, ProcessId};
 
 const TAR_BLOCK_SIZE: usize = 512;
+static TAR_DEBUG: AtomicBool = AtomicBool::new(true);
 
 #[derive(Debug)]
 pub enum TarError {
@@ -50,6 +52,13 @@ pub fn extract_to_ramfs(
     result
 }
 
+/// Enable or disable verbose logging while extracting tar archives.
+///
+/// Defaults to enabled so tar progress is visible; disable when logs are too noisy.
+pub fn set_debug(enabled: bool) {
+    TAR_DEBUG.store(enabled, Ordering::Relaxed);
+}
+
 struct TarExtractor {
     pid: ProcessId,
     base: VfsPath,
@@ -66,6 +75,7 @@ impl TarExtractor {
     fn extract(&mut self, reader: &mut TarReader) -> Result<(), TarError> {
         while let Some(entry) = reader.next_entry()? {
             let target = self.target_path(&entry.path)?;
+            debug_log("entry", &entry.kind, &target);
             match entry.kind {
                 TarEntryKind::Directory => {
                     self.ensure_dir_chain(&target)?;
@@ -491,6 +501,20 @@ fn normalise_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
     }
 
     Ok(VfsPath::from_components(true, components))
+}
+
+fn debug_log(label: &str, kind: &TarEntryKind, target: &VfsPath) {
+    if !TAR_DEBUG.load(Ordering::Relaxed) {
+        return;
+    }
+    let kind_text = match kind {
+        TarEntryKind::File => "file",
+        TarEntryKind::Directory => "dir",
+        TarEntryKind::Symlink { .. } => "symlink",
+        TarEntryKind::HardLink { .. } => "hardlink",
+        TarEntryKind::Metadata => "metadata",
+    };
+    crate::println!("[tar] {label}: {kind_text} -> {}", target);
 }
 
 #[cfg(test)]
