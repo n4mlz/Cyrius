@@ -325,7 +325,6 @@ pub fn prepare_test_fat_image() -> Result<PathBuf> {
 pub fn prepare_host_mnt_image() -> Result<PathBuf> {
     const IMAGE_PATH: &str = "target/mnt.img";
     const BYTES_PER_SECTOR: u16 = 512;
-    const IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 
     let path = PathBuf::from(IMAGE_PATH);
     if let Some(parent) = path.parent() {
@@ -333,6 +332,8 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
             .with_context(|| format!("create directory {}", parent.display()))?;
     }
 
+    let image_bytes = host_mnt_image_len(Path::new("mnt"), BYTES_PER_SECTOR)
+        .context("calculate host mnt image length")?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -340,7 +341,7 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
         .truncate(true)
         .open(&path)
         .with_context(|| format!("open image {}", path.display()))?;
-    file.set_len(IMAGE_BYTES)
+    file.set_len(image_bytes)
         .with_context(|| format!("set length for {}", path.display()))?;
 
     let opts = FormatVolumeOptions::new()
@@ -374,6 +375,39 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+fn host_mnt_image_len(root: &Path, sector_size: u16) -> Result<u64> {
+    let mut total: u64 = 0;
+    if root.exists() {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            for entry in
+                fs::read_dir(&path).with_context(|| format!("read directory {}", path.display()))?
+            {
+                let entry = entry.with_context(|| "read_dir entry")?;
+                let meta = entry
+                    .metadata()
+                    .with_context(|| format!("metadata for {}", entry.path().display()))?;
+                if meta.is_dir() {
+                    stack.push(entry.path());
+                } else if meta.is_file() {
+                    total = total
+                        .checked_add(meta.len())
+                        .ok_or_else(|| anyhow::anyhow!("host mnt directory size overflow"))?;
+                }
+            }
+        }
+    }
+
+    let slack = 8 * 1024 * 1024; // leave space for FAT structures and future additions
+    let minimum = 64 * 1024 * 1024;
+    let mut bytes = total.saturating_add(slack).max(minimum);
+    let sector = u64::from(sector_size);
+    if bytes % sector != 0 {
+        bytes = (bytes / sector + 1) * sector;
+    }
+    Ok(bytes)
 }
 
 fn run_checked(cmd: &mut Command, what: &str) -> Result<ExitStatus> {

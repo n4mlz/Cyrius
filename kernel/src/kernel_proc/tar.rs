@@ -1,4 +1,5 @@
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::{NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
@@ -443,7 +444,11 @@ fn resolve_link_target(
         link_parent.components().to_vec()
     };
     let min_depth = base_root.components().len();
-    let path_str = if target.starts_with('/') { &target[1..] } else { target };
+    let path_str = if target.starts_with('/') {
+        &target[1..]
+    } else {
+        target
+    };
 
     for part in path_str.split('/') {
         if part.is_empty() || part == "." {
@@ -486,4 +491,169 @@ fn normalise_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
     }
 
     Ok(VfsPath::from_components(true, components))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::block::SharedBlockDevice;
+    use crate::device::virtio::block::with_devices;
+    use crate::fs::fat32::FatFileSystem;
+    use crate::fs::force_replace_root;
+    use crate::fs::memfs::MemDirectory;
+    use crate::fs::{VfsPath, mount_at};
+    use crate::kernel_proc::shell;
+    use crate::println;
+    use crate::process::PROCESS_TABLE;
+    use crate::test::kernel_test_case;
+
+    const SAMPLE_WITH_LINKS: &[u8] = include_bytes!("../../../mnt/sample_with_links.tar");
+    const BUNDLE_TAR: &[u8] = include_bytes!("../../../mnt/bundle.tar");
+
+    fn setup_process(name: &'static str) -> ProcessId {
+        let _ = PROCESS_TABLE.init_kernel();
+        force_replace_root(MemDirectory::new());
+        PROCESS_TABLE
+            .create_kernel_process(name)
+            .expect("create process")
+    }
+
+    fn write_archive(pid: ProcessId, path: &str, data: &[u8]) {
+        PROCESS_TABLE
+            .write_path(pid, path, data)
+            .expect("write archive into memfs");
+    }
+
+    fn read_all(pid: ProcessId, path: &str) -> Vec<u8> {
+        let fd = PROCESS_TABLE.open_path(pid, path).expect("open path");
+        let mut buf = [0u8; 512];
+        let mut out = Vec::new();
+        loop {
+            let read = PROCESS_TABLE.read_fd(pid, fd, &mut buf).expect("read data");
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read]);
+        }
+        let _ = PROCESS_TABLE.close_fd(pid, fd);
+        out
+    }
+
+    fn read_text(pid: ProcessId, path: &str) -> String {
+        let bytes = read_all(pid, path);
+        core::str::from_utf8(&bytes)
+            .expect("utf-8 content")
+            .to_string()
+    }
+
+    fn mount_sample_tar(pid: ProcessId) -> bool {
+        let mount_path = VfsPath::parse("/mnt").expect("mount path");
+        let mut mounted = false;
+        with_devices(|devices| {
+            for dev in devices {
+                let shared = SharedBlockDevice::from_arc(dev.clone());
+                if let Ok(fs) = FatFileSystem::new(shared) {
+                    force_replace_root(MemDirectory::new());
+                    let root: Arc<dyn crate::fs::Directory> = fs.root_dir();
+                    if mount_at(mount_path.clone(), root).is_err() {
+                        continue;
+                    }
+                    if PROCESS_TABLE
+                        .open_path(pid, "/mnt/sample_with_links.tar")
+                        .is_ok()
+                    {
+                        mounted = true;
+                        break;
+                    }
+                }
+            }
+        });
+        if !mounted {
+            force_replace_root(MemDirectory::new());
+        }
+        mounted
+    }
+
+    #[kernel_test_case]
+    fn tar_extracts_sample_with_links_into_root() {
+        println!("[test] tar_extracts_sample_with_links_into_root");
+
+        let pid = setup_process("tar-sample");
+        write_archive(pid, "/sample_with_links.tar", SAMPLE_WITH_LINKS);
+
+        extract_to_ramfs(pid, "/sample_with_links.tar", Some("/")).expect("extract sample tar");
+
+        assert_eq!(
+            read_text(pid, "/original.txt"),
+            "Hello, World!\nThis is a sample file.\n"
+        );
+        assert_eq!(
+            read_text(pid, "/hardlink.txt"),
+            "Hello, World!\nThis is a sample file.\n"
+        );
+        assert_eq!(
+            read_text(pid, "/documents/readme.txt"),
+            "Sample document content.\n"
+        );
+        assert_eq!(
+            read_text(pid, "/link_to_readme"),
+            "Sample document content.\n"
+        );
+        assert_eq!(
+            read_text(pid, "/link_to_docs/readme.txt"),
+            "Sample document content.\n"
+        );
+        assert_eq!(read_text(pid, "/documents/abs_link"), "test\n");
+        assert_eq!(
+            read_text(pid, "/data/hardlink_to_original.txt"),
+            "Hello, World!\nThis is a sample file.\n"
+        );
+    }
+
+    #[kernel_test_case]
+    fn tar_extracts_sample_from_fat_mount_via_shell() {
+        println!("[test] tar_extracts_sample_from_fat_mount_via_shell");
+
+        let pid = setup_process("tar-shell-fat");
+        assert!(
+            mount_sample_tar(pid),
+            "no FAT image containing sample_with_links.tar"
+        );
+        PROCESS_TABLE
+            .change_dir(pid, "/mnt")
+            .expect("change directory to /mnt");
+
+        shell::run_command(pid, "tar sample_with_links.tar /").expect("tar command via shell");
+
+        assert_eq!(
+            read_text(pid, "/original.txt"),
+            "Hello, World!\nThis is a sample file.\n"
+        );
+        assert_eq!(
+            read_text(pid, "/documents/readme.txt"),
+            "Sample document content.\n"
+        );
+
+        force_replace_root(MemDirectory::new());
+    }
+
+    #[kernel_test_case]
+    fn tar_extracts_bundle_tar() {
+        println!("[test] tar_extracts_bundle_tar");
+
+        let pid = setup_process("tar-bundle");
+        write_archive(pid, "/bundle.tar", BUNDLE_TAR);
+
+        extract_to_ramfs(pid, "/bundle.tar", Some("/")).expect("extract bundle tar");
+
+        let whois = read_all(pid, "/rootfs/bin/whois");
+        assert!(
+            !whois.is_empty(),
+            "expected non-empty busybox payload for whois"
+        );
+        let busybox = read_all(pid, "/rootfs/bin/busybox");
+        let sh = read_all(pid, "/rootfs/bin/sh");
+        assert_eq!(busybox, whois, "busybox hardlink should mirror target");
+        assert_eq!(sh, whois, "sh hardlink should mirror target");
+    }
 }
