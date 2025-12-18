@@ -73,6 +73,7 @@ struct PendingHardLink {
 
 impl TarExtractor {
     fn extract(&mut self, reader: &mut TarReader) -> Result<(), TarError> {
+        crate::println!("[tar] extract begin base={}", self.base);
         while let Some(entry) = reader.next_entry()? {
             let target = self.target_path(&entry.path)?;
             debug_log("entry", &entry.kind, &target);
@@ -84,8 +85,18 @@ impl TarExtractor {
                 TarEntryKind::File => {
                     let parent = target.parent().ok_or(TarError::InvalidArchive)?;
                     self.ensure_dir_chain(&parent)?;
+                    if TAR_DEBUG.load(Ordering::Relaxed) {
+                        crate::println!(
+                            "[tar] write file start path={} size={}",
+                            target,
+                            entry.size
+                        );
+                    }
                     let data = reader.read_entry_data(entry.size)?;
                     self.write_file(&target, &data)?;
+                    if TAR_DEBUG.load(Ordering::Relaxed) {
+                        crate::println!("[tar] write file done path={}", target);
+                    }
                 }
                 TarEntryKind::Symlink { target: link } => {
                     let parent = target.parent().ok_or(TarError::InvalidArchive)?;
@@ -111,6 +122,9 @@ impl TarExtractor {
             }
         }
         self.realise_hardlinks()?;
+        if TAR_DEBUG.load(Ordering::Relaxed) {
+            crate::println!("[tar] extract complete base={}", self.base);
+        }
         Ok(())
     }
 
@@ -146,6 +160,14 @@ impl TarExtractor {
     fn realise_hardlinks(&self) -> Result<(), TarError> {
         for pending in &self.pending_hardlinks {
             let first = resolve_link_target(&self.base, &pending.parent, pending.target.as_str())?;
+            if TAR_DEBUG.load(Ordering::Relaxed) {
+                crate::println!(
+                    "[tar] hardlink target={} link={} resolved={}",
+                    pending.target,
+                    pending.link,
+                    first
+                );
+            }
             match PROCESS_TABLE.hard_link(
                 self.pid,
                 first.to_string().as_str(),
@@ -175,6 +197,7 @@ struct TarReader {
     fd: crate::fs::Fd,
     pending_path: Option<String>,
     pending_linkpath: Option<String>,
+    cursor: u64,
 }
 
 impl TarReader {
@@ -184,6 +207,7 @@ impl TarReader {
             fd,
             pending_path: None,
             pending_linkpath: None,
+            cursor: 0,
         }
     }
 
@@ -269,7 +293,17 @@ impl TarReader {
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), TarError> {
+        let start_offset = self.cursor;
         let mut filled = 0;
+        let log_interval = 64 * 1024;
+        let mut next_log = log_interval;
+        if TAR_DEBUG.load(Ordering::Relaxed) && buf.len() >= TAR_BLOCK_SIZE {
+            crate::println!(
+                "[tar] read_exact offset={} len={}",
+                self.cursor,
+                buf.len()
+            );
+        }
         while filled < buf.len() {
             let read = PROCESS_TABLE
                 .read_fd(self.pid, self.fd, &mut buf[filled..])
@@ -278,11 +312,32 @@ impl TarReader {
                 return Err(TarError::UnexpectedEof);
             }
             filled += read;
+            self.cursor = self
+                .cursor
+                .checked_add(read as u64)
+                .ok_or(TarError::SizeOverflow)?;
+            if TAR_DEBUG.load(Ordering::Relaxed)
+                && buf.len() > log_interval
+                && filled >= next_log.min(buf.len())
+            {
+                crate::println!(
+                    "[tar] read progress offset={} +{}/{}",
+                    start_offset,
+                    filled,
+                    buf.len()
+                );
+                next_log = next_log
+                    .checked_add(log_interval)
+                    .unwrap_or(usize::MAX);
+            }
         }
         Ok(())
     }
 
     fn skip_bytes(&mut self, mut bytes: usize) -> Result<(), TarError> {
+        if TAR_DEBUG.load(Ordering::Relaxed) && bytes > 0 {
+            crate::println!("[tar] skip_bytes offset={} len={}", self.cursor, bytes);
+        }
         let mut scratch = [0u8; 256];
         while bytes > 0 {
             let chunk = bytes.min(scratch.len());

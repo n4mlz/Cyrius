@@ -15,7 +15,9 @@ use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{fence, AtomicBool, Ordering};
+
+const VIRTIO_BLK_DEBUG: bool = true;
 
 const VIRTIO_BLOCK_QUEUE_INDEX: u16 = 0;
 const MAX_QUEUE_SIZE: u16 = 128;
@@ -226,6 +228,14 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
 
     fn io_read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), VirtioBlkError> {
         let sector = self.validate_buffer(lba, buffer.len())?;
+        if VIRTIO_BLK_DEBUG {
+            crate::println!(
+                "[virtio-blk] read submit lba={} sectors={} len={}",
+                lba,
+                buffer.len() / self.block_size as usize,
+                buffer.len()
+            );
+        }
         let mut request = RequestBuffers::new(&mut self.dma, buffer.len())?;
         request.write_header(RequestType::In, sector);
         let status = self
@@ -246,6 +256,14 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             );
             return Err(VirtioBlkError::DeviceStatus(status));
         }
+        if VIRTIO_BLK_DEBUG {
+            crate::println!(
+                "[virtio-blk] read complete lba={} sectors={} len={}",
+                lba,
+                buffer.len() / self.block_size as usize,
+                buffer.len()
+            );
+        }
         request.copy_into(buffer);
         Ok(())
     }
@@ -255,6 +273,14 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             return Err(VirtioBlkError::ReadOnly);
         }
         let sector = self.validate_buffer(lba, buffer.len())?;
+        if VIRTIO_BLK_DEBUG {
+            crate::println!(
+                "[virtio-blk] write submit lba={} sectors={} len={}",
+                lba,
+                buffer.len() / self.block_size as usize,
+                buffer.len()
+            );
+        }
         let mut request = RequestBuffers::new(&mut self.dma, buffer.len())?;
         request.write_header(RequestType::Out, sector);
         request.copy_from(buffer);
@@ -265,6 +291,14 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
                 buffer.len()
             );
             return Err(VirtioBlkError::DeviceStatus(status));
+        }
+        if VIRTIO_BLK_DEBUG {
+            crate::println!(
+                "[virtio-blk] write complete lba={} sectors={} len={}",
+                lba,
+                buffer.len() / self.block_size as usize,
+                buffer.len()
+            );
         }
         Ok(())
     }
@@ -291,7 +325,16 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
+        fence(Ordering::SeqCst);
         self.queue.push(0);
+        fence(Ordering::SeqCst);
+        if VIRTIO_BLK_DEBUG {
+            crate::println!(
+                "[virtio-blk] notify queue index={} len={}",
+                VIRTIO_BLOCK_QUEUE_INDEX,
+                buffers.data_len()
+            );
+        }
         self.transport
             .notify_queue(VIRTIO_BLOCK_QUEUE_INDEX)
             .map_err(VirtioBlkError::Transport)?;
@@ -299,12 +342,44 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         if let Some(hook) = self.completion_hook {
             hook(&mut self.queue, buffers);
         }
-        let _completion = if let Some(irq) = self.queue_irq {
-            self.wait_for_completion(irq)
-        } else {
-            self.queue.wait_for_used()
-        };
+        // Poll for completions to sidestep lost-interrupt issues seen under heavy load.
+        let _completion = self.wait_for_used_with_timeout(buffers.data_len())?;
+        if VIRTIO_BLK_DEBUG {
+            crate::println!(
+                "[virtio-blk] completion observed status=0x{:02x}",
+                buffers.status()
+            );
+        }
         Ok(buffers.status())
+    }
+
+    fn wait_for_used_with_timeout(&mut self, data_len: usize) -> Result<UsedElem, VirtioBlkError> {
+        const SPIN_LIMIT: usize = 5_000_000;
+        let mut spins: usize = 0;
+        loop {
+            if let Some(entry) = self.queue.pop_used() {
+                return Ok(entry);
+            }
+            spins = spins.wrapping_add(1);
+            if VIRTIO_BLK_DEBUG && spins.is_multiple_of(1_000_000) {
+                crate::println!(
+                    "[virtio-blk] waiting for completion len={} spins={} used_idx={}",
+                    data_len,
+                    spins,
+                    self.queue.used_idx
+                );
+            }
+            if spins >= SPIN_LIMIT {
+                crate::println!(
+                    "[virtio-blk] completion timeout len={} spins={} used_idx={}",
+                    data_len,
+                    spins,
+                    self.queue.used_idx
+                );
+                return Err(VirtioBlkError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
     }
 
     fn prepare_descriptors(&mut self, buffers: &RequestBuffers, direction: IoDirection) {
@@ -388,7 +463,9 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             if let Some(entry) = self.queue.pop_used() {
                 return entry;
             }
-            irq.wait();
+            // IRQs are still enabled, so a used entry will eventually become visible even if the
+            // interrupt itself is lost. Busy-wait here to avoid blocking forever on `irq.wait()`.
+            irq.wait_relaxed();
         }
     }
 
@@ -473,6 +550,7 @@ pub enum VirtioBlkError {
     FlushUnsupported,
     Interrupt(VirtioIrqError),
     InterruptController(InterruptError),
+    Timeout,
 }
 
 impl From<TransportError> for VirtioBlkError {
@@ -535,14 +613,15 @@ impl QueueState {
 
     fn pop_used(&mut self) -> Option<UsedElem> {
         let mut slices = self.memory.slices();
-        let used_idx = slices.used.idx();
-        if used_idx == self.used_idx {
+        let device_used = slices.used.idx();
+        if device_used == self.used_idx {
             return None;
         }
-        let slot = ((used_idx.wrapping_sub(1)) % self.size) as usize;
+
+        let slot = (self.used_idx % self.size) as usize;
         let ring = slices.used.ring();
         let entry = unsafe { core::ptr::read_volatile(&ring[slot]) };
-        self.used_idx = used_idx;
+        self.used_idx = self.used_idx.wrapping_add(1);
         Some(entry)
     }
 }
@@ -575,6 +654,12 @@ impl QueueInterrupt {
             }
             core::hint::spin_loop();
         }
+    }
+
+    /// Polls the pending flag once; intended for busy-wait loops where interrupts may be lost.
+    fn wait_relaxed(&self) {
+        let _ = self.pending.swap(false, Ordering::AcqRel);
+        core::hint::spin_loop();
     }
 
     fn notify(&self) {
