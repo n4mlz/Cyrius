@@ -187,8 +187,17 @@ impl<D: BlockDevice + Send> FatVolume<D> {
             let mut scratch = vec![0u8; block_span * block_size];
             {
                 let mut dev = self.device.lock();
-                dev.read_blocks(start_block as u64, &mut scratch)
-                    .map_err(|_| FatError::DeviceError)?;
+                if let Err(err) = dev.read_blocks(start_block as u64, &mut scratch) {
+                    crate::println!(
+                        "[fat32] read error {:?} blocks={} start={} cursor={} remaining={}",
+                        err,
+                        block_span,
+                        start_block,
+                        cursor,
+                        remaining
+                    );
+                    return Err(FatError::DeviceError);
+                }
             }
 
             let start = within_block;

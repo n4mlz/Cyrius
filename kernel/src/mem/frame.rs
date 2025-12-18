@@ -106,6 +106,9 @@ impl BootInfoFrameAllocator {
         if size != PageSize::SIZE_4K || count == 0 {
             return None;
         }
+        if let Some(run) = self.take_recycled_run(count) {
+            return Some(run);
+        }
         self.allocate_run(count)
     }
 
@@ -190,6 +193,40 @@ impl BootInfoFrameAllocator {
 
             return Some(Page::new(phys, PageSize::SIZE_4K));
         }
+    }
+
+    fn take_recycled_run(&mut self, count: usize) -> Option<Vec<Page<PhysAddr>>> {
+        if self.recycled.len() < count {
+            return None;
+        }
+
+        // Prefer fulfilling contiguous requests from recycled frames to avoid exhausting
+        // the underlying allocator during short-lived DMA transfers.
+        self.recycled.sort_by_key(|page| page.start.as_raw());
+
+        let mut run_start = 0usize;
+        let mut run_len = 0usize;
+        let mut prev_addr: Option<usize> = None;
+
+        for (idx, page) in self.recycled.iter().enumerate() {
+            let addr = page.start.as_raw();
+            match prev_addr {
+                Some(prev) if addr == prev + FRAME_SIZE as usize => {
+                    run_len += 1;
+                }
+                _ => {
+                    run_start = idx;
+                    run_len = 1;
+                }
+            }
+            prev_addr = Some(addr);
+
+            if run_len == count {
+                return Some(self.recycled.drain(run_start..run_start + count).collect());
+            }
+        }
+
+        None
     }
 
     fn allocate_run(&mut self, count: usize) -> Option<Vec<Page<PhysAddr>>> {
@@ -458,5 +495,27 @@ mod tests {
             .allocate(PageSize::SIZE_4K)
             .expect("recycled frame should be available");
         assert_eq!(recycled.start.as_raw(), 0x1000);
+    }
+
+    #[kernel_test_case]
+    fn contiguous_allocation_reuses_recycled_runs() {
+        println!("[test] contiguous_allocation_reuses_recycled_runs");
+
+        static REGIONS: [MemoryRegion; 1] = [region(0x1000, 0x9000, MemoryRegionKind::Usable)];
+        let mut allocator = BootInfoFrameAllocator::new(&REGIONS);
+
+        let run = allocator
+            .allocate_contiguous(2, PageSize::SIZE_4K)
+            .expect("initial contiguous allocation");
+        let expected: Vec<_> = run.iter().map(|page| page.start.as_raw()).collect();
+        for frame in run {
+            allocator.deallocate(frame);
+        }
+
+        let recycled = allocator
+            .allocate_contiguous(2, PageSize::SIZE_4K)
+            .expect("recycled contiguous allocation");
+        let observed: Vec<_> = recycled.iter().map(|page| page.start.as_raw()).collect();
+        assert_eq!(observed, expected);
     }
 }

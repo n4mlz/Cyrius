@@ -30,7 +30,7 @@ use crate::arch::{
     Arch,
     api::{ArchDevice, ArchMemory},
 };
-use crate::device::block::SharedBlockDevice;
+use crate::device::block::{BlockDevice, SharedBlockDevice};
 use crate::device::char::uart::Uart;
 use crate::device::virtio::block;
 use crate::fs::{VfsPath, fat32::FatFileSystem, memfs::MemDirectory, mount_at, mount_root};
@@ -200,19 +200,22 @@ fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
 fn init_filesystems() {
     let root = MemDirectory::new();
     mount_root(root.clone()).expect("mount memfs root");
-    let mut mounted = false;
+    let mut best: Option<(
+        u64,
+        alloc::sync::Arc<dyn crate::fs::Directory>,
+        alloc::string::String,
+    )> = None;
     block::with_devices(|devices| {
         for dev in devices {
             let shared = SharedBlockDevice::from_arc(dev.clone());
             let name = shared.label().to_string();
+            let capacity = shared.num_blocks();
             match FatFileSystem::new(shared) {
                 Ok(fs) => {
                     let fat_root: alloc::sync::Arc<dyn crate::fs::Directory> = fs.root_dir();
-                    let mount_path = VfsPath::parse("/mnt").expect("mount path");
-                    if mount_at(mount_path, fat_root).is_ok() {
-                        println!("[vfs] mounted FAT32 at /mnt from {name}");
-                        mounted = true;
-                        break;
+                    match &best {
+                        Some((best_cap, _, _)) if *best_cap >= capacity => {}
+                        _ => best = Some((capacity, fat_root, name)),
                     }
                 }
                 Err(err) => {
@@ -221,6 +224,15 @@ fn init_filesystems() {
             }
         }
     });
+
+    let mut mounted = false;
+    if let Some((cap, root_dir, name)) = best {
+        let mount_path = VfsPath::parse("/mnt").expect("mount path");
+        if mount_at(mount_path, root_dir).is_ok() {
+            println!("[vfs] mounted FAT32 at /mnt from {name} ({} blocks)", cap);
+            mounted = true;
+        }
+    }
 
     if !mounted {
         println!("[vfs] no FAT32 root mounted");

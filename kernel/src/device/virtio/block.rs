@@ -228,8 +228,22 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         let sector = self.validate_buffer(lba, buffer.len())?;
         let mut request = RequestBuffers::new(&mut self.dma, buffer.len())?;
         request.write_header(RequestType::In, sector);
-        let status = self.submit_request(&mut request, IoDirection::Read)?;
+        let status = self
+            .submit_request(&mut request, IoDirection::Read)
+            .map_err(|err| {
+                crate::println!(
+                    "[virtio-blk] submit error {:?} lba={} len={}",
+                    err,
+                    sector,
+                    buffer.len()
+                );
+                err
+            })?;
         if status != 0 {
+            crate::println!(
+                "[virtio-blk] read error status=0x{status:02x} lba={sector} len={}",
+                buffer.len()
+            );
             return Err(VirtioBlkError::DeviceStatus(status));
         }
         request.copy_into(buffer);
@@ -246,6 +260,10 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         request.copy_from(buffer);
         let status = self.submit_request(&mut request, IoDirection::Write)?;
         if status != 0 {
+            crate::println!(
+                "[virtio-blk] write error status=0x{status:02x} lba={sector} len={}",
+                buffer.len()
+            );
             return Err(VirtioBlkError::DeviceStatus(status));
         }
         Ok(())
@@ -630,14 +648,19 @@ impl RequestBuffers {
         let total = header_size + data_len + status_size;
         let page_bytes = PageSize::SIZE_4K.bytes();
         let size = align_up(total, page_bytes);
-        let region = provider.allocate(size, page_bytes)?;
-        Ok(Self {
+        let mut region = provider.allocate(size, page_bytes)?;
+        region.as_bytes_mut().fill(0);
+        let status_offset = header_size + data_len;
+        let this = Self {
             region,
             header_offset: 0,
             data_offset: header_size,
             data_len,
-            status_offset: header_size + data_len,
-        })
+            status_offset,
+        };
+        let mut this = this;
+        unsafe { core::ptr::write_volatile(this.status_ptr(), 0xFF) };
+        Ok(this)
     }
 
     fn header_phys(&self) -> PhysAddr {
