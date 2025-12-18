@@ -158,7 +158,7 @@ impl<D: BlockDevice + Send> FatVolume<D> {
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FatError> {
         const MAX_BLOCKS_PER_READ: usize = 32; // limit DMA buffer size (~16KiB)
-        const FAT_DEBUG: bool = true;
+        const FAT_DEBUG: bool = false;
 
         let block_size = self.bpb.bytes_per_sector as usize;
         if buf.is_empty() {
@@ -188,17 +188,6 @@ impl<D: BlockDevice + Send> FatVolume<D> {
             let mut scratch = vec![0u8; block_span * block_size];
             {
                 let mut dev = self.device.lock();
-                if FAT_DEBUG {
-                    crate::println!(
-                        "[fat32] read_at offset={} len={} start_block={} span={} within={} remaining={}",
-                        cursor,
-                        buf.len(),
-                        start_block,
-                        block_span,
-                        within_block,
-                        remaining
-                    );
-                }
                 if let Err(err) = dev.read_blocks(start_block as u64, &mut scratch) {
                     crate::println!(
                         "[fat32] read error {:?} blocks={} start={} cursor={} remaining={}",
@@ -209,14 +198,6 @@ impl<D: BlockDevice + Send> FatVolume<D> {
                         remaining
                     );
                     return Err(FatError::DeviceError);
-                }
-                if FAT_DEBUG {
-                    crate::println!(
-                        "[fat32] read_at complete start_block={} span={} first_byte={:02x}",
-                        start_block,
-                        block_span,
-                        scratch.get(0).copied().unwrap_or(0)
-                    );
                 }
             }
 

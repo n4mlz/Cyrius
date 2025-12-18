@@ -1,13 +1,11 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use crate::fs::{NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
 use crate::process::{PROCESS_TABLE, ProcessId};
 
 const TAR_BLOCK_SIZE: usize = 512;
-static TAR_DEBUG: AtomicBool = AtomicBool::new(true);
+const TAR_VERBOSE: bool = false;
 
 #[derive(Debug)]
 pub enum TarError {
@@ -52,13 +50,6 @@ pub fn extract_to_ramfs(
     result
 }
 
-/// Enable or disable verbose logging while extracting tar archives.
-///
-/// Defaults to enabled so tar progress is visible; disable when logs are too noisy.
-pub fn set_debug(enabled: bool) {
-    TAR_DEBUG.store(enabled, Ordering::Relaxed);
-}
-
 struct TarExtractor {
     pid: ProcessId,
     base: VfsPath,
@@ -73,7 +64,6 @@ struct PendingHardLink {
 
 impl TarExtractor {
     fn extract(&mut self, reader: &mut TarReader) -> Result<(), TarError> {
-        crate::println!("[tar] extract begin base={}", self.base);
         while let Some(entry) = reader.next_entry()? {
             let target = self.target_path(&entry.path)?;
             debug_log("entry", &entry.kind, &target);
@@ -85,18 +75,8 @@ impl TarExtractor {
                 TarEntryKind::File => {
                     let parent = target.parent().ok_or(TarError::InvalidArchive)?;
                     self.ensure_dir_chain(&parent)?;
-                    if TAR_DEBUG.load(Ordering::Relaxed) {
-                        crate::println!(
-                            "[tar] write file start path={} size={}",
-                            target,
-                            entry.size
-                        );
-                    }
                     let data = reader.read_entry_data(entry.size)?;
                     self.write_file(&target, &data)?;
-                    if TAR_DEBUG.load(Ordering::Relaxed) {
-                        crate::println!("[tar] write file done path={}", target);
-                    }
                 }
                 TarEntryKind::Symlink { target: link } => {
                     let parent = target.parent().ok_or(TarError::InvalidArchive)?;
@@ -122,9 +102,6 @@ impl TarExtractor {
             }
         }
         self.realise_hardlinks()?;
-        if TAR_DEBUG.load(Ordering::Relaxed) {
-            crate::println!("[tar] extract complete base={}", self.base);
-        }
         Ok(())
     }
 
@@ -160,7 +137,7 @@ impl TarExtractor {
     fn realise_hardlinks(&self) -> Result<(), TarError> {
         for pending in &self.pending_hardlinks {
             let first = resolve_link_target(&self.base, &pending.parent, pending.target.as_str())?;
-            if TAR_DEBUG.load(Ordering::Relaxed) {
+            if TAR_VERBOSE {
                 crate::println!(
                     "[tar] hardlink target={} link={} resolved={}",
                     pending.target,
@@ -297,7 +274,7 @@ impl TarReader {
         let mut filled = 0;
         let log_interval = 64 * 1024;
         let mut next_log = log_interval;
-        if TAR_DEBUG.load(Ordering::Relaxed) && buf.len() >= TAR_BLOCK_SIZE {
+        if TAR_VERBOSE && buf.len() >= TAR_BLOCK_SIZE {
             crate::println!(
                 "[tar] read_exact offset={} len={}",
                 self.cursor,
@@ -316,7 +293,7 @@ impl TarReader {
                 .cursor
                 .checked_add(read as u64)
                 .ok_or(TarError::SizeOverflow)?;
-            if TAR_DEBUG.load(Ordering::Relaxed)
+            if TAR_VERBOSE
                 && buf.len() > log_interval
                 && filled >= next_log.min(buf.len())
             {
@@ -335,7 +312,7 @@ impl TarReader {
     }
 
     fn skip_bytes(&mut self, mut bytes: usize) -> Result<(), TarError> {
-        if TAR_DEBUG.load(Ordering::Relaxed) && bytes > 0 {
+        if TAR_VERBOSE && bytes > 0 {
             crate::println!("[tar] skip_bytes offset={} len={}", self.cursor, bytes);
         }
         let mut scratch = [0u8; 256];
@@ -559,7 +536,7 @@ fn normalise_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
 }
 
 fn debug_log(label: &str, kind: &TarEntryKind, target: &VfsPath) {
-    if !TAR_DEBUG.load(Ordering::Relaxed) {
+    if !TAR_VERBOSE {
         return;
     }
     let kind_text = match kind {

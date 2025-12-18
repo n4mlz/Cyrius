@@ -15,9 +15,9 @@ use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
-use core::sync::atomic::{fence, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
-const VIRTIO_BLK_DEBUG: bool = true;
+const VIRTIO_BLK_DEBUG: bool = false;
 
 const VIRTIO_BLOCK_QUEUE_INDEX: u16 = 0;
 const MAX_QUEUE_SIZE: u16 = 128;
@@ -325,9 +325,7 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
-        fence(Ordering::SeqCst);
         self.queue.push(0);
-        fence(Ordering::SeqCst);
         if VIRTIO_BLK_DEBUG {
             crate::println!(
                 "[virtio-blk] notify queue index={} len={}",
@@ -343,7 +341,7 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             hook(&mut self.queue, buffers);
         }
         // Poll for completions to sidestep lost-interrupt issues seen under heavy load.
-        let _completion = self.wait_for_used_with_timeout(buffers.data_len())?;
+        let _completion = self.queue.wait_for_used();
         if VIRTIO_BLK_DEBUG {
             crate::println!(
                 "[virtio-blk] completion observed status=0x{:02x}",
@@ -351,35 +349,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             );
         }
         Ok(buffers.status())
-    }
-
-    fn wait_for_used_with_timeout(&mut self, data_len: usize) -> Result<UsedElem, VirtioBlkError> {
-        const SPIN_LIMIT: usize = 5_000_000;
-        let mut spins: usize = 0;
-        loop {
-            if let Some(entry) = self.queue.pop_used() {
-                return Ok(entry);
-            }
-            spins = spins.wrapping_add(1);
-            if VIRTIO_BLK_DEBUG && spins.is_multiple_of(1_000_000) {
-                crate::println!(
-                    "[virtio-blk] waiting for completion len={} spins={} used_idx={}",
-                    data_len,
-                    spins,
-                    self.queue.used_idx
-                );
-            }
-            if spins >= SPIN_LIMIT {
-                crate::println!(
-                    "[virtio-blk] completion timeout len={} spins={} used_idx={}",
-                    data_len,
-                    spins,
-                    self.queue.used_idx
-                );
-                return Err(VirtioBlkError::Timeout);
-            }
-            core::hint::spin_loop();
-        }
     }
 
     fn prepare_descriptors(&mut self, buffers: &RequestBuffers, direction: IoDirection) {
@@ -550,7 +519,6 @@ pub enum VirtioBlkError {
     FlushUnsupported,
     Interrupt(VirtioIrqError),
     InterruptController(InterruptError),
-    Timeout,
 }
 
 impl From<TransportError> for VirtioBlkError {
