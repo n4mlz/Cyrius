@@ -15,6 +15,7 @@
 
 ## Thread Model
 - `ThreadControl` encapsulates `ThreadId`, name, owning `ProcessId`, CPU context, an address-space handle, optional kernel stack, and scheduling state (`Ready`, `Running`, `Idle`, `Terminated`).
+- Each `ThreadControl` captures the owning process's ABI at creation time; the scheduler uses this snapshot to update the syscall dispatcher on context switches without touching the process table.
 - Kernel threads receive dedicated stacks allocated via `KernelStack`; the bootstrap thread represents the boot CPU and reuses its existing stack.
 - User threads layer a lazily allocated `UserStack` (via `ArchThread::UserStack`) on top of the kernel stack so ring transitions land on a thread-private stack while user-mode execution stays in the lower half of the address space.
 - User threads can also be seeded with a pre-built user stack pointer (used by the Linux ELF loader) via `spawn_user_thread_with_stack`; this bypasses the default top-of-stack calculation and honours the loader’s prepared layout.

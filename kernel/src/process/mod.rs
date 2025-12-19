@@ -165,6 +165,11 @@ impl ProcessTable {
         inner.process(pid).map(|proc| proc.abi)
     }
 
+    /// Set the ABI used by future threads spawned for the process.
+    ///
+    /// # Notes
+    /// The scheduler snapshots the ABI into each thread at creation time; updating the ABI after
+    /// threads exist does not retarget those threads.
     pub fn set_abi(&self, pid: ProcessId, abi: Abi) -> Result<(), ProcessError> {
         let mut inner = self.inner.lock();
         let process = inner.process_mut(pid).ok_or(ProcessError::NotFound)?;
