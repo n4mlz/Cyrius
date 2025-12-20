@@ -442,6 +442,6 @@ mod tests {
         if rem == 0 {
             return;
         }
-        buf.extend(core::iter::repeat(0u8).take(512 - rem));
+        buf.extend(core::iter::repeat_n(0u8, 512 - rem));
     }
 }

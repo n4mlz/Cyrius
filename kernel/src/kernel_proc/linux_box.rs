@@ -57,8 +57,7 @@ pub fn run_and_wait(origin_pid: ProcessId, raw_path: &str) -> Result<(), RunErro
 }
 
 fn launch_process(path: &str) -> Result<ProcessId, RunError> {
-    let pid = PROCESS_TABLE.create_user_process("linux-proc")?;
-    PROCESS_TABLE.set_abi(pid, Abi::Linux)?;
+    let pid = PROCESS_TABLE.create_user_process_with_abi("linux-proc", Abi::Linux)?;
 
     let program = linux::load_elf(pid, path)?;
     let _tid = SCHEDULER.spawn_user_thread_with_stack(

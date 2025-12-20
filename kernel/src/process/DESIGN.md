@@ -12,13 +12,12 @@
 - PIDs are `u64`, allocated monotonically; overflow is treated as a logic bug that panics.
 - Process lookup is linear today. If the number of processes grows, we plan to swap in a different structure (e.g. `BTreeMap`).
 
-### Process
-- Stores `id`, `_name`, `address_space`, `_state`, and a `threads` list.
+### ProcessControl
+- Stored as `Arc<ProcessControl>` so threads can hold a direct reference to their owning process without touching the global table.
+- Stores `id`, `_name`, `address_space`, `state`, `threads`, `fs`, and `abi`.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
-- `ProcessState` currently exposes only `Active`. Expanded lifecycle states (e.g. `Sleeping`, `Zombie`) are still future work.
-- Fields prefixed with `_` are reserved for upcoming functionality, so they remain even if unused today.
-- `Process::user` mirrors kernel setup for now, provisioning a PID for user-mode threads while still sharing the kernel address space until proper duplication arrives.
-- `abi` tracks whether the process should use the host or Linux syscall table; the linux-box launcher sets this to `Abi::Linux` for Linux guests so threads inherit the correct ABI.
+- `ProcessState` now spans `Created`, `Ready`, `Running`, `Waiting`, `Terminated`; transitions are simple and primarily driven by thread attach/detach and scheduler ticks.
+- `abi` is fixed at process creation; callers choose host or Linux ABI up front (linux-box creates a Linux ABI process).
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.
@@ -32,7 +31,7 @@
 - `thread_count` is a lightweight helper for statistics and debugging.
 - `address_space(pid)` clones the stored handle so scheduling and memory management components can operate on the same CR3 state.
 - Process lifetime management (e.g. reclaiming a process when its thread list becomes empty) is intentionally deferred.
-- ABI selection for syscall dispatch is stored per-process; the scheduler snapshots this value into each thread at creation time so context switches do not touch the process table.
+- The scheduler reads the ABI directly from the thread's `ProcessControl` reference during context switches, avoiding global table locks in interrupt context.
 
 ## Address Space and ABI Considerations
 - For now every kernel process shares the same kernel address space.
@@ -40,16 +39,16 @@
   - cloning / isolating address spaces when we spawn userland processes;
   - letting the scheduler reactivate a process-specific address space on context switches.
 - User-process creation already allocates a distinct PID and thread list but continues to reference the shared kernel mappings until the paging layer exposes copy-on-write cloning.
-- When Linux compatibility arrives, each `Process` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
+- When Linux compatibility arrives, each `ProcessControl` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
 - The linux-box launcher uses the per-process ABI to redirect traps from launched ELF binaries into the Linux syscall table.
 
 ## Error Model and Synchronization
 - `ProcessError` signals precondition violations and internal consistency issues to callers such as the scheduler.
-- Internal synchronization relies on a spin lock, assuming interrupts are masked or the critical section is brief.
-- Finer-grained locking (for example per-process locks) is a topic reserved for later scalability work.
+- The process table is guarded by a spin lock, while per-process state (`threads`, `cwd`) uses dedicated spin locks inside `ProcessControl`.
+- Locks are expected to be held briefly; interrupt handlers should avoid taking process-table locks.
 
 ## Future Extensions
-- Introduce a richer process state machine (`Ready`, `Sleeping`, `Zombie`, etc.) and lifecycle management.
+- Expand the `ProcessState` machine to capture blocking semantics (`Sleeping`, `Zombie`) and integrate with wait queues.
 - Manage userland `AddressSpace` duplication, plus ABI selection data for host vs. Linux guests.
 - Attach per-process resources such as file descriptor tables, privileges, and cgroup-like metadata.
 - Plan for cluster-wide PID uniqueness and the synchronization mechanisms required when the OS spans multiple nodes.
