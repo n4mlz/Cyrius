@@ -85,8 +85,9 @@ fn run_tests(args: TestArgs) -> Result<()> {
 
     let block_image = prepare_test_block_image()?;
     let fat_image = prepare_test_fat_image()?;
+    let host_mnt_image = prepare_host_mnt_image()?;
     let image = image_bios(&test_binary, ImageKind::Test)?;
-    let status = run_qemu(&image, true, &[block_image, fat_image])?;
+    let status = run_qemu(&image, true, &[block_image, fat_image, host_mnt_image])?;
 
     interpret_test_exit(status)
 }

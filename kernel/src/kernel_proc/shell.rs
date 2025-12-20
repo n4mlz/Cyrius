@@ -6,7 +6,7 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::fs::DirEntry;
-use crate::kernel_proc::linux_box;
+use crate::kernel_proc::{linux_box, tar};
 use crate::loader::linux::LinuxLoadError;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::thread::SpawnError;
@@ -24,6 +24,7 @@ pub enum ShellError {
     UnknownCommand,
     Spawn(SpawnError),
     Loader(LinuxLoadError),
+    Tar(tar::TarError),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -37,6 +38,7 @@ enum Command<'a> {
     Pwd,
     Help,
     LinuxBoxRun(&'a str),
+    Tar(&'a str, Option<&'a str>),
     Unknown,
 }
 
@@ -55,7 +57,7 @@ fn shell_thread_entry() -> ! {
 }
 
 fn shell_loop(pid: ProcessId) -> ! {
-    println!("[shell] ready; commands: ls/cd/cat/rm/wt/linux-box/help");
+    println!("[shell] ready; commands: ls/cd/cat/rm/wt/tar/linux-box/help");
     let console = Arch::console();
     let mut buf = [0u8; INPUT_BUF];
     loop {
@@ -100,6 +102,10 @@ pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellEr
                 linux_box::RunError::Loader(err) => ShellError::Loader(err),
                 linux_box::RunError::Spawn(err) => ShellError::Spawn(err),
             })?;
+            Ok(None)
+        }
+        Command::Tar(path, dest) => {
+            shell_tar(pid, path, dest)?;
             Ok(None)
         }
         Command::Unknown => Err(ShellError::UnknownCommand),
@@ -160,6 +166,10 @@ fn shell_pwd(pid: ProcessId) -> Result<String, ShellError> {
     Ok(cwd.to_string())
 }
 
+fn shell_tar(pid: ProcessId, path: &str, dest: Option<&str>) -> Result<(), ShellError> {
+    tar::extract_to_ramfs(pid, path, dest).map_err(ShellError::Tar)
+}
+
 fn parse_command(line: &str) -> Command<'_> {
     let mut parts = line
         .splitn(3, char::is_whitespace)
@@ -183,6 +193,14 @@ fn parse_command(line: &str) -> Command<'_> {
             (Some("run"), Some(path)) => Command::LinuxBoxRun(path),
             _ => Command::Unknown,
         },
+        Some("tar") => {
+            if let Some(archive) = parts.next() {
+                let dest = parts.next();
+                Command::Tar(archive, dest)
+            } else {
+                Command::Unknown
+            }
+        }
         Some("") | None => Command::Unknown,
         _ => Command::Unknown,
     }
@@ -194,6 +212,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
         let kind = match entry.metadata.file_type {
             crate::fs::FileType::Directory => "d",
             crate::fs::FileType::File => "-",
+            crate::fs::FileType::Symlink => "l",
         };
         let line = alloc::format!("{kind} {} {}\n", entry.metadata.size, entry.name);
         out.push_str(&line);
@@ -202,7 +221,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
 }
 
 fn help_text() -> String {
-    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  help\n  linux-box run <path>\n"
+    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  tar <archive> [dest]\n  help\n  linux-box run <path>\n"
         .to_string()
 }
 
@@ -261,6 +280,14 @@ mod tests {
             parse_command("linux-box run /mnt/demo1.elf"),
             Command::LinuxBoxRun("/mnt/demo1.elf")
         );
+        assert_eq!(
+            parse_command("tar bundle.tar"),
+            Command::Tar("bundle.tar", None)
+        );
+        assert_eq!(
+            parse_command("tar bundle.tar /out"),
+            Command::Tar("bundle.tar", Some("/out"))
+        );
     }
 
     #[kernel_test_case]
@@ -293,5 +320,128 @@ mod tests {
         run_command(pid, "cd /dir").expect("cd");
         let pwd_out = run_command(pid, "pwd").expect("pwd").unwrap();
         assert_eq!(pwd_out, "/dir");
+    }
+
+    #[kernel_test_case]
+    fn tar_command_extracts_archive_into_memfs() {
+        println!("[test] tar_command_extracts_archive_into_memfs");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        force_replace_root(MemDirectory::new());
+        let pid = PROCESS_TABLE
+            .create_kernel_process("shell-tar-test")
+            .expect("create process");
+
+        let archive = build_test_tar();
+        PROCESS_TABLE
+            .write_path(pid, "/bundle.tar", &archive)
+            .expect("write tar archive");
+
+        run_command(pid, "tar /bundle.tar").expect("tar");
+
+        let content = run_command(pid, "cat /dir/hello.txt")
+            .expect("cat")
+            .unwrap();
+        assert_eq!(content, "hello from tar");
+
+        let sym_content = run_command(pid, "cat /dir/hello.sym")
+            .expect("cat symlink")
+            .unwrap();
+        assert_eq!(sym_content, "hello from tar");
+
+        let hard_content = run_command(pid, "cat /dir/sub/hello.hard")
+            .expect("cat hardlink")
+            .unwrap();
+        assert_eq!(hard_content, "hello from tar");
+
+        let sym_up_content = run_command(pid, "cat /dir/sub/hello.sym.up")
+            .expect("cat symlink up")
+            .unwrap();
+        assert_eq!(sym_up_content, "hello from tar");
+    }
+
+    fn build_test_tar() -> Vec<u8> {
+        let mut archive = Vec::new();
+        let data = b"hello from tar";
+        archive.extend_from_slice(&build_header(
+            "dir/hello.txt",
+            data.len() as u64,
+            b'0',
+            None,
+        ));
+        archive.extend_from_slice(data);
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header("dir/sub/", 0, b'5', None));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header("dir/hello.sym", 0, b'2', Some("hello.txt")));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header(
+            "dir/sub/hello.hard",
+            0,
+            b'1',
+            Some("../hello.txt"),
+        ));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&build_header(
+            "dir/sub/hello.sym.up",
+            0,
+            b'2',
+            Some("../hello.txt"),
+        ));
+        pad_to_block(&mut archive);
+
+        archive.extend_from_slice(&[0u8; 512]);
+        archive.extend_from_slice(&[0u8; 512]);
+        archive
+    }
+
+    fn build_header(path: &str, size: u64, kind: u8, link: Option<&str>) -> [u8; 512] {
+        let mut header = [0u8; 512];
+        let name_bytes = path.as_bytes();
+        assert!(name_bytes.len() <= 100, "test path too long for header");
+        header[..name_bytes.len()].copy_from_slice(name_bytes);
+        write_octal(&mut header[100..108], 0o644);
+        write_octal(&mut header[108..116], 0);
+        write_octal(&mut header[116..124], 0);
+        write_octal(&mut header[124..136], size);
+        write_octal(&mut header[136..148], 0);
+        header[156] = kind;
+        if let Some(link) = link {
+            let link_bytes = link.as_bytes();
+            assert!(
+                link_bytes.len() <= 100,
+                "test link name too long for header"
+            );
+            header[157..157 + link_bytes.len()].copy_from_slice(link_bytes);
+        }
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        header[148..156].fill(b' ');
+
+        let checksum: u32 = header.iter().map(|b| *b as u32).sum();
+        let chk = alloc::format!("{checksum:06o}\0 ");
+        header[148..148 + chk.len()].copy_from_slice(chk.as_bytes());
+        header
+    }
+
+    fn write_octal(field: &mut [u8], value: u64) {
+        let width = field.len().saturating_sub(1);
+        let text = alloc::format!("{value:0width$o}\0", width = width);
+        let bytes = text.as_bytes();
+        let start = field.len() - bytes.len();
+        field.fill(0);
+        field[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+
+    fn pad_to_block(buf: &mut Vec<u8>) {
+        let rem = buf.len() % 512;
+        if rem == 0 {
+            return;
+        }
+        buf.extend(core::iter::repeat(0u8).take(512 - rem));
     }
 }

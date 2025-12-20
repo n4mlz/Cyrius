@@ -228,8 +228,22 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         let sector = self.validate_buffer(lba, buffer.len())?;
         let mut request = RequestBuffers::new(&mut self.dma, buffer.len())?;
         request.write_header(RequestType::In, sector);
-        let status = self.submit_request(&mut request, IoDirection::Read)?;
+        let status = self
+            .submit_request(&mut request, IoDirection::Read)
+            .map_err(|err| {
+                crate::println!(
+                    "[virtio-blk] submit error {:?} lba={} len={}",
+                    err,
+                    sector,
+                    buffer.len()
+                );
+                err
+            })?;
         if status != 0 {
+            crate::println!(
+                "[virtio-blk] read error status=0x{status:02x} lba={sector} len={}",
+                buffer.len()
+            );
             return Err(VirtioBlkError::DeviceStatus(status));
         }
         request.copy_into(buffer);
@@ -246,6 +260,10 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         request.copy_from(buffer);
         let status = self.submit_request(&mut request, IoDirection::Write)?;
         if status != 0 {
+            crate::println!(
+                "[virtio-blk] write error status=0x{status:02x} lba={sector} len={}",
+                buffer.len()
+            );
             return Err(VirtioBlkError::DeviceStatus(status));
         }
         Ok(())
@@ -281,11 +299,8 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         if let Some(hook) = self.completion_hook {
             hook(&mut self.queue, buffers);
         }
-        let _completion = if let Some(irq) = self.queue_irq {
-            self.wait_for_completion(irq)
-        } else {
-            self.queue.wait_for_used()
-        };
+        // Poll for completions to sidestep lost-interrupt issues seen under heavy load.
+        let _completion = self.queue.wait_for_used();
         Ok(buffers.status())
     }
 
@@ -362,15 +377,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
                 let _ = INTERRUPTS.release_vector(vector, handler);
                 Err(VirtioBlkError::Interrupt(err))
             }
-        }
-    }
-
-    fn wait_for_completion(&mut self, irq: &QueueInterrupt) -> UsedElem {
-        loop {
-            if let Some(entry) = self.queue.pop_used() {
-                return entry;
-            }
-            irq.wait();
         }
     }
 
@@ -517,14 +523,15 @@ impl QueueState {
 
     fn pop_used(&mut self) -> Option<UsedElem> {
         let mut slices = self.memory.slices();
-        let used_idx = slices.used.idx();
-        if used_idx == self.used_idx {
+        let device_used = slices.used.idx();
+        if device_used == self.used_idx {
             return None;
         }
-        let slot = ((used_idx.wrapping_sub(1)) % self.size) as usize;
+
+        let slot = (self.used_idx % self.size) as usize;
         let ring = slices.used.ring();
         let entry = unsafe { core::ptr::read_volatile(&ring[slot]) };
-        self.used_idx = used_idx;
+        self.used_idx = self.used_idx.wrapping_add(1);
         Some(entry)
     }
 }
@@ -548,15 +555,6 @@ impl QueueInterrupt {
 
     fn arm(&self) {
         self.pending.store(false, Ordering::Release);
-    }
-
-    fn wait(&self) {
-        loop {
-            if self.pending.swap(false, Ordering::AcqRel) {
-                break;
-            }
-            core::hint::spin_loop();
-        }
     }
 
     fn notify(&self) {
@@ -630,14 +628,18 @@ impl RequestBuffers {
         let total = header_size + data_len + status_size;
         let page_bytes = PageSize::SIZE_4K.bytes();
         let size = align_up(total, page_bytes);
-        let region = provider.allocate(size, page_bytes)?;
-        Ok(Self {
+        let mut region = provider.allocate(size, page_bytes)?;
+        region.as_bytes_mut().fill(0);
+        let status_offset = header_size + data_len;
+        let this = Self {
             region,
             header_offset: 0,
             data_offset: header_size,
             data_len,
-            status_offset: header_size + data_len,
-        })
+            status_offset,
+        };
+        unsafe { core::ptr::write_volatile(this.status_ptr(), 0xFF) };
+        Ok(this)
     }
 
     fn header_phys(&self) -> PhysAddr {

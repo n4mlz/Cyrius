@@ -18,7 +18,7 @@
 - `ProcessState` currently exposes only `Active`. Expanded lifecycle states (e.g. `Sleeping`, `Zombie`) are still future work.
 - Fields prefixed with `_` are reserved for upcoming functionality, so they remain even if unused today.
 - `Process::user` mirrors kernel setup for now, provisioning a PID for user-mode threads while still sharing the kernel address space until proper duplication arrives.
-- `abi` tracks whether the process should use the host or Linux syscall table; the linux-box launcher sets this to `Abi::Linux` for Linux guests so the scheduler can switch tables on context changes.
+- `abi` tracks whether the process should use the host or Linux syscall table; the linux-box launcher sets this to `Abi::Linux` for Linux guests so threads inherit the correct ABI.
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.
@@ -32,7 +32,7 @@
 - `thread_count` is a lightweight helper for statistics and debugging.
 - `address_space(pid)` clones the stored handle so scheduling and memory management components can operate on the same CR3 state.
 - Process lifetime management (e.g. reclaiming a process when its thread list becomes empty) is intentionally deferred.
-- ABI selection for syscall dispatch is stored per-process; on context switch the scheduler looks up the next thread's owning process and programs the syscall dispatcher accordingly.
+- ABI selection for syscall dispatch is stored per-process; the scheduler snapshots this value into each thread at creation time so context switches do not touch the process table.
 
 ## Address Space and ABI Considerations
 - For now every kernel process shares the same kernel address space.
