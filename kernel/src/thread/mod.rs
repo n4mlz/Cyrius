@@ -61,9 +61,7 @@ impl Scheduler {
             .address_space(kernel_pid)
             .ok_or(SchedulerError::Process(ProcessError::NotFound))?;
 
-        let kernel_abi = PROCESS_TABLE
-            .abi(kernel_pid)
-            .unwrap_or(syscall::Abi::Host);
+        let kernel_abi = PROCESS_TABLE.abi(kernel_pid).unwrap_or(syscall::Abi::Host);
         let bootstrap =
             ThreadControl::bootstrap(0, kernel_pid, "bootstrap", kernel_space.clone(), kernel_abi);
         PROCESS_TABLE
@@ -410,16 +408,13 @@ impl SchedulerInner {
             .address_space(process)
             .ok_or(SpawnError::Process(ProcessError::NotFound))?;
         let abi = PROCESS_TABLE.abi(process).unwrap_or(syscall::Abi::Host);
-        let thread = ThreadControl::user_with_stack(
-            id,
-            process,
-            name,
-            entry,
+        let stack_args = UserStackArgs {
             address_space,
             user_stack,
             stack_pointer,
             abi,
-        )?;
+        };
+        let thread = ThreadControl::user_with_stack(id, process, name, entry, stack_args)?;
         PROCESS_TABLE
             .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
@@ -442,6 +437,13 @@ enum ThreadState {
 enum ThreadKind {
     Kernel,
     User,
+}
+
+struct UserStackArgs {
+    address_space: <Arch as ArchThread>::AddressSpace,
+    user_stack: <Arch as ArchThread>::UserStack,
+    stack_pointer: VirtAddr,
+    abi: syscall::Abi,
 }
 
 struct ThreadControl {
@@ -527,26 +529,23 @@ impl ThreadControl {
         process: ProcessId,
         name: &'static str,
         entry: VirtAddr,
-        address_space: <Arch as ArchThread>::AddressSpace,
-        user_stack: <Arch as ArchThread>::UserStack,
-        stack_pointer: VirtAddr,
-        abi: syscall::Abi,
+        stack: UserStackArgs,
     ) -> Result<Self, SpawnError> {
         let kernel_stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let context =
-            <Arch as ArchThread>::bootstrap_user_context_with_stack_pointer(entry, stack_pointer);
+            <Arch as ArchThread>::bootstrap_user_context_with_stack_pointer(entry, stack.stack_pointer);
 
         Ok(Self {
             id,
             _name: name,
             process,
             context,
-            address_space,
+            address_space: stack.address_space,
             kernel_stack: Some(kernel_stack),
-            user_stack: Some(user_stack),
+            user_stack: Some(stack.user_stack),
             kind: ThreadKind::User,
             state: ThreadState::Ready,
-            abi,
+            abi: stack.abi,
         })
     }
 

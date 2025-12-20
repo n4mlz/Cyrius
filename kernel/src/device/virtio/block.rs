@@ -17,8 +17,6 @@ use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-const VIRTIO_BLK_DEBUG: bool = false;
-
 const VIRTIO_BLOCK_QUEUE_INDEX: u16 = 0;
 const MAX_QUEUE_SIZE: u16 = 128;
 const MIN_QUEUE_SIZE: u16 = 3;
@@ -228,14 +226,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
 
     fn io_read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), VirtioBlkError> {
         let sector = self.validate_buffer(lba, buffer.len())?;
-        if VIRTIO_BLK_DEBUG {
-            crate::println!(
-                "[virtio-blk] read submit lba={} sectors={} len={}",
-                lba,
-                buffer.len() / self.block_size as usize,
-                buffer.len()
-            );
-        }
         let mut request = RequestBuffers::new(&mut self.dma, buffer.len())?;
         request.write_header(RequestType::In, sector);
         let status = self
@@ -256,14 +246,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             );
             return Err(VirtioBlkError::DeviceStatus(status));
         }
-        if VIRTIO_BLK_DEBUG {
-            crate::println!(
-                "[virtio-blk] read complete lba={} sectors={} len={}",
-                lba,
-                buffer.len() / self.block_size as usize,
-                buffer.len()
-            );
-        }
         request.copy_into(buffer);
         Ok(())
     }
@@ -273,14 +255,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             return Err(VirtioBlkError::ReadOnly);
         }
         let sector = self.validate_buffer(lba, buffer.len())?;
-        if VIRTIO_BLK_DEBUG {
-            crate::println!(
-                "[virtio-blk] write submit lba={} sectors={} len={}",
-                lba,
-                buffer.len() / self.block_size as usize,
-                buffer.len()
-            );
-        }
         let mut request = RequestBuffers::new(&mut self.dma, buffer.len())?;
         request.write_header(RequestType::Out, sector);
         request.copy_from(buffer);
@@ -291,14 +265,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
                 buffer.len()
             );
             return Err(VirtioBlkError::DeviceStatus(status));
-        }
-        if VIRTIO_BLK_DEBUG {
-            crate::println!(
-                "[virtio-blk] write complete lba={} sectors={} len={}",
-                lba,
-                buffer.len() / self.block_size as usize,
-                buffer.len()
-            );
         }
         Ok(())
     }
@@ -326,13 +292,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
             irq.arm();
         }
         self.queue.push(0);
-        if VIRTIO_BLK_DEBUG {
-            crate::println!(
-                "[virtio-blk] notify queue index={} len={}",
-                VIRTIO_BLOCK_QUEUE_INDEX,
-                buffers.data_len()
-            );
-        }
         self.transport
             .notify_queue(VIRTIO_BLOCK_QUEUE_INDEX)
             .map_err(VirtioBlkError::Transport)?;
@@ -342,12 +301,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         }
         // Poll for completions to sidestep lost-interrupt issues seen under heavy load.
         let _completion = self.queue.wait_for_used();
-        if VIRTIO_BLK_DEBUG {
-            crate::println!(
-                "[virtio-blk] completion observed status=0x{:02x}",
-                buffers.status()
-            );
-        }
         Ok(buffers.status())
     }
 
@@ -424,17 +377,6 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
                 let _ = INTERRUPTS.release_vector(vector, handler);
                 Err(VirtioBlkError::Interrupt(err))
             }
-        }
-    }
-
-    fn wait_for_completion(&mut self, irq: &QueueInterrupt) -> UsedElem {
-        loop {
-            if let Some(entry) = self.queue.pop_used() {
-                return entry;
-            }
-            // IRQs are still enabled, so a used entry will eventually become visible even if the
-            // interrupt itself is lost. Busy-wait here to avoid blocking forever on `irq.wait()`.
-            irq.wait_relaxed();
         }
     }
 
@@ -615,21 +557,6 @@ impl QueueInterrupt {
         self.pending.store(false, Ordering::Release);
     }
 
-    fn wait(&self) {
-        loop {
-            if self.pending.swap(false, Ordering::AcqRel) {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Polls the pending flag once; intended for busy-wait loops where interrupts may be lost.
-    fn wait_relaxed(&self) {
-        let _ = self.pending.swap(false, Ordering::AcqRel);
-        core::hint::spin_loop();
-    }
-
     fn notify(&self) {
         self.pending.store(true, Ordering::Release);
     }
@@ -711,7 +638,6 @@ impl RequestBuffers {
             data_len,
             status_offset,
         };
-        let mut this = this;
         unsafe { core::ptr::write_volatile(this.status_ptr(), 0xFF) };
         Ok(this)
     }

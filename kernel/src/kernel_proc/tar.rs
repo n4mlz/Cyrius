@@ -1,8 +1,8 @@
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use crate::fs::{NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
+use crate::fs::{PathComponent, VfsError, VfsPath};
 use crate::process::{PROCESS_TABLE, ProcessId};
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 const TAR_BLOCK_SIZE: usize = 512;
 const TAR_VERBOSE: bool = false;
@@ -253,8 +253,7 @@ impl TarReader {
     }
 
     fn read_entry_data(&mut self, size: usize) -> Result<Vec<u8>, TarError> {
-        let mut buf = Vec::with_capacity(size);
-        buf.resize(size, 0);
+        let mut buf = vec![0; size];
         if size > 0 {
             self.read_exact(&mut buf)?;
         }
@@ -275,11 +274,7 @@ impl TarReader {
         let log_interval = 64 * 1024;
         let mut next_log = log_interval;
         if TAR_VERBOSE && buf.len() >= TAR_BLOCK_SIZE {
-            crate::println!(
-                "[tar] read_exact offset={} len={}",
-                self.cursor,
-                buf.len()
-            );
+            crate::println!("[tar] read_exact offset={} len={}", self.cursor, buf.len());
         }
         while filled < buf.len() {
             let read = PROCESS_TABLE
@@ -293,19 +288,14 @@ impl TarReader {
                 .cursor
                 .checked_add(read as u64)
                 .ok_or(TarError::SizeOverflow)?;
-            if TAR_VERBOSE
-                && buf.len() > log_interval
-                && filled >= next_log.min(buf.len())
-            {
+            if TAR_VERBOSE && buf.len() > log_interval && filled >= next_log.min(buf.len()) {
                 crate::println!(
                     "[tar] read progress offset={} +{}/{}",
                     start_offset,
                     filled,
                     buf.len()
                 );
-                next_log = next_log
-                    .checked_add(log_interval)
-                    .unwrap_or(usize::MAX);
+                next_log = next_log.saturating_add(log_interval);
             }
         }
         Ok(())
@@ -348,15 +338,6 @@ enum TarEntryKind {
     Metadata,
 }
 
-fn ensure_dir_exists(path: &VfsPath) -> Result<(), TarError> {
-    with_vfs(|vfs| match vfs.open_absolute(path)? {
-        NodeRef::Directory(_) => Ok(()),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-    })
-    .map_err(TarError::Fs)?;
-    Ok(())
-}
-
 fn parse_name(header: &[u8]) -> Result<String, TarError> {
     let name_bytes = &header[0..100];
     let prefix_bytes = &header[345..500];
@@ -367,7 +348,7 @@ fn parse_name(header: &[u8]) -> Result<String, TarError> {
         name
     } else {
         let mut full = prefix;
-        if !full.ends_with(&[b'/']) {
+        if !full.ends_with(b"/") {
             full.push(b'/');
         }
         full.extend_from_slice(&name);
@@ -391,7 +372,9 @@ fn parse_link_name(header: &[u8]) -> Result<Option<String>, TarError> {
     }
 }
 
-fn parse_pax_fields(data: &[u8]) -> Result<Option<(Option<String>, Option<String>)>, TarError> {
+type PaxFields = (Option<String>, Option<String>);
+
+fn parse_pax_fields(data: &[u8]) -> Result<Option<PaxFields>, TarError> {
     // Lines follow the format "<len> key=value\n"; len is ignored here.
     let mut path = None;
     let mut linkpath = None;
@@ -401,23 +384,23 @@ fn parse_pax_fields(data: &[u8]) -> Result<Option<(Option<String>, Option<String
         }
         let mut iter = line.splitn(2, |b| *b == b' ');
         let _len = iter.next();
-        if let Some(kv) = iter.next() {
-            if let Some(eq) = kv.iter().position(|b| *b == b'=') {
-                let key = &kv[..eq];
-                let value = &kv[eq + 1..];
-                if key == b"path" {
-                    path = Some(
-                        core::str::from_utf8(value)
-                            .map(|s| s.to_string())
-                            .map_err(|_| TarError::InvalidUtf8)?,
-                    );
-                } else if key == b"linkpath" {
-                    linkpath = Some(
-                        core::str::from_utf8(value)
-                            .map(|s| s.to_string())
-                            .map_err(|_| TarError::InvalidUtf8)?,
-                    );
-                }
+        if let Some(kv) = iter.next()
+            && let Some(eq) = kv.iter().position(|b| *b == b'=')
+        {
+            let key = &kv[..eq];
+            let value = &kv[eq + 1..];
+            if key == b"path" {
+                path = Some(
+                    core::str::from_utf8(value)
+                        .map(|s| s.to_string())
+                        .map_err(|_| TarError::InvalidUtf8)?,
+                );
+            } else if key == b"linkpath" {
+                linkpath = Some(
+                    core::str::from_utf8(value)
+                        .map(|s| s.to_string())
+                        .map_err(|_| TarError::InvalidUtf8)?,
+                );
             }
         }
     }
@@ -486,11 +469,7 @@ fn resolve_link_target(
         link_parent.components().to_vec()
     };
     let min_depth = base_root.components().len();
-    let path_str = if target.starts_with('/') {
-        &target[1..]
-    } else {
-        target
-    };
+    let path_str = target.strip_prefix('/').unwrap_or(target);
 
     for part in path_str.split('/') {
         if part.is_empty() || part == "." {
@@ -562,6 +541,7 @@ mod tests {
     use crate::println;
     use crate::process::PROCESS_TABLE;
     use crate::test::kernel_test_case;
+    use alloc::sync::Arc;
 
     const SAMPLE_WITH_LINKS: &[u8] = include_bytes!("../../../mnt/sample_with_links.tar");
     const BUNDLE_TAR: &[u8] = include_bytes!("../../../mnt/bundle.tar");

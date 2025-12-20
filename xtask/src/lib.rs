@@ -147,7 +147,7 @@ fn kill_existing_qemu_processes(image: &Path) -> Result<()> {
         let Some(image_str) = image.to_str() else {
             return vec![];
         };
-        let Ok(output) = Command::new("ps").args(&["aux"]).output() else {
+        let Ok(output) = Command::new("ps").args(["aux"]).output() else {
             return vec![];
         };
         if !output.status.success() {

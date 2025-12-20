@@ -158,8 +158,6 @@ impl<D: BlockDevice + Send> FatVolume<D> {
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FatError> {
         const MAX_BLOCKS_PER_READ: usize = 32; // limit DMA buffer size (~16KiB)
-        const FAT_DEBUG: bool = false;
-
         let block_size = self.bpb.bytes_per_sector as usize;
         if buf.is_empty() {
             return Ok(());
