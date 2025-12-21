@@ -176,7 +176,7 @@ fn write_dir_entries(
             format!("{rel}/{name}")
         };
 
-        let meta = entry.symlink_metadata()?;
+        let meta = fs::symlink_metadata(entry.path())?;
         if meta.is_dir() {
             let mode = unix_mode(&meta, 0o755);
             writer.append_dir(&rel_path, mode)?;
@@ -212,7 +212,7 @@ fn write_dir_entries(
     Ok(())
 }
 
-fn unix_mode(meta: &fs::Metadata, fallback: u32) -> u32 {
+fn unix_mode(meta: &fs::Metadata, _fallback: u32) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

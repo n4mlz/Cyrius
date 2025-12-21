@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 
 pub fn build_kernel(release: bool) -> Result<PathBuf> {
+    ensure_xtask_assets_dir()?;
     let mut cmd = Command::new("cargo");
     cmd.args([
         "build",
@@ -74,6 +75,7 @@ pub fn image_bios(kernel: &Path, kind: ImageKind) -> Result<PathBuf> {
 }
 
 pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
+    ensure_xtask_assets_dir()?;
     let mut cmd = Command::new("cargo");
     cmd.args([
         "test",
