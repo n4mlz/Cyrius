@@ -1010,4 +1010,9 @@ dependencies = [
  "fatfs",
  "serde_json",
  "which",
+ "xtask-assets",
 ]
+
+[[package]]
+name = "xtask-assets"
+version = "0.1.0"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["kernel", "kernel-macros", "xtask"]
+members = ["kernel", "kernel-macros", "xtask", "xtask-assets"]
 resolver = "3"
 
 [workspace.dependencies]
