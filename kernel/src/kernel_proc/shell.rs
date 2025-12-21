@@ -281,12 +281,12 @@ mod tests {
             Command::LinuxBoxRun("/mnt/demo1.elf")
         );
         assert_eq!(
-            parse_command("tar bundle.tar"),
-            Command::Tar("bundle.tar", None)
+            parse_command("tar busybox.tar"),
+            Command::Tar("busybox.tar", None)
         );
         assert_eq!(
-            parse_command("tar bundle.tar /out"),
-            Command::Tar("bundle.tar", Some("/out"))
+            parse_command("tar busybox.tar /out"),
+            Command::Tar("busybox.tar", Some("/out"))
         );
     }
 
@@ -334,10 +334,10 @@ mod tests {
 
         let archive = build_test_tar();
         PROCESS_TABLE
-            .write_path(pid, "/bundle.tar", &archive)
+            .write_path(pid, "/busybox.tar", &archive)
             .expect("write tar archive");
 
-        run_command(pid, "tar /bundle.tar").expect("tar");
+        run_command(pid, "tar /busybox.tar").expect("tar");
 
         let content = run_command(pid, "cat /dir/hello.txt")
             .expect("cat")

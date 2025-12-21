@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 IMAGE="docker://busybox:musl"
 OCI_DIR="busybox-oci"
 BUNDLE_DIR="bundle"
-BUNDLE_TAR="mnt/bundle.tar"
+BUNDLE_TAR="mnt/busybox.tar"
 
 rm -rf "$OCI_DIR" "$BUNDLE_DIR" "$BUNDLE_TAR"
 mkdir -p "$(dirname "$BUNDLE_DIR")"

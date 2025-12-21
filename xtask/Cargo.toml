@@ -11,3 +11,4 @@ clap.workspace = true
 serde_json.workspace = true
 fatfs = "0.3"
 which = "6.0"
+xtask-assets = { path = "../xtask-assets" }
