@@ -13,10 +13,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install packages (QEMU)
+      - name: Install packages (QEMU, OCI tools)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 skopeo umoci
 
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
