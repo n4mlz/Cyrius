@@ -263,10 +263,7 @@ fn run_checked(cmd: &mut Command, label: &str) -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("{label} failed with {status}"),
-        ))
+        Err(io::Error::other(format!("{label} failed with {status}")))
     }
 }
 
