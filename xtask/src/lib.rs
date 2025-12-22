@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     str, thread,
@@ -12,6 +13,7 @@ use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 
 pub fn build_kernel(release: bool) -> Result<PathBuf> {
+    ensure_xtask_assets_dir()?;
     let mut cmd = Command::new("cargo");
     cmd.args([
         "build",
@@ -73,6 +75,7 @@ pub fn image_bios(kernel: &Path, kind: ImageKind) -> Result<PathBuf> {
 }
 
 pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
+    ensure_xtask_assets_dir()?;
     let mut cmd = Command::new("cargo");
     cmd.args([
         "test",
@@ -373,6 +376,7 @@ pub fn prepare_host_mnt_image() -> Result<PathBuf> {
         copy_dir_into_fs(&fs, host_dir, "/")
             .with_context(|| format!("copy directory {}", host_dir.display()))?;
     }
+    ensure_tar_assets_in_fs(&fs)?;
 
     Ok(path)
 }
@@ -628,6 +632,39 @@ fn walk_dir(fs: &FatfsFs, host: &Path, dest: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Writes tar fixtures into the FAT image when missing so tests do not depend on host mnt.
+fn ensure_tar_assets_in_fs(fs: &FatfsFs) -> Result<()> {
+    let assets_dir = ensure_xtask_assets_dir()?;
+    let assets = xtask_assets::ensure_tar_assets(&assets_dir)
+        .with_context(|| format!("ensure tar assets in {}", assets_dir.display()))?;
+    write_tar_if_missing(fs, "sample_with_links.tar", &assets.sample_with_links)?;
+    write_tar_if_missing(fs, "busybox.tar", &assets.busybox)?;
+    Ok(())
+}
+
+fn write_tar_if_missing(fs: &FatfsFs, name: &str, host_path: &Path) -> Result<()> {
+    if fs.root_dir().open_file(name).is_ok() {
+        return Ok(());
+    }
+    let data =
+        fs::read(host_path).with_context(|| format!("read tar asset {}", host_path.display()))?;
+    let mut file = fs
+        .root_dir()
+        .create_file(name)
+        .with_context(|| format!("create file {}", name))?;
+    file.write_all(&data)
+        .with_context(|| format!("write tar asset {}", name))?;
+    Ok(())
+}
+
+fn ensure_xtask_assets_dir() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("resolve current dir for assets")?;
+    let assets_dir = cwd.join("target").join("xtask-assets");
+    xtask_assets::ensure_tar_assets(&assets_dir)
+        .with_context(|| format!("ensure tar assets in {}", assets_dir.display()))?;
+    Ok(assets_dir)
 }
 
 #[derive(Clone, Copy)]

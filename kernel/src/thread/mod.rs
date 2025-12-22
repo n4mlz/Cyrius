@@ -9,7 +9,7 @@ use crate::arch::{
 };
 use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
 use crate::mem::addr::VirtAddr;
-use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use crate::process::{PROCESS_TABLE, ProcessError, ProcessHandle, ProcessId};
 use crate::syscall;
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::spinlock::SpinLock;
@@ -57,21 +57,22 @@ impl Scheduler {
             .map_err(SchedulerError::Process)?;
         inner.kernel_process = Some(kernel_pid);
 
-        let kernel_space = PROCESS_TABLE
-            .address_space(kernel_pid)
-            .ok_or(SchedulerError::Process(ProcessError::NotFound))?;
+        let kernel_process = PROCESS_TABLE
+            .process_handle(kernel_pid)
+            .map_err(SchedulerError::Process)?;
+        let kernel_space = kernel_process.address_space();
 
-        let kernel_abi = PROCESS_TABLE.abi(kernel_pid).unwrap_or(syscall::Abi::Host);
         let bootstrap =
-            ThreadControl::bootstrap(0, kernel_pid, "bootstrap", kernel_space.clone(), kernel_abi);
+            ThreadControl::bootstrap(0, kernel_process.clone(), "bootstrap", kernel_space.clone());
         PROCESS_TABLE
             .attach_thread(kernel_pid, bootstrap.id)
             .map_err(SchedulerError::Process)?;
         inner.current = Some(bootstrap.id);
         inner.threads.push(bootstrap);
+        kernel_process.mark_running();
 
         let idle_id = inner.next_tid;
-        let idle = ThreadControl::idle(idle_id, kernel_pid, kernel_space.clone(), kernel_abi)
+        let idle = ThreadControl::idle(idle_id, kernel_process.clone(), kernel_space.clone())
             .map_err(SchedulerError::Spawn)?;
         PROCESS_TABLE
             .attach_thread(kernel_pid, idle_id)
@@ -80,7 +81,7 @@ impl Scheduler {
         inner.idle = Some(idle.id);
         inner.threads.push(idle);
         inner.initialised = true;
-        syscall::set_current_abi(kernel_abi);
+        syscall::set_current_abi(kernel_process.abi());
         Ok(())
     }
 
@@ -162,11 +163,11 @@ impl Scheduler {
         entry: KernelThreadEntry,
     ) -> Result<ThreadId, SpawnError> {
         let id = inner.next_tid;
-        let address_space = PROCESS_TABLE
-            .address_space(process)
-            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
-        let abi = PROCESS_TABLE.abi(process).unwrap_or(syscall::Abi::Host);
-        let thread = ThreadControl::kernel(id, process, name, entry, address_space, abi)?;
+        let process_handle = PROCESS_TABLE
+            .process_handle(process)
+            .map_err(SpawnError::Process)?;
+        let address_space = process_handle.address_space();
+        let thread = ThreadControl::kernel(id, process_handle, name, entry, address_space)?;
         PROCESS_TABLE
             .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
@@ -229,7 +230,7 @@ impl Scheduler {
     }
 
     fn switch_current(&self, frame: &mut CurrentTrapFrame, mode: SwitchMode) {
-        let (next_ctx, next_space, next_stack, next_is_user, next_abi, detach_target) = {
+        let (next_ctx, next_space, next_stack, next_is_user, next_abi, next_process, detach_target) = {
             let mut inner = self.inner.lock();
             let current_id = match inner.current {
                 Some(id) => id,
@@ -241,18 +242,20 @@ impl Scheduler {
             if let Some(thread) = inner.thread_mut(current_id) {
                 let saved = <Arch as ArchThread>::save_context(frame);
                 thread.context = saved;
+                let process = thread.process().clone();
 
                 match mode {
                     SwitchMode::Requeue => {
                         if current_id != idle_id {
                             thread.state = ThreadState::Ready;
                             inner.ready.push_back(current_id);
+                            process.mark_ready();
                         } else {
                             thread.state = ThreadState::Idle;
                         }
                     }
                     SwitchMode::Terminate => {
-                        detach_target = Some((thread.process_id(), current_id));
+                        detach_target = Some((process, current_id));
                         thread.state = ThreadState::Terminated;
                     }
                 }
@@ -261,7 +264,7 @@ impl Scheduler {
             let next_id = inner.next_runnable(idle_id);
             inner.current = Some(next_id);
 
-            let (ctx, space, stack_top, is_user, abi) = inner
+            let (ctx, space, stack_top, is_user, abi, process) = inner
                 .thread_mut(next_id)
                 .map(|thread| {
                     thread.state = if next_id == idle_id {
@@ -274,19 +277,22 @@ impl Scheduler {
                         thread.address_space.clone(),
                         thread.kernel_stack_top(),
                         thread.is_user(),
-                        thread.abi(),
+                        thread.process().abi(),
+                        thread.process().clone(),
                     )
                 })
                 .expect("next thread must exist");
 
-            (ctx, space, stack_top, is_user, abi, detach_target)
+            (ctx, space, stack_top, is_user, abi, process, detach_target)
         };
 
-        if let Some((pid, tid)) = detach_target {
-            let _ = PROCESS_TABLE.detach_thread(pid, tid);
+        if let Some((process, tid)) = detach_target {
+            let _ = process.detach_thread(tid);
         }
 
         syscall::set_current_abi(next_abi);
+
+        next_process.mark_running();
 
         if next_is_user && let Some(stack_top) = next_stack {
             <Arch as ArchThread>::update_privilege_stack(stack_top);
@@ -381,11 +387,12 @@ impl SchedulerInner {
         stack_size: usize,
     ) -> Result<ThreadId, SpawnError> {
         let id = self.next_tid;
-        let address_space = PROCESS_TABLE
-            .address_space(process)
-            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
-        let abi = PROCESS_TABLE.abi(process).unwrap_or(syscall::Abi::Host);
-        let thread = ThreadControl::user(id, process, name, entry, address_space, stack_size, abi)?;
+        let process_handle = PROCESS_TABLE
+            .process_handle(process)
+            .map_err(SpawnError::Process)?;
+        let address_space = process_handle.address_space();
+        let thread =
+            ThreadControl::user(id, process_handle, name, entry, address_space, stack_size)?;
         PROCESS_TABLE
             .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
@@ -404,17 +411,19 @@ impl SchedulerInner {
         stack_pointer: VirtAddr,
     ) -> Result<ThreadId, SpawnError> {
         let id = self.next_tid;
-        let address_space = PROCESS_TABLE
-            .address_space(process)
-            .ok_or(SpawnError::Process(ProcessError::NotFound))?;
-        let abi = PROCESS_TABLE.abi(process).unwrap_or(syscall::Abi::Host);
-        let stack_args = UserStackArgs {
+        let process_handle = PROCESS_TABLE
+            .process_handle(process)
+            .map_err(SpawnError::Process)?;
+        let address_space = process_handle.address_space();
+        let thread = ThreadControl::user_with_stack(
+            id,
+            process_handle,
+            name,
+            entry,
             address_space,
             user_stack,
             stack_pointer,
-            abi,
-        };
-        let thread = ThreadControl::user_with_stack(id, process, name, entry, stack_args)?;
+        )?;
         PROCESS_TABLE
             .attach_thread(process, id)
             .map_err(SpawnError::Process)?;
@@ -439,17 +448,10 @@ enum ThreadKind {
     User,
 }
 
-struct UserStackArgs {
-    address_space: <Arch as ArchThread>::AddressSpace,
-    user_stack: <Arch as ArchThread>::UserStack,
-    stack_pointer: VirtAddr,
-    abi: syscall::Abi,
-}
-
 struct ThreadControl {
     id: ThreadId,
     _name: &'static str,
-    process: ProcessId,
+    process: ProcessHandle,
     context: <Arch as ArchThread>::Context,
     address_space: <Arch as ArchThread>::AddressSpace,
     kernel_stack: Option<KernelStack>,
@@ -457,17 +459,15 @@ struct ThreadControl {
     user_stack: Option<<Arch as ArchThread>::UserStack>,
     kind: ThreadKind,
     state: ThreadState,
-    abi: syscall::Abi,
 }
 
 impl ThreadControl {
     fn kernel(
         id: ThreadId,
-        process: ProcessId,
+        process: ProcessHandle,
         name: &'static str,
         entry: KernelThreadEntry,
         address_space: <Arch as ArchThread>::AddressSpace,
-        abi: syscall::Abi,
     ) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
@@ -484,18 +484,16 @@ impl ThreadControl {
             user_stack: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Ready,
-            abi,
         })
     }
 
     fn user(
         id: ThreadId,
-        process: ProcessId,
+        process: ProcessHandle,
         name: &'static str,
         entry: VirtAddr,
         address_space: <Arch as ArchThread>::AddressSpace,
         stack_size: usize,
-        abi: syscall::Abi,
     ) -> Result<Self, SpawnError> {
         let stack_size = if stack_size == 0 {
             USER_STACK_SIZE
@@ -520,32 +518,32 @@ impl ThreadControl {
             user_stack: Some(user_stack),
             kind: ThreadKind::User,
             state: ThreadState::Ready,
-            abi,
         })
     }
 
     fn user_with_stack(
         id: ThreadId,
-        process: ProcessId,
+        process: ProcessHandle,
         name: &'static str,
         entry: VirtAddr,
-        stack: UserStackArgs,
+        address_space: <Arch as ArchThread>::AddressSpace,
+        user_stack: <Arch as ArchThread>::UserStack,
+        stack_pointer: VirtAddr,
     ) -> Result<Self, SpawnError> {
         let kernel_stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let context =
-            <Arch as ArchThread>::bootstrap_user_context_with_stack_pointer(entry, stack.stack_pointer);
+            <Arch as ArchThread>::bootstrap_user_context_with_stack_pointer(entry, stack_pointer);
 
         Ok(Self {
             id,
             _name: name,
             process,
             context,
-            address_space: stack.address_space,
+            address_space,
             kernel_stack: Some(kernel_stack),
-            user_stack: Some(stack.user_stack),
+            user_stack: Some(user_stack),
             kind: ThreadKind::User,
             state: ThreadState::Ready,
-            abi: stack.abi,
         })
     }
 
@@ -558,18 +556,17 @@ impl ThreadControl {
     }
 
     fn process_id(&self) -> ProcessId {
-        self.process
+        self.process.id()
     }
 
-    fn abi(&self) -> syscall::Abi {
-        self.abi
+    fn process(&self) -> &ProcessHandle {
+        &self.process
     }
 
     fn idle(
         id: ThreadId,
-        process: ProcessId,
+        process: ProcessHandle,
         address_space: <Arch as ArchThread>::AddressSpace,
-        abi: syscall::Abi,
     ) -> Result<Self, SpawnError> {
         let stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
         let stack_top = stack.top();
@@ -586,16 +583,14 @@ impl ThreadControl {
             user_stack: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Idle,
-            abi,
         })
     }
 
     fn bootstrap(
         id: ThreadId,
-        process: ProcessId,
+        process: ProcessHandle,
         name: &'static str,
         address_space: <Arch as ArchThread>::AddressSpace,
-        abi: syscall::Abi,
     ) -> Self {
         Self {
             id,
@@ -607,7 +602,6 @@ impl ThreadControl {
             user_stack: None,
             kind: ThreadKind::Kernel,
             state: ThreadState::Running,
-            abi,
         }
     }
 }
@@ -667,14 +661,16 @@ mod tests {
             .address_space(pid)
             .expect("user address space");
 
+        let handle = PROCESS_TABLE
+            .process_handle(pid)
+            .expect("user process handle");
         let thread = ThreadControl::user(
             99,
-            pid,
+            handle,
             "utest",
             VirtAddr::new(0x4000),
             space,
             USER_STACK_SIZE,
-            crate::syscall::Abi::Host,
         )
         .expect("spawn user thread");
 
