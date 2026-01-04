@@ -14,7 +14,9 @@
 - `SysError` abstracts common error kinds; each ABI module owns its numeric mapping via ABI-specific enums (`LinuxErrno`, `HostErrno`). Linux maps to negative errno (e.g., `NoSys=38`, `InvalidArgument=22`) while host returns positive codes with a minimal private numbering. Success paths write the raw return value unchanged.
 
 ## Tables
-- Host dispatch is stubbed to `ENOSYS` for now.
+- Host dispatch implements `container_create`, which reads bundle metadata from the global VFS and
+  registers a new container entry. Host pointers are treated as kernel-mapped addresses until
+  userland separation exists.
 - Linux dispatch implements `write` (FD 1/2 to the kernel console), `getpid` (threads read the scheduler’s current process id), and `exit` (requests thread termination). All other numbers map to `ENOSYS`.
 
 ## Extension Points / TODO

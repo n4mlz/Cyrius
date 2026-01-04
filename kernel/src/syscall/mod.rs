@@ -3,6 +3,8 @@ mod linux;
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
+pub use host::HostSyscall;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Abi {

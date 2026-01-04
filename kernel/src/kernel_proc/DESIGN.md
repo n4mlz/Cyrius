@@ -5,7 +5,8 @@
 - Lives under `kernel_proc` to keep kernel-only utilities together rather than scattering top-level modules.
 
 ## Shell
-- Provides a minimal REPL for filesystem operations and a front-end to launch Linux ELF binaries via `linux-box run <path>`.
+- Provides a minimal REPL for filesystem operations, a front-end to launch Linux ELF binaries via
+  `linux-box run <path>`, and host container management via `oci-runtime create <id> <bundle>`.
 - Tokenisation is whitespace-based; quoted strings are not supported.
 - Errors bubble up from the filesystem (`VfsError`), process table (`ProcessError`), loader (`LinuxLoadError`), and thread spawning (`SpawnError`) without wrapping in an extra linux-box-specific error layer.
 - Runs as a kernel thread associated with a kernel process, reusing the process CWD and FD table for all commands.

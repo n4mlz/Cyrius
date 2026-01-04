@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -6,9 +7,11 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::fs::DirEntry;
+use crate::fs::VfsPath;
 use crate::kernel_proc::{linux_box, tar};
 use crate::loader::linux::LinuxLoadError;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use crate::syscall::{self, Abi, DispatchResult, HostSyscall, SysError, SyscallInvocation};
 use crate::thread::SpawnError;
 use crate::{print, println};
 
@@ -22,6 +25,7 @@ pub enum ShellError {
     NotFile,
     Utf8,
     UnknownCommand,
+    Syscall(SysError),
     Spawn(SpawnError),
     Loader(LinuxLoadError),
     Tar(tar::TarError),
@@ -39,6 +43,7 @@ enum Command<'a> {
     Help,
     LinuxBoxRun(&'a str),
     Tar(&'a str, Option<&'a str>),
+    OciRuntimeCreate(&'a str, &'a str),
     Unknown,
 }
 
@@ -108,6 +113,10 @@ pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellEr
             shell_tar(pid, path, dest)?;
             Ok(None)
         }
+        Command::OciRuntimeCreate(id, bundle) => {
+            let output = shell_oci_runtime_create(pid, id, bundle)?;
+            Ok(Some(output))
+        }
         Command::Unknown => Err(ShellError::UnknownCommand),
     }
 }
@@ -170,38 +179,113 @@ fn shell_tar(pid: ProcessId, path: &str, dest: Option<&str>) -> Result<(), Shell
     tar::extract_to_ramfs(pid, path, dest).map_err(ShellError::Tar)
 }
 
+fn shell_oci_runtime_create(pid: ProcessId, id: &str, bundle: &str) -> Result<String, ShellError> {
+    let bundle = resolve_abs_path(pid, bundle)?;
+    let invocation = SyscallInvocation::new(
+        HostSyscall::ContainerCreate as u64,
+        [
+            id.as_ptr() as u64,
+            id.len() as u64,
+            bundle.as_ptr() as u64,
+            bundle.len() as u64,
+            0,
+            0,
+        ],
+    );
+
+    match syscall::dispatch(Abi::Host, &invocation) {
+        DispatchResult::Completed(Ok(_)) => Ok(format!("container {id} created")),
+        DispatchResult::Completed(Err(err)) => Err(ShellError::Syscall(err)),
+        DispatchResult::Terminate(_) => Err(ShellError::Syscall(SysError::InvalidArgument)),
+    }
+}
+
+fn resolve_abs_path(pid: ProcessId, raw: &str) -> Result<String, ShellError> {
+    let cwd = PROCESS_TABLE.cwd(pid).map_err(ShellError::Fs)?;
+    let parsed = VfsPath::parse(raw).map_err(ShellError::Fs)?;
+    let abs = if parsed.is_absolute() {
+        parsed
+    } else {
+        cwd.join(&parsed).map_err(ShellError::Fs)?
+    };
+    Ok(abs.to_string())
+}
+
 fn parse_command(line: &str) -> Command<'_> {
     let mut parts = line
-        .splitn(3, char::is_whitespace)
+        .splitn(2, char::is_whitespace)
         .filter(|s| !s.is_empty());
-    match parts.next() {
-        Some("ls") => Command::Ls(parts.next()),
-        Some("cd") => parts.next().map(Command::Cd).unwrap_or(Command::Unknown),
-        Some("cat") => parts.next().map(Command::Cat).unwrap_or(Command::Unknown),
-        Some("rm") => parts.next().map(Command::Rm).unwrap_or(Command::Unknown),
-        Some("pwd") => Command::Pwd,
-        Some("mkdir") => parts.next().map(Command::Mkdir).unwrap_or(Command::Unknown),
-        Some("wt") => {
-            if let (Some(path), Some(rest)) = (parts.next(), parts.next()) {
-                Command::Write(path, rest)
+    let cmd = match parts.next() {
+        Some(cmd) => cmd,
+        None => return Command::Unknown,
+    };
+
+    match cmd {
+        "ls" => {
+            let arg = parts.next().and_then(|rest| rest.split_whitespace().next());
+            Command::Ls(arg)
+        }
+        "cd" => parts
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(Command::Cd)
+            .unwrap_or(Command::Unknown),
+        "cat" => parts
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(Command::Cat)
+            .unwrap_or(Command::Unknown),
+        "rm" => parts
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(Command::Rm)
+            .unwrap_or(Command::Unknown),
+        "pwd" => Command::Pwd,
+        "mkdir" => parts
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(Command::Mkdir)
+            .unwrap_or(Command::Unknown),
+        "wt" => {
+            if let Some(rest) = parts.next() {
+                let mut args = rest
+                    .splitn(2, char::is_whitespace)
+                    .filter(|s| !s.is_empty());
+                if let (Some(path), Some(data)) = (args.next(), args.next()) {
+                    Command::Write(path, data)
+                } else {
+                    Command::Unknown
+                }
             } else {
                 Command::Unknown
             }
         }
-        Some("help") => Command::Help,
-        Some("linux-box") => match (parts.next(), parts.next()) {
-            (Some("run"), Some(path)) => Command::LinuxBoxRun(path),
-            _ => Command::Unknown,
-        },
-        Some("tar") => {
-            if let Some(archive) = parts.next() {
-                let dest = parts.next();
-                Command::Tar(archive, dest)
-            } else {
-                Command::Unknown
+        "help" => Command::Help,
+        "linux-box" => {
+            let mut args = parts.next().unwrap_or("").split_whitespace();
+            match (args.next(), args.next(), args.next()) {
+                (Some("run"), Some(path), None) => Command::LinuxBoxRun(path),
+                _ => Command::Unknown,
             }
         }
-        Some("") | None => Command::Unknown,
+        "tar" => {
+            let mut args = parts.next().unwrap_or("").split_whitespace();
+            let archive = args.next();
+            let dest = args.next();
+            match (archive, args.next()) {
+                (Some(archive), None) => Command::Tar(archive, dest),
+                _ => Command::Unknown,
+            }
+        }
+        "oci-runtime" => {
+            let mut args = parts.next().unwrap_or("").split_whitespace();
+            match (args.next(), args.next(), args.next(), args.next()) {
+                (Some("create"), Some(id), Some(bundle), None) => {
+                    Command::OciRuntimeCreate(id, bundle)
+                }
+                _ => Command::Unknown,
+            }
+        }
         _ => Command::Unknown,
     }
 }
@@ -221,7 +305,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
 }
 
 fn help_text() -> String {
-    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  tar <archive> [dest]\n  help\n  linux-box run <path>\n"
+    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  tar <archive> [dest]\n  oci-runtime create <id> <bundle>\n  help\n  linux-box run <path>\n"
         .to_string()
 }
 
@@ -287,6 +371,10 @@ mod tests {
         assert_eq!(
             parse_command("tar busybox.tar /out"),
             Command::Tar("busybox.tar", Some("/out"))
+        );
+        assert_eq!(
+            parse_command("oci-runtime create demo /bundle"),
+            Command::OciRuntimeCreate("demo", "/bundle")
         );
     }
 

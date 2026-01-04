@@ -7,6 +7,7 @@
 ## Subsystem Overview
 - **arch**: architecture-specific adapters behind trait-based abstractions.
 - **device**: pluggable drivers and bus traits for kernel-managed hardware.
+- **container**: container registry and OCI spec-backed metadata/state for runtime-managed containers.
 - **interrupt**: vector registration, trap dispatch, and timer orchestration.
 - **mem**: address wrappers, heap allocator, and paging interfaces.
 - **process/thread**: execution and scheduling primitives built atop architecture contexts.
