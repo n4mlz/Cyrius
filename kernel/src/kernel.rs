@@ -12,6 +12,7 @@ use core::convert::TryFrom;
 use core::panic::PanicInfo;
 
 pub mod arch;
+pub mod container;
 pub mod device;
 pub mod fs;
 pub mod interrupt;
