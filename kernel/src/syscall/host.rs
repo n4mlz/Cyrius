@@ -1,5 +1,5 @@
 use super::{SysError, SysResult, SyscallInvocation};
-use crate::container::{CONTAINERS, ContainerError};
+use crate::container::{CONTAINER_TABLE, ContainerError};
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +54,7 @@ fn handle_container_create(invocation: &SyscallInvocation) -> SysResult {
     let id = read_str(id_ptr, id_len)?;
     let bundle = read_str(bundle_ptr, bundle_len)?;
 
-    match CONTAINERS.create(id, bundle) {
+    match CONTAINER_TABLE.create(id, bundle) {
         Ok(_) => Ok(0),
         Err(ContainerError::DuplicateId | ContainerError::InvalidId) => {
             Err(SysError::InvalidArgument)
@@ -82,13 +82,16 @@ mod tests {
     use crate::fs::Directory;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
+    use crate::println;
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
     fn container_create_syscall_registers_container() {
+        println!("[test] container_create_syscall_registers_container");
+
         let root = MemDirectory::new();
         force_replace_root(root.clone());
-        CONTAINERS.clear_for_tests();
+        CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
         let config = bundle_dir
@@ -114,6 +117,6 @@ mod tests {
 
         let result = dispatch(&invocation);
         assert!(result.is_ok(), "syscall failed: {:?}", result);
-        assert!(CONTAINERS.get(id).is_some());
+        assert!(CONTAINER_TABLE.get(id).is_some());
     }
 }

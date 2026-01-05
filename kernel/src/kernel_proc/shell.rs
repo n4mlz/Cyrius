@@ -1,4 +1,3 @@
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -7,11 +6,9 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::fs::DirEntry;
-use crate::fs::VfsPath;
-use crate::kernel_proc::{linux_box, tar};
+use crate::kernel_proc::{linux_box, oci_runtime, tar};
 use crate::loader::linux::LinuxLoadError;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
-use crate::syscall::{self, Abi, DispatchResult, HostSyscall, SysError, SyscallInvocation};
 use crate::thread::SpawnError;
 use crate::{print, println};
 
@@ -25,7 +22,7 @@ pub enum ShellError {
     NotFile,
     Utf8,
     UnknownCommand,
-    Syscall(SysError),
+    OciRuntime(oci_runtime::OciRuntimeError),
     Spawn(SpawnError),
     Loader(LinuxLoadError),
     Tar(tar::TarError),
@@ -114,7 +111,8 @@ pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellEr
             Ok(None)
         }
         Command::OciRuntimeCreate(id, bundle) => {
-            let output = shell_oci_runtime_create(pid, id, bundle)?;
+            let output =
+                oci_runtime::create_container(pid, id, bundle).map_err(ShellError::OciRuntime)?;
             Ok(Some(output))
         }
         Command::Unknown => Err(ShellError::UnknownCommand),
@@ -177,38 +175,6 @@ fn shell_pwd(pid: ProcessId) -> Result<String, ShellError> {
 
 fn shell_tar(pid: ProcessId, path: &str, dest: Option<&str>) -> Result<(), ShellError> {
     tar::extract_to_ramfs(pid, path, dest).map_err(ShellError::Tar)
-}
-
-fn shell_oci_runtime_create(pid: ProcessId, id: &str, bundle: &str) -> Result<String, ShellError> {
-    let bundle = resolve_abs_path(pid, bundle)?;
-    let invocation = SyscallInvocation::new(
-        HostSyscall::ContainerCreate as u64,
-        [
-            id.as_ptr() as u64,
-            id.len() as u64,
-            bundle.as_ptr() as u64,
-            bundle.len() as u64,
-            0,
-            0,
-        ],
-    );
-
-    match syscall::dispatch(Abi::Host, &invocation) {
-        DispatchResult::Completed(Ok(_)) => Ok(format!("container {id} created")),
-        DispatchResult::Completed(Err(err)) => Err(ShellError::Syscall(err)),
-        DispatchResult::Terminate(_) => Err(ShellError::Syscall(SysError::InvalidArgument)),
-    }
-}
-
-fn resolve_abs_path(pid: ProcessId, raw: &str) -> Result<String, ShellError> {
-    let cwd = PROCESS_TABLE.cwd(pid).map_err(ShellError::Fs)?;
-    let parsed = VfsPath::parse(raw).map_err(ShellError::Fs)?;
-    let abs = if parsed.is_absolute() {
-        parsed
-    } else {
-        cwd.join(&parsed).map_err(ShellError::Fs)?
-    };
-    Ok(abs.to_string())
 }
 
 fn parse_command(line: &str) -> Command<'_> {
@@ -351,6 +317,8 @@ mod tests {
 
     #[kernel_test_case]
     fn parse_commands() {
+        println!("[test] parse_commands");
+
         assert_eq!(parse_command("ls"), Command::Ls(None));
         assert_eq!(parse_command("ls /mnt"), Command::Ls(Some("/mnt")));
         assert_eq!(parse_command("cd /"), Command::Cd("/"));

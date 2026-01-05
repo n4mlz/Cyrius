@@ -7,6 +7,8 @@
 ## Shell
 - Provides a minimal REPL for filesystem operations, a front-end to launch Linux ELF binaries via
   `linux-box run <path>`, and host container management via `oci-runtime create <id> <bundle>`.
+- `oci_runtime` houses the host ABI bridge for OCI-style commands to keep shell parsing focused on
+  REPL concerns.
 - Tokenisation is whitespace-based; quoted strings are not supported.
 - Errors bubble up from the filesystem (`VfsError`), process table (`ProcessError`), loader (`LinuxLoadError`), and thread spawning (`SpawnError`) without wrapping in an extra linux-box-specific error layer.
 - Runs as a kernel thread associated with a kernel process, reusing the process CWD and FD table for all commands.

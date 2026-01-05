@@ -3,16 +3,16 @@
 ## Role and Scope
 - Owns kernel-resident container metadata: OCI runtime spec (`config.json`) and the mutable state
   required to track lifecycle transitions (status/pid).
-- Provides a registry for creating and looking up containers by ID, backed by a `SpinLock`-guarded
-  map.
+- Provides a `ContainerTable` for creating and looking up containers by ID, backed by a
+  `SpinLock`-guarded map.
 - Allocates a per-container root filesystem instance at create time to keep host and container
   filesystems strictly separated.
 
 ## Static vs Dynamic Data
-- Static data lives in `ContainerInfo` (`bundle_path`, parsed OCI `Spec`, and the container rootfs
-  handle).
-- Dynamic state lives in `ContainerState` behind a `SpinLock`, exposing status, pid, and annotations
-  similar to the OCI runtime `state` payload.
+- `ContainerState` holds the OCI-style runtime state (`ociVersion`, `id`, `status`, `pid`,
+  `bundlePath`, `annotations`) and is protected by a `SpinLock`.
+- The parsed OCI `Spec` (`config.json`) is stored separately as static metadata.
+- `ContainerRuntime` tracks runtime-managed resources such as the container rootfs handle.
 
 ## OCI Bundle Handling
 - The bundle path must be absolute and must contain `config.json` in the global VFS.
