@@ -10,7 +10,6 @@ use serde_json::Value;
 use crate::container::{Container, ContainerRuntime, ContainerState, ContainerStatus};
 use crate::fs::memfs::MemDirectory;
 use crate::fs::{Directory, NodeRef, VfsError, VfsPath, with_vfs};
-use crate::println;
 use crate::util::spinlock::SpinLock;
 
 #[derive(Debug)]
@@ -88,6 +87,12 @@ impl ContainerTable {
     }
 }
 
+impl Default for ContainerTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
 
 fn new_container_rootfs() -> Arc<dyn Directory> {
@@ -98,13 +103,15 @@ fn load_spec(bundle_path: &VfsPath) -> Result<Spec, ContainerError> {
     let config_path = bundle_path.join(&VfsPath::parse("config.json")?)?;
     let bytes = read_file(&config_path)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| ContainerError::ConfigNotUtf8)?;
-    
+
     // Parse JSON into a Value first, then deserialize into Spec.
     // This two-step approach avoids stack overflow issues that occur when
     // deserializing directly from a string into Spec.
-    let json_value: Value = serde_json::from_str(text).map_err(|_| ContainerError::ConfigParseFailed)?;
-    let spec: Spec = serde_json::from_value(json_value).map_err(|_| ContainerError::ConfigParseFailed)?;
-    
+    let json_value: Value =
+        serde_json::from_str(text).map_err(|_| ContainerError::ConfigParseFailed)?;
+    let spec: Spec =
+        serde_json::from_value(json_value).map_err(|_| ContainerError::ConfigParseFailed)?;
+
     Ok(spec)
 }
 

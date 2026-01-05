@@ -1,8 +1,8 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 
-use oci_spec::runtime::Spec;
 use crate::util::spinlock::SpinLock;
+use oci_spec::runtime::Spec;
 
 pub mod runtime;
 pub mod state;

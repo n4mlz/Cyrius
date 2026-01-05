@@ -11,11 +11,7 @@ pub enum OciRuntimeError {
     Syscall(SysError),
 }
 
-pub fn create_container(
-    pid: ProcessId,
-    id: &str,
-    bundle: &str,
-) -> Result<String, OciRuntimeError> {
+pub fn create_container(pid: ProcessId, id: &str, bundle: &str) -> Result<String, OciRuntimeError> {
     let bundle = resolve_abs_path(pid, bundle)?;
     let invocation = SyscallInvocation::new(
         HostSyscall::ContainerCreate as u64,
