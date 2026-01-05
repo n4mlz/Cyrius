@@ -50,12 +50,12 @@ pub fn run_tests(tests: &[&dyn Fn()]) {
         }
 
         if list_only {
-            println!("[test] case #{index}: {name}");
+            println!("[test] case #{index}");
             matched += 1;
             continue;
         }
 
-        print!("[test] case #{index} ({name}) ... ");
+        print!("[test] case #{index} ... ");
         test();
         println!("ok");
         matched += 1;
