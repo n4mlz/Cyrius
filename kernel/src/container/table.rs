@@ -5,6 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use oci_spec::runtime::Spec;
+use serde_json::Value;
 
 use crate::container::{Container, ContainerRuntime, ContainerState, ContainerStatus};
 use crate::fs::memfs::MemDirectory;
@@ -97,10 +98,14 @@ fn load_spec(bundle_path: &VfsPath) -> Result<Spec, ContainerError> {
     let config_path = bundle_path.join(&VfsPath::parse("config.json")?)?;
     let bytes = read_file(&config_path)?;
     let text = core::str::from_utf8(&bytes).map_err(|_| ContainerError::ConfigNotUtf8)?;
-    println!("Loaded container config: {}", text);
-    let ans = serde_json::from_str(text).map_err(|_| ContainerError::ConfigParseFailed);
-    println!("Parsed container spec: {:?}", ans);
-    ans
+    
+    // Parse JSON into a Value first, then deserialize into Spec.
+    // This two-step approach avoids stack overflow issues that occur when
+    // deserializing directly from a string into Spec.
+    let json_value: Value = serde_json::from_str(text).map_err(|_| ContainerError::ConfigParseFailed)?;
+    let spec: Spec = serde_json::from_value(json_value).map_err(|_| ContainerError::ConfigParseFailed)?;
+    
+    Ok(spec)
 }
 
 fn read_file(path: &VfsPath) -> Result<Vec<u8>, ContainerError> {
