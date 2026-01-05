@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use oci_spec::runtime::Spec;
 use serde_json::Value;
 
-use crate::container::{Container, ContainerRuntime, ContainerState, ContainerStatus};
+use crate::container::{Container, ContainerContext, ContainerState, ContainerStatus};
 use crate::fs::memfs::MemDirectory;
 use crate::fs::{Directory, NodeRef, VfsError, VfsPath, with_vfs};
 use crate::util::spinlock::SpinLock;
@@ -64,8 +64,8 @@ impl ContainerTable {
             annotations: spec_annotations(&spec),
         };
         let rootfs = new_container_rootfs();
-        let runtime = ContainerRuntime::new(rootfs);
-        let container = Arc::new(Container::new(state, spec, runtime));
+        let context = ContainerContext::new(rootfs);
+        let container = Arc::new(Container::new(state, spec, context));
 
         let mut guard = self.inner.lock();
         if guard.contains_key(id) {

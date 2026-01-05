@@ -12,7 +12,7 @@
 - `ContainerState` holds the OCI-style runtime state (`ociVersion`, `id`, `status`, `pid`,
   `bundlePath`, `annotations`) and is protected by a `SpinLock`.
 - The parsed OCI `Spec` (`config.json`) is stored separately as static metadata.
-- `ContainerRuntime` tracks runtime-managed resources such as the container rootfs handle.
+- `ContainerContext` tracks runtime-managed resources such as the container rootfs handle.
 
 ## OCI Bundle Handling
 - The bundle path must be absolute and must contain `config.json` in the global VFS.

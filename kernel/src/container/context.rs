@@ -3,11 +3,11 @@ use alloc::sync::Arc;
 use crate::fs::Directory;
 
 #[derive(Clone)]
-pub struct ContainerRuntime {
+pub struct ContainerContext {
     rootfs: Arc<dyn Directory>,
 }
 
-impl ContainerRuntime {
+impl ContainerContext {
     pub fn new(rootfs: Arc<dyn Directory>) -> Self {
         Self { rootfs }
     }

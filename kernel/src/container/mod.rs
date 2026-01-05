@@ -4,26 +4,26 @@ use alloc::sync::Arc;
 use crate::util::spinlock::SpinLock;
 use oci_spec::runtime::Spec;
 
-pub mod runtime;
+pub mod context;
 pub mod state;
 mod table;
 
-pub use runtime::ContainerRuntime;
+pub use context::ContainerContext;
 pub use state::{ContainerState, ContainerStatus};
 pub use table::{CONTAINER_TABLE, ContainerError, ContainerTable};
 
 pub struct Container {
     state: SpinLock<ContainerState>,
     spec: Spec,
-    runtime: SpinLock<ContainerRuntime>,
+    context: SpinLock<ContainerContext>,
 }
 
 impl Container {
-    pub fn new(state: ContainerState, spec: Spec, runtime: ContainerRuntime) -> Self {
+    pub fn new(state: ContainerState, spec: Spec, context: ContainerContext) -> Self {
         Self {
             state: SpinLock::new(state),
             spec,
-            runtime: SpinLock::new(runtime),
+            context: SpinLock::new(context),
         }
     }
 
@@ -39,11 +39,11 @@ impl Container {
         &self.spec
     }
 
-    pub fn runtime(&self) -> ContainerRuntime {
-        self.runtime.lock().clone()
+    pub fn context(&self) -> ContainerContext {
+        self.context.lock().clone()
     }
 
     pub fn rootfs(&self) -> Arc<dyn crate::fs::Directory> {
-        self.runtime.lock().rootfs()
+        self.context.lock().rootfs()
     }
 }
