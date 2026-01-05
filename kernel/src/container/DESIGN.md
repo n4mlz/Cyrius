@@ -5,8 +5,8 @@
   required to track lifecycle transitions (status/pid).
 - Provides a `ContainerTable` for creating and looking up containers by ID, backed by a
   `SpinLock`-guarded map.
-- Allocates a per-container root filesystem instance at create time to keep host and container
-  filesystems strictly separated.
+- Resolves the bundle rootfs directory specified in `config.json` and stores a handle so container
+  processes can be isolated from the host filesystem.
 
 ## Static vs Dynamic Data
 - `ContainerState` holds the OCI-style runtime state (`ociVersion`, `id`, `status`, `pid`,

@@ -94,11 +94,12 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
+        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
         let config = bundle_dir
             .create_file("config.json")
             .expect("create config");
         config
-            .write_at(0, br#"{"ociVersion":"1.0.2"}"#)
+            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
         let id = "syscall-demo";

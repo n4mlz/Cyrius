@@ -8,7 +8,6 @@ use oci_spec::runtime::Spec;
 use serde_json::Value;
 
 use crate::container::{Container, ContainerContext, ContainerState, ContainerStatus};
-use crate::fs::memfs::MemDirectory;
 use crate::fs::{Directory, NodeRef, VfsError, VfsPath, with_vfs};
 use crate::util::spinlock::SpinLock;
 
@@ -17,6 +16,7 @@ pub enum ContainerError {
     DuplicateId,
     InvalidId,
     BundlePathNotAbsolute,
+    MissingRoot,
     Vfs(VfsError),
     ConfigNotUtf8,
     ConfigParseFailed,
@@ -63,7 +63,7 @@ impl ContainerTable {
             bundle_path: bundle.to_string(),
             annotations: spec_annotations(&spec),
         };
-        let rootfs = new_container_rootfs();
+        let rootfs = resolve_rootfs(&bundle, &spec)?;
         let context = ContainerContext::new(rootfs);
         let container = Arc::new(Container::new(state, spec, context));
 
@@ -95,10 +95,6 @@ impl Default for ContainerTable {
 
 pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
 
-fn new_container_rootfs() -> Arc<dyn Directory> {
-    MemDirectory::new()
-}
-
 fn load_spec(bundle_path: &VfsPath) -> Result<Spec, ContainerError> {
     let config_path = bundle_path.join(&VfsPath::parse("config.json")?)?;
     let bytes = read_file(&config_path)?;
@@ -113,6 +109,25 @@ fn load_spec(bundle_path: &VfsPath) -> Result<Spec, ContainerError> {
         serde_json::from_value(json_value).map_err(|_| ContainerError::ConfigParseFailed)?;
 
     Ok(spec)
+}
+
+fn resolve_rootfs(
+    bundle_path: &VfsPath,
+    spec: &Spec,
+) -> Result<Arc<dyn Directory>, ContainerError> {
+    let root = spec.root().as_ref().ok_or(ContainerError::MissingRoot)?;
+    let root_path = VfsPath::parse(root.path())?;
+    let abs = if root_path.is_absolute() {
+        root_path
+    } else {
+        bundle_path.join(&root_path)?
+    };
+
+    with_vfs(|vfs| match vfs.open_absolute(&abs)? {
+        NodeRef::Directory(dir) => Ok(dir),
+        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+    })
+    .map_err(ContainerError::Vfs)
 }
 
 fn read_file(path: &VfsPath) -> Result<Vec<u8>, ContainerError> {
@@ -148,6 +163,7 @@ mod tests {
     use super::*;
     use crate::fs::Directory;
     use crate::fs::force_replace_root;
+    use crate::fs::memfs::MemDirectory;
     use crate::println;
     use crate::test::kernel_test_case;
 
@@ -160,10 +176,12 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
+        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
         let config = bundle_dir
             .create_file("config.json")
             .expect("create config");
-        let json = br#"{"ociVersion":"1.0.2","annotations":{"org.example/foo":"bar"}}"#;
+        let json =
+            br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"},"annotations":{"org.example/foo":"bar"}}"#;
         config.write_at(0, json).expect("write config");
 
         let container = CONTAINER_TABLE
@@ -191,11 +209,12 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
+        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
         let config = bundle_dir
             .create_file("config.json")
             .expect("create config");
         config
-            .write_at(0, br#"{"ociVersion":"1.0.2"}"#)
+            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
         CONTAINER_TABLE
