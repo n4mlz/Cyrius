@@ -14,7 +14,7 @@
 
 ### ProcessControl
 - Stored as `Arc<ProcessControl>` so threads can hold a direct reference to their owning process without touching the global table.
-- Stores `id`, `_name`, `address_space`, `state`, `threads`, `fs`, and `abi`.
+- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, and `abi`.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` now spans `Created`, `Ready`, `Running`, `Waiting`, `Terminated`; transitions are simple and primarily driven by thread attach/detach and scheduler ticks.
 - `abi` is fixed at process creation; callers choose host or Linux ABI up front (linux-box creates a Linux ABI process).
@@ -45,6 +45,7 @@
 ## Error Model and Synchronization
 - `ProcessError` signals precondition violations and internal consistency issues to callers such as the scheduler.
 - The process table is guarded by a spin lock, while per-process state (`threads`, `cwd`) uses dedicated spin locks inside `ProcessControl`.
+- Path resolution and FD/VFS operations live in the `process::fs` helper module; `ProcessTable` now focuses on lifecycle and thread association.
 - Locks are expected to be held briefly; interrupt handlers should avoid taking process-table locks.
 
 ## Future Extensions

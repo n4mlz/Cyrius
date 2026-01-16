@@ -1,41 +1,21 @@
-use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use alloc::sync::Arc;
-use alloc::vec;
-use alloc::vec::Vec;
-
-use oci_spec::runtime::Spec;
-use serde_json::Value;
 
 use crate::container::{Container, ContainerContext, ContainerState, ContainerStatus};
-use crate::fs::{Directory, NodeRef, VfsError, VfsPath, with_vfs};
-use crate::util::spinlock::SpinLock;
+use crate::fs::VfsPath;
 
-#[derive(Debug)]
-pub enum ContainerError {
-    DuplicateId,
-    InvalidId,
-    BundlePathNotAbsolute,
-    MissingRoot,
-    Vfs(VfsError),
-    ConfigNotUtf8,
-    ConfigParseFailed,
-}
-
-impl From<VfsError> for ContainerError {
-    fn from(err: VfsError) -> Self {
-        Self::Vfs(err)
-    }
-}
+use super::repository::ContainerRepository;
+use super::spec::SpecLoader;
+use super::ContainerError;
 
 pub struct ContainerTable {
-    inner: SpinLock<BTreeMap<String, Arc<Container>>>,
+    repo: ContainerRepository,
 }
 
 impl ContainerTable {
     pub const fn new() -> Self {
         Self {
-            inner: SpinLock::new(BTreeMap::new()),
+            repo: ContainerRepository::new(),
         }
     }
 
@@ -54,36 +34,30 @@ impl ContainerTable {
             return Err(ContainerError::BundlePathNotAbsolute);
         }
 
-        let spec = load_spec(&bundle)?;
+        let spec = SpecLoader::load(&bundle)?;
+        let meta = SpecLoader::metadata(&spec);
         let state = ContainerState {
-            oci_version: spec_oci_version(&spec),
+            oci_version: meta.oci_version,
             id: id.to_string(),
             status: ContainerStatus::Created,
             pid: None,
             bundle_path: bundle.to_string(),
-            annotations: spec_annotations(&spec),
+            annotations: meta.annotations,
         };
-        let rootfs = resolve_rootfs(&bundle, &spec)?;
+        let rootfs = SpecLoader::resolve_rootfs(&bundle, &spec)?;
         let context = ContainerContext::new(rootfs);
         let container = Arc::new(Container::new(state, spec, context));
 
-        let mut guard = self.inner.lock();
-        if guard.contains_key(id) {
-            return Err(ContainerError::DuplicateId);
-        }
-        guard.insert(id.to_string(), container.clone());
-        Ok(container)
+        self.repo.insert(id, container)
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Container>> {
-        let guard = self.inner.lock();
-        guard.get(id).cloned()
+        self.repo.get(id)
     }
 
     #[cfg(test)]
     pub fn clear_for_tests(&self) {
-        let mut guard = self.inner.lock();
-        guard.clear();
+        self.repo.clear_for_tests();
     }
 }
 
@@ -94,69 +68,6 @@ impl Default for ContainerTable {
 }
 
 pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
-
-fn load_spec(bundle_path: &VfsPath) -> Result<Spec, ContainerError> {
-    let config_path = bundle_path.join(&VfsPath::parse("config.json")?)?;
-    let bytes = read_file(&config_path)?;
-    let text = core::str::from_utf8(&bytes).map_err(|_| ContainerError::ConfigNotUtf8)?;
-
-    // Parse JSON into a Value first, then deserialize into Spec.
-    // This two-step approach avoids stack overflow issues that occur when
-    // deserializing directly from a string into Spec.
-    let json_value: Value =
-        serde_json::from_str(text).map_err(|_| ContainerError::ConfigParseFailed)?;
-    let spec: Spec =
-        serde_json::from_value(json_value).map_err(|_| ContainerError::ConfigParseFailed)?;
-
-    Ok(spec)
-}
-
-fn resolve_rootfs(
-    bundle_path: &VfsPath,
-    spec: &Spec,
-) -> Result<Arc<dyn Directory>, ContainerError> {
-    let root = spec.root().as_ref().ok_or(ContainerError::MissingRoot)?;
-    let root_path = VfsPath::parse(root.path())?;
-    let abs = if root_path.is_absolute() {
-        root_path
-    } else {
-        bundle_path.join(&root_path)?
-    };
-
-    with_vfs(|vfs| match vfs.open_absolute(&abs)? {
-        NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-    })
-    .map_err(ContainerError::Vfs)
-}
-
-fn read_file(path: &VfsPath) -> Result<Vec<u8>, ContainerError> {
-    let file = with_vfs(|vfs| match vfs.open_absolute(path)? {
-        NodeRef::File(file) => Ok(file),
-        NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
-    })?;
-    let meta = file.metadata()?;
-    let size = usize::try_from(meta.size).map_err(|_| ContainerError::Vfs(VfsError::Corrupted))?;
-    let mut buf = vec![0u8; size];
-    let mut offset = 0usize;
-    while offset < size {
-        let read = file.read_at(offset, &mut buf[offset..])?;
-        if read == 0 {
-            break;
-        }
-        offset = offset.saturating_add(read);
-    }
-    buf.truncate(offset);
-    Ok(buf)
-}
-
-fn spec_oci_version(spec: &Spec) -> String {
-    spec.version().to_string()
-}
-
-fn spec_annotations(spec: &Spec) -> BTreeMap<String, String> {
-    spec.annotations().clone().unwrap_or_default()
-}
 
 #[cfg(test)]
 mod tests {

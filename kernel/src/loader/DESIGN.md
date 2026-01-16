@@ -6,6 +6,7 @@
 
 ## Linux ELF Loader
 - Supports ELF64, little-endian, `ET_EXEC`, `EM_X86_64`, and `PT_LOAD` segments only; dynamic linking, PIE, and relocations are out of scope.
+- Parsing, mapping, syscall patching, and stack construction are separated into dedicated loader submodules (`elf`, `map`, `patch`, `stack`) for easier evolution.
 - Maps each loadable segment into the target process address space with `USER` permissions derived from ELF `p_flags` (R/W/X). Backing frames are freshly allocated via the global frame allocator.
 - Copies file-backed bytes to the mapped region and zero-fills the remaining `p_memsz - p_filesz` portion for `.bss`.
 - Rewrites `syscall` instructions (`0x0f 0x05`) in executable segments into `int 0x80` so we can reuse the existing software-interrupt path until proper `SYSCALL/SYSRET` MSR plumbing is added.

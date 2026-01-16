@@ -6,7 +6,7 @@ use core::convert::TryFrom;
 use bootloader_api::{BootInfo, info::MemoryRegionKind};
 
 use crate::arch::api::HeapRegionError;
-use crate::mem::addr::{AddrRange, VirtAddr};
+use crate::mem::addr::{AddrRange, VirtAddr, align_down_u64, align_up_u64};
 
 const PAGE_SIZE: u64 = 4096;
 
@@ -26,11 +26,11 @@ pub fn locate_kernel_heap(
             continue;
         }
 
-        let start = match align_up(region.start, PAGE_SIZE) {
+        let start = match align_up_u64(region.start, PAGE_SIZE) {
             Some(addr) => addr,
             None => continue,
         };
-        let end = align_down(region.end, PAGE_SIZE);
+        let end = align_down_u64(region.end, PAGE_SIZE);
 
         if end <= start {
             continue;
@@ -61,20 +61,4 @@ pub fn locate_kernel_heap(
         start: VirtAddr::new(start),
         end: VirtAddr::new(end),
     })
-}
-
-fn align_up(value: u64, align: u64) -> Option<u64> {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    if value & mask == 0 {
-        Some(value)
-    } else {
-        let delta = align - (value & mask);
-        value.checked_add(delta)
-    }
-}
-
-fn align_down(value: u64, align: u64) -> u64 {
-    debug_assert!(align.is_power_of_two());
-    value & !(align - 1)
 }

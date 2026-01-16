@@ -13,7 +13,8 @@
 ## Block Devices (`device::block`)
 - Defines the synchronous `BlockDevice` trait used by storage drivers. Consumers operate on logical block addresses and supply buffers that are multiples of the advertised block size.
 - The trait is intentionally narrow (read/write/flush plus metadata) so that VFS/paging code can compose higher-level semantics without being tied to the transport.
-- `device::virtio::block` provides the first concrete implementation using the VirtIO PCI transport. Devices are discovered through `probe_pci_devices`, stored in a simple registry guarded by a `SpinLock`, and surfaced to future subsystems via helper callbacks.
+- `BlockDeviceProvider` abstracts discovery and enumeration so boot-time consumers can probe without binding to a specific transport.
+- `device::virtio::block` provides the first concrete implementation using the VirtIO PCI transport. Devices are discovered through `device::probe::probe_block_devices`, stored in a simple registry guarded by a `SpinLock`, and surfaced to future subsystems via helper callbacks.
 - The driver keeps virtqueue plumbing and DMA buffer management self-contained, reusing the generic `QueueMemory` + `DmaRegionProvider` so other transports can follow the same pattern.
 - Modern VirtIO devices expose MSI-X vectors; the driver now programs a per-queue vector via the shared interrupt allocator so completions arrive asynchronously instead of pure polling.
 

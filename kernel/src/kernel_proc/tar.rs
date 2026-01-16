@@ -1,5 +1,6 @@
 use crate::fs::{PathComponent, VfsError, VfsPath};
-use crate::process::{PROCESS_TABLE, ProcessId};
+use crate::process::ProcessId;
+use crate::process::fs as proc_fs;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -29,16 +30,14 @@ pub fn extract_to_ramfs(
     archive_path: &str,
     dest: Option<&str>,
 ) -> Result<(), TarError> {
-    let cwd = PROCESS_TABLE.cwd(pid).map_err(TarError::Fs)?;
+    let cwd = proc_fs::cwd(pid).map_err(TarError::Fs)?;
     let base = match dest {
-        Some(path) => normalise_path(path, &cwd).map_err(TarError::Fs)?,
+        Some(path) => VfsPath::resolve(path, &cwd).map_err(TarError::Fs)?,
         None => cwd,
     };
     TarExtractor::ensure_dir_chain_static(pid, &base)?;
 
-    let fd = PROCESS_TABLE
-        .open_path(pid, archive_path)
-        .map_err(TarError::Fs)?;
+    let fd = proc_fs::open_path(pid, archive_path).map_err(TarError::Fs)?;
     let mut reader = TarReader::new(pid, fd);
     let result = TarExtractor {
         pid,
@@ -46,7 +45,7 @@ pub fn extract_to_ramfs(
         pending_hardlinks: Vec::new(),
     }
     .extract(&mut reader);
-    let _ = PROCESS_TABLE.close_fd(pid, fd);
+    let _ = proc_fs::close_fd(pid, fd);
     result
 }
 
@@ -82,8 +81,7 @@ impl TarExtractor {
                     let parent = target.parent().ok_or(TarError::InvalidArchive)?;
                     self.ensure_dir_chain(&parent)?;
                     reader.skip_entry_data(entry.size)?;
-                    PROCESS_TABLE
-                        .symlink(self.pid, &link, target.to_string().as_str())
+                    proc_fs::symlink(self.pid, &link, target.to_string().as_str())
                         .map_err(TarError::Fs)?;
                 }
                 TarEntryKind::HardLink { target: src } => {
@@ -121,17 +119,13 @@ impl TarExtractor {
         for component in target.components() {
             current.push(component.clone());
             let raw = current.to_string();
-            PROCESS_TABLE
-                .create_dir(pid, raw.as_str())
-                .map_err(TarError::Fs)?;
+            proc_fs::create_dir(pid, raw.as_str()).map_err(TarError::Fs)?;
         }
         Ok(())
     }
 
     fn write_file(&self, path: &VfsPath, data: &[u8]) -> Result<(), TarError> {
-        PROCESS_TABLE
-            .write_path(self.pid, path.to_string().as_str(), data)
-            .map_err(TarError::Fs)
+        proc_fs::write_path(self.pid, path.to_string().as_str(), data).map_err(TarError::Fs)
     }
 
     fn realise_hardlinks(&self) -> Result<(), TarError> {
@@ -145,7 +139,7 @@ impl TarExtractor {
                     first
                 );
             }
-            match PROCESS_TABLE.hard_link(
+            match proc_fs::hard_link(
                 self.pid,
                 first.to_string().as_str(),
                 pending.link.to_string().as_str(),
@@ -154,13 +148,12 @@ impl TarExtractor {
                 Err(VfsError::NotFound) => {
                     let root_rel =
                         resolve_link_target(&self.base, &self.base, pending.target.as_str())?;
-                    PROCESS_TABLE
-                        .hard_link(
-                            self.pid,
-                            root_rel.to_string().as_str(),
-                            pending.link.to_string().as_str(),
-                        )
-                        .map_err(TarError::Fs)?;
+                    proc_fs::hard_link(
+                        self.pid,
+                        root_rel.to_string().as_str(),
+                        pending.link.to_string().as_str(),
+                    )
+                    .map_err(TarError::Fs)?;
                 }
                 Err(e) => return Err(TarError::Fs(e)),
             }
@@ -277,8 +270,7 @@ impl TarReader {
             crate::println!("[tar] read_exact offset={} len={}", self.cursor, buf.len());
         }
         while filled < buf.len() {
-            let read = PROCESS_TABLE
-                .read_fd(self.pid, self.fd, &mut buf[filled..])
+            let read = proc_fs::read_fd(self.pid, self.fd, &mut buf[filled..])
                 .map_err(TarError::Fs)?;
             if read == 0 {
                 return Err(TarError::UnexpectedEof);
@@ -491,29 +483,6 @@ fn resolve_link_target(
     Ok(VfsPath::from_components(true, comps))
 }
 
-fn normalise_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
-    if raw.starts_with('/') {
-        return VfsPath::parse(raw);
-    }
-
-    let mut components = cwd.components().to_vec();
-    for part in raw.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            components.pop();
-            continue;
-        }
-        if part.len() > 255 {
-            return Err(VfsError::NameTooLong);
-        }
-        components.push(PathComponent::new(part));
-    }
-
-    Ok(VfsPath::from_components(true, components))
-}
-
 fn debug_log(label: &str, kind: &TarEntryKind, target: &VfsPath) {
     if !TAR_VERBOSE {
         return;
@@ -563,23 +532,21 @@ mod tests {
     }
 
     fn write_archive(pid: ProcessId, path: &str, data: &[u8]) {
-        PROCESS_TABLE
-            .write_path(pid, path, data)
-            .expect("write archive into memfs");
+        proc_fs::write_path(pid, path, data).expect("write archive into memfs");
     }
 
     fn read_all(pid: ProcessId, path: &str) -> Vec<u8> {
-        let fd = PROCESS_TABLE.open_path(pid, path).expect("open path");
+        let fd = proc_fs::open_path(pid, path).expect("open path");
         let mut buf = [0u8; 512];
         let mut out = Vec::new();
         loop {
-            let read = PROCESS_TABLE.read_fd(pid, fd, &mut buf).expect("read data");
+            let read = proc_fs::read_fd(pid, fd, &mut buf).expect("read data");
             if read == 0 {
                 break;
             }
             out.extend_from_slice(&buf[..read]);
         }
-        let _ = PROCESS_TABLE.close_fd(pid, fd);
+        let _ = proc_fs::close_fd(pid, fd);
         out
     }
 
@@ -603,7 +570,7 @@ mod tests {
                         continue;
                     }
                     let target_path = alloc::format!("/mnt/{file}");
-                    if PROCESS_TABLE.open_path(pid, target_path.as_str()).is_ok() {
+                    if proc_fs::open_path(pid, target_path.as_str()).is_ok() {
                         mounted = true;
                         break;
                     }
@@ -661,9 +628,7 @@ mod tests {
             mount_host_tar(pid, "sample_with_links.tar"),
             "no FAT image containing sample_with_links.tar"
         );
-        PROCESS_TABLE
-            .change_dir(pid, "/mnt")
-            .expect("change directory to /mnt");
+        proc_fs::change_dir(pid, "/mnt").expect("change directory to /mnt");
 
         shell::run_command(pid, "tar sample_with_links.tar /").expect("tar command via shell");
 
@@ -688,9 +653,7 @@ mod tests {
             mount_host_tar(pid, "busybox.tar"),
             "no FAT image containing busybox.tar"
         );
-        PROCESS_TABLE
-            .change_dir(pid, "/mnt")
-            .expect("change directory to /mnt");
+        proc_fs::change_dir(pid, "/mnt").expect("change directory to /mnt");
 
         shell::run_command(pid, "tar busybox.tar /out").expect("tar command via shell");
 

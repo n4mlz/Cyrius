@@ -35,6 +35,13 @@ pub trait BlockDevice: Device {
     fn flush(&mut self) -> Result<(), Self::Error>;
 }
 
+pub trait BlockDeviceProvider {
+    type Device: BlockDevice + Device;
+
+    fn probe(&self) -> usize;
+    fn with_devices<R>(&self, f: impl FnOnce(&[Arc<SpinLock<Self::Device>>]) -> R) -> R;
+}
+
 #[derive(Clone)]
 pub struct SharedBlockDevice<T> {
     inner: Arc<SpinLock<T>>,

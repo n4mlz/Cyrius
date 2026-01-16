@@ -2,65 +2,14 @@ use alloc::{sync::Arc, vec::Vec};
 use core::convert::TryFrom;
 
 use crate::arch::x86_64::mem::address_space::{self, AddressSpace as InnerAddressSpace};
-use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr};
+use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down_u64};
 use crate::mem::paging::{FrameAllocator, PageTableOps, UnmapError};
-use crate::util::{lazylock::LazyLock, spinlock::SpinLock};
 
 use super::trap::{GeneralRegisters, TrapFrame, gdt};
 
 const STACK_ALIGNMENT: u64 = 16;
 const RFLAGS_RESERVED: u64 = 1 << 1;
 const RFLAGS_INTERRUPT_ENABLE: u64 = 1 << 9;
-const USER_STACK_REGION_START: usize = 0x0000_7000_0000_0000;
-const USER_STACK_REGION_END: usize = 0x0000_7FFF_FF00_0000;
-const USER_STACK_ALIGNMENT: usize = PageSize::SIZE_4K.bytes();
-
-struct UserStackAllocator {
-    next: usize,
-    free: Vec<(usize, usize)>,
-}
-
-impl UserStackAllocator {
-    fn new() -> Self {
-        Self {
-            next: USER_STACK_REGION_END,
-            free: Vec::new(),
-        }
-    }
-
-    fn allocate(&mut self, size: usize) -> Option<usize> {
-        if let Some(index) = self
-            .free
-            .iter()
-            .position(|(_, region_size)| *region_size == size)
-        {
-            let (base, _) = self.free.swap_remove(index);
-            return Some(base);
-        }
-
-        if self.next < USER_STACK_REGION_START + size {
-            return None;
-        }
-
-        self.next -= size;
-        Some(self.next)
-    }
-
-    fn deallocate(&mut self, base: usize, size: usize) {
-        self.free.push((base, size));
-    }
-}
-
-fn user_stack_allocator() -> &'static SpinLock<UserStackAllocator> {
-    fn init() -> SpinLock<UserStackAllocator> {
-        SpinLock::new(UserStackAllocator::new())
-    }
-
-    static ALLOCATOR: LazyLock<SpinLock<UserStackAllocator>, fn() -> SpinLock<UserStackAllocator>> =
-        LazyLock::new_const(init);
-    &ALLOCATOR
-}
-
 #[derive(Clone)]
 pub struct UserStack {
     space: AddressSpace,
@@ -73,17 +22,7 @@ impl UserStack {
         space: &AddressSpace,
         size: usize,
     ) -> Result<Self, crate::arch::api::UserStackError> {
-        if size == 0 {
-            return Err(crate::arch::api::UserStackError::InvalidSize);
-        }
-
-        let aligned = align_up_usize(size, USER_STACK_ALIGNMENT);
-        let base = {
-            let mut allocator = user_stack_allocator().lock();
-            allocator
-                .allocate(aligned)
-                .ok_or(crate::arch::api::UserStackError::AddressSpaceExhausted)?
-        };
+        let (base, aligned) = space.inner().allocate_user_stack_region(size)?;
 
         let virt_base = VirtAddr::new(base);
         let map_result = space.inner().with_table(|table, allocator| {
@@ -111,7 +50,7 @@ impl UserStack {
         });
 
         if let Err(err) = map_result {
-            user_stack_allocator().lock().deallocate(base, aligned);
+            space.inner().deallocate_user_stack_region(base, aligned);
             return Err(err);
         }
 
@@ -143,9 +82,9 @@ impl Drop for UserStack {
             }
         });
 
-        user_stack_allocator()
-            .lock()
-            .deallocate(self.base.as_raw(), self.size);
+        self.space
+            .inner()
+            .deallocate_user_stack_region(self.base.as_raw(), self.size);
     }
 }
 
@@ -290,16 +229,6 @@ impl AddressSpace {
 
 fn virt_to_u64(addr: VirtAddr) -> u64 {
     u64::try_from(addr.as_raw()).expect("virtual address exceeds architectural width")
-}
-
-fn align_down_u64(value: u64, align: u64) -> u64 {
-    debug_assert!(align.is_power_of_two());
-    value & !(align - 1)
-}
-
-fn align_up_usize(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two(), "alignment must be power of two");
-    (value + align - 1) & !(align - 1)
 }
 
 fn rollback_user_mapping(

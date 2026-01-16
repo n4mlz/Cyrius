@@ -3,7 +3,9 @@ use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// simple non-reentrant and non-fair spin lock
+/// Simple non-reentrant and non-fair spin lock.
+///
+/// This lock does not mask interrupts; callers must handle IRQ safety separately.
 pub struct SpinLock<T> {
     flag: AtomicBool,
     value: UnsafeCell<T>,

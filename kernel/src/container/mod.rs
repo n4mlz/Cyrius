@@ -5,45 +5,54 @@ use crate::util::spinlock::SpinLock;
 use oci_spec::runtime::Spec;
 
 pub mod context;
+mod error;
+mod repository;
+mod spec;
 pub mod state;
 mod table;
 
 pub use context::ContainerContext;
+pub use error::ContainerError;
+pub use repository::ContainerRepository;
+pub use spec::{SpecLoader, SpecMetadata};
 pub use state::{ContainerState, ContainerStatus};
-pub use table::{CONTAINER_TABLE, ContainerError, ContainerTable};
+pub use table::{CONTAINER_TABLE, ContainerTable};
+
+struct ContainerMutable {
+    state: ContainerState,
+    context: ContainerContext,
+}
 
 pub struct Container {
-    state: SpinLock<ContainerState>,
-    spec: Spec,
-    context: SpinLock<ContainerContext>,
+    mutable: SpinLock<ContainerMutable>,
+    spec: Arc<Spec>,
 }
 
 impl Container {
     pub fn new(state: ContainerState, spec: Spec, context: ContainerContext) -> Self {
         Self {
-            state: SpinLock::new(state),
-            spec,
-            context: SpinLock::new(context),
+            mutable: SpinLock::new(ContainerMutable { state, context }),
+            spec: Arc::new(spec),
         }
     }
 
     pub fn id(&self) -> String {
-        self.state.lock().id.clone()
+        self.mutable.lock().state.id.clone()
     }
 
     pub fn state(&self) -> ContainerState {
-        self.state.lock().clone()
+        self.mutable.lock().state.clone()
     }
 
     pub fn spec(&self) -> &Spec {
-        &self.spec
+        self.spec.as_ref()
     }
 
     pub fn context(&self) -> ContainerContext {
-        self.context.lock().clone()
+        self.mutable.lock().context.clone()
     }
 
     pub fn rootfs(&self) -> Arc<dyn crate::fs::Directory> {
-        self.context.lock().rootfs()
+        self.mutable.lock().context.rootfs()
     }
 }

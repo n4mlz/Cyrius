@@ -6,7 +6,7 @@ use x86_64::{
     structures::paging::PhysFrame,
 };
 
-use crate::mem::addr::{Page, PageSize, PhysAddr};
+use crate::mem::addr::{Page, PageSize, PhysAddr, align_up};
 use crate::mem::frame::FrameAllocatorGuard;
 use crate::mem::manager;
 use crate::mem::mapper::OffsetMapper;
@@ -20,6 +20,7 @@ pub struct AddressSpace {
     flags: Cr3Flags,
     owned_root: bool,
     lock: SpinLock<()>,
+    user_stack_allocator: SpinLock<UserStackAllocator>,
 }
 
 impl AddressSpace {
@@ -29,6 +30,7 @@ impl AddressSpace {
             flags,
             owned_root,
             lock: SpinLock::new(()),
+            user_stack_allocator: SpinLock::new(UserStackAllocator::new()),
         }
     }
 
@@ -65,6 +67,28 @@ impl AddressSpace {
         let mut table = unsafe { X86PageTable::from_existing(self.root, mapper) };
         let mut allocator = manager::frame_allocator();
         f(&mut table, &mut allocator)
+    }
+
+    pub fn allocate_user_stack_region(
+        &self,
+        size: usize,
+    ) -> Result<(usize, usize), crate::arch::api::UserStackError> {
+        if size == 0 {
+            return Err(crate::arch::api::UserStackError::InvalidSize);
+        }
+        let aligned = align_up(size, USER_STACK_ALIGNMENT);
+        let base = {
+            let mut allocator = self.user_stack_allocator.lock();
+            allocator
+                .allocate(aligned)
+                .ok_or(crate::arch::api::UserStackError::AddressSpaceExhausted)?
+        };
+        Ok((base, aligned))
+    }
+
+    pub fn deallocate_user_stack_region(&self, base: usize, size: usize) {
+        let mut allocator = self.user_stack_allocator.lock();
+        allocator.deallocate(base, size);
     }
 }
 
@@ -116,6 +140,46 @@ fn init_kernel_space() -> Arc<AddressSpace> {
     let addr = usize::try_from(phys).expect("CR3 frame exceeds usize range");
     let root = Page::new(PhysAddr::new(addr), PageSize::SIZE_4K);
     Arc::new(AddressSpace::new(root, flags, false))
+}
+
+const USER_STACK_REGION_START: usize = 0x0000_7000_0000_0000;
+const USER_STACK_REGION_END: usize = 0x0000_7FFF_FF00_0000;
+const USER_STACK_ALIGNMENT: usize = PageSize::SIZE_4K.bytes();
+
+struct UserStackAllocator {
+    next: usize,
+    free: alloc::vec::Vec<(usize, usize)>,
+}
+
+impl UserStackAllocator {
+    fn new() -> Self {
+        Self {
+            next: USER_STACK_REGION_END,
+            free: alloc::vec::Vec::new(),
+        }
+    }
+
+    fn allocate(&mut self, size: usize) -> Option<usize> {
+        if let Some(index) = self
+            .free
+            .iter()
+            .position(|(_, region_size)| *region_size == size)
+        {
+            let (base, _) = self.free.swap_remove(index);
+            return Some(base);
+        }
+
+        if self.next < USER_STACK_REGION_START + size {
+            return None;
+        }
+
+        self.next -= size;
+        Some(self.next)
+    }
+
+    fn deallocate(&mut self, base: usize, size: usize) {
+        self.free.push((base, size));
+    }
 }
 
 fn phys_frame_from_page(page: Page<PhysAddr>) -> PhysFrame {

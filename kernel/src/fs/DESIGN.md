@@ -15,10 +15,13 @@
   that mount’s root.
 - Directory listings include mount points even if the parent directory does not contain an explicit
   entry, making mounted filesystems visible under their parent (e.g. `/mnt` shows up in `/`).
-- `VfsPath` normalises out empty/`.` segments and rejects `..` to avoid partial relative semantics
-  until a full path resolution policy is in place.
+- `VfsPath::parse` normalises out empty/`.` segments and rejects `..` to keep raw paths strict.
+- `VfsPath::resolve` handles relative inputs by folding `..` segments against a base path, clamping
+  at the root so callers (process VFS ops, tar extraction, loader) share consistent behaviour.
 - Process FDs advance offsets on successful reads/writes. Write/mmap are supported only by
   filesystems that opt in (e.g. memfs); read-only filesystems return `ReadOnly`.
+- `FileSystemProbe` abstracts per-filesystem probing so boot-time selection can iterate through
+  candidate block devices without hard-coding driver logic in the kernel entrypoint.
 
 ## FAT32 Driver (Read-Only)
 - `FatFileSystem` wraps a shared `BlockDevice` (via `SharedBlockDevice`); only 512-byte logical

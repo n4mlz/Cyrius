@@ -8,7 +8,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use bootloader_api::BootInfo;
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 
-use crate::mem::addr::{Addr, AddrRange, Page, PageSize, PhysAddr};
+use crate::mem::addr::{
+    Addr, AddrRange, Page, PageSize, PhysAddr, align_down_u64, align_up_u64,
+};
 use crate::mem::paging::FrameAllocator;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
@@ -33,8 +35,8 @@ impl RegionCursor {
             return None;
         }
 
-        let start = align_up(region.start, FRAME_SIZE)?;
-        let end = align_down(region.end, FRAME_SIZE);
+        let start = align_up_u64(region.start, FRAME_SIZE)?;
+        let end = align_down_u64(region.end, FRAME_SIZE);
 
         if end <= start {
             return None;
@@ -52,7 +54,7 @@ impl RegionCursor {
     }
 
     fn align_next(&mut self) {
-        if let Some(aligned) = align_up(self.next, FRAME_SIZE) {
+        if let Some(aligned) = align_up_u64(self.next, FRAME_SIZE) {
             self.next = aligned;
         }
     }
@@ -117,9 +119,9 @@ impl BootInfoFrameAllocator {
             return;
         }
 
-        let start = align_down(range.start.as_raw() as u64, FRAME_SIZE);
-        let end =
-            align_up(range.end.as_raw() as u64, FRAME_SIZE).expect("reserved range end overflow");
+        let start = align_down_u64(range.start.as_raw() as u64, FRAME_SIZE);
+        let end = align_up_u64(range.end.as_raw() as u64, FRAME_SIZE)
+            .expect("reserved range end overflow");
 
         if end <= start {
             return;
@@ -275,7 +277,7 @@ impl BootInfoFrameAllocator {
             let r_start = range.start.as_raw() as u64;
             let r_end = range.end.as_raw() as u64;
             if start < r_end && end > r_start {
-                return align_up(r_end, FRAME_SIZE);
+                return align_up_u64(r_end, FRAME_SIZE);
             }
         }
         None
@@ -317,21 +319,6 @@ impl FrameAllocator for BootInfoFrameAllocator {
     fn deallocate(&mut self, frame: Page<PhysAddr>) {
         self.recycled.push(frame);
     }
-}
-
-fn align_up(value: u64, align: u64) -> Option<u64> {
-    debug_assert!(align.is_power_of_two());
-    let mask = align - 1;
-    if value & mask == 0 {
-        Some(value)
-    } else {
-        value.checked_add(align - (value & mask))
-    }
-}
-
-fn align_down(value: u64, align: u64) -> u64 {
-    debug_assert!(align.is_power_of_two());
-    value & !(align - 1)
 }
 
 fn build_page_run(start: u64, count: usize) -> Vec<Page<PhysAddr>> {

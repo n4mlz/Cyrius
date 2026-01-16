@@ -1,7 +1,7 @@
 use core::mem::size_of;
 use core::ptr;
 
-use crate::mem::addr::{Addr, PhysAddr, VirtIntoPtr};
+use crate::mem::addr::{Addr, PhysAddr, VirtIntoPtr, align_up};
 use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 
 const VRING_ALIGN: usize = 4096;
@@ -117,13 +117,6 @@ impl QueueLayout {
             total_len,
         })
     }
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    if align == 0 {
-        return value;
-    }
-    (value + align - 1) & !(align - 1)
 }
 
 pub struct QueueMemory {

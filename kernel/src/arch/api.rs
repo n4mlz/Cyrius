@@ -19,6 +19,8 @@ pub trait ArchTrap {
 
     fn init_traps();
 
+    fn dispatch_trap(info: TrapInfo, frame: &mut Self::Frame);
+
     /// Attempt to handle an exception; return `true` if fully handled.
     fn handle_exception(_info: TrapInfo, _frame: &mut Self::Frame) -> bool {
         false

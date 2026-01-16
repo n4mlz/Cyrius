@@ -1,5 +1,9 @@
+use alloc::string::{String, ToString};
+
 use super::{SysError, SysResult, SyscallInvocation};
 use crate::container::{CONTAINER_TABLE, ContainerError};
+use crate::mem::addr::VirtAddr;
+use crate::mem::user::copy_from_user;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,7 +58,7 @@ fn handle_container_create(invocation: &SyscallInvocation) -> SysResult {
     let id = read_str(id_ptr, id_len)?;
     let bundle = read_str(bundle_ptr, bundle_len)?;
 
-    match CONTAINER_TABLE.create(id, bundle) {
+    match CONTAINER_TABLE.create(id.as_str(), bundle.as_str()) {
         Ok(_) => Ok(0),
         Err(ContainerError::DuplicateId | ContainerError::InvalidId) => {
             Err(SysError::InvalidArgument)
@@ -63,17 +67,16 @@ fn handle_container_create(invocation: &SyscallInvocation) -> SysResult {
     }
 }
 
-/// # Safety
-///
-/// The host ABI does not yet implement user/kernel address separation, so pointers are assumed
-/// to be valid kernel-mapped addresses.
-fn read_str(ptr: u64, len: u64) -> Result<&'static str, SysError> {
+fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {
     let len = usize::try_from(len).map_err(|_| SysError::InvalidArgument)?;
     if len == 0 {
         return Err(SysError::InvalidArgument);
     }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
-    core::str::from_utf8(bytes).map_err(|_| SysError::InvalidArgument)
+    let mut buf = alloc::vec![0u8; len];
+    copy_from_user(&mut buf, VirtAddr::new(ptr as usize))
+        .map_err(|_| SysError::InvalidArgument)?;
+    let text = core::str::from_utf8(&buf).map_err(|_| SysError::InvalidArgument)?;
+    Ok(text.to_string())
 }
 
 #[cfg(test)]
