@@ -12,8 +12,8 @@
 - PIDs are `u64`, allocated monotonically; overflow is treated as a logic bug that panics.
 - Process lookup is linear today. If the number of processes grows, we plan to swap in a different structure (e.g. `BTreeMap`).
 
-### ProcessControl
-- Stored as `Arc<ProcessControl>` so threads can hold a direct reference to their owning process without touching the global table.
+### Process
+- Stored as `Arc<Process>` so threads can hold a direct reference to their owning process without touching the global table.
 - Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, and `abi`.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` now spans `Created`, `Ready`, `Running`, `Waiting`, `Terminated`; transitions are simple and primarily driven by thread attach/detach and scheduler ticks.
@@ -31,7 +31,7 @@
 - `thread_count` is a lightweight helper for statistics and debugging.
 - `address_space(pid)` clones the stored handle so scheduling and memory management components can operate on the same CR3 state.
 - Process lifetime management (e.g. reclaiming a process when its thread list becomes empty) is intentionally deferred.
-- The scheduler reads the ABI directly from the thread's `ProcessControl` reference during context switches, avoiding global table locks in interrupt context.
+- The scheduler reads the ABI directly from the thread's `Process` reference during context switches, avoiding global table locks in interrupt context.
 
 ## Address Space and ABI Considerations
 - For now every kernel process shares the same kernel address space.
@@ -39,12 +39,12 @@
   - cloning / isolating address spaces when we spawn userland processes;
   - letting the scheduler reactivate a process-specific address space on context switches.
 - User-process creation already allocates a distinct PID and thread list but continues to reference the shared kernel mappings until the paging layer exposes copy-on-write cloning.
-- When Linux compatibility arrives, each `ProcessControl` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
+- When Linux compatibility arrives, each `Process` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
 - The linux-box launcher uses the per-process ABI to redirect traps from launched ELF binaries into the Linux syscall table.
 
 ## Error Model and Synchronization
 - `ProcessError` signals precondition violations and internal consistency issues to callers such as the scheduler.
-- The process table is guarded by a spin lock, while per-process state (`threads`, `cwd`) uses dedicated spin locks inside `ProcessControl`.
+- The process table is guarded by a spin lock, while per-process state (`threads`, `cwd`) uses dedicated spin locks inside `Process`.
 - Path resolution and FD/VFS operations live in the `process::fs` helper module; `ProcessTable` now focuses on lifecycle and thread association.
 - Locks are expected to be held briefly; interrupt handlers should avoid taking process-table locks.
 

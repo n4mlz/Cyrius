@@ -1,5 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use atomic_enum::atomic_enum;
 
 use crate::arch::{Arch, api::ArchThread};
 use crate::fs::{FdTable, VfsPath};
@@ -10,7 +12,7 @@ use crate::util::spinlock::SpinLock;
 pub mod fs;
 
 pub type ProcessId = u64;
-pub type ProcessHandle = Arc<ProcessControl>;
+pub type ProcessHandle = Arc<Process>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
@@ -88,7 +90,7 @@ impl ProcessTable {
             return Err(ProcessError::AlreadyInitialised);
         }
 
-        let process = Arc::new(ProcessControl::kernel(0, "kernel", Abi::Host));
+        let process = Arc::new(Process::kernel(0, "kernel", Abi::Host));
         inner.kernel_pid = Some(process.id());
         inner.next_pid = 1;
         inner.processes.push(process);
@@ -113,7 +115,7 @@ impl ProcessTable {
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(ProcessControl::kernel(pid, name, Abi::Host));
+        let process = Arc::new(Process::kernel(pid, name, Abi::Host));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -134,7 +136,7 @@ impl ProcessTable {
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(ProcessControl::user(pid, name, abi));
+        let process = Arc::new(Process::user(pid, name, abi));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -205,11 +207,11 @@ impl ProcessTableInner {
     }
 }
 
-pub struct ProcessControl {
+pub struct Process {
     id: ProcessId,
     name: &'static str,
     address_space: <Arch as ArchThread>::AddressSpace,
-    state: AtomicU8,
+    state: AtomicProcessState,
     #[allow(dead_code)]
     kind: ProcessKind,
     threads: SpinLock<Vec<ThreadId>>,
@@ -217,13 +219,13 @@ pub struct ProcessControl {
     abi: Abi,
 }
 
-impl ProcessControl {
+impl Process {
     fn kernel(id: ProcessId, name: &'static str, abi: Abi) -> Self {
         Self {
             id,
             name,
             address_space: <Arch as ArchThread>::current_address_space(),
-            state: AtomicU8::new(ProcessState::Created as u8),
+            state: AtomicProcessState::new(ProcessState::Created),
             kind: ProcessKind::Kernel,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
@@ -236,7 +238,7 @@ impl ProcessControl {
             id,
             name,
             address_space: <Arch as ArchThread>::current_address_space(),
-            state: AtomicU8::new(ProcessState::Created as u8),
+            state: AtomicProcessState::new(ProcessState::Created),
             kind: ProcessKind::User,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
@@ -261,7 +263,7 @@ impl ProcessControl {
     }
 
     pub fn state(&self) -> ProcessState {
-        ProcessState::from_raw(self.state.load(Ordering::Acquire))
+        self.state.load(Ordering::Acquire)
     }
 
     pub fn mark_ready(&self) {
@@ -279,7 +281,7 @@ impl ProcessControl {
 
     pub fn mark_terminated(&self) {
         self.state
-            .store(ProcessState::Terminated as u8, Ordering::Release);
+            .store(ProcessState::Terminated, Ordering::Release);
     }
 
     pub fn thread_count(&self) -> usize {
@@ -331,29 +333,17 @@ impl ProcessControl {
         if matches!(self.state(), ProcessState::Terminated) {
             return;
         }
-        self.state.store(state as u8, Ordering::Release);
+        self.state.store(state, Ordering::Release);
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[atomic_enum]
 pub enum ProcessState {
     Created = 0,
     Ready = 1,
     Running = 2,
     Waiting = 3,
     Terminated = 4,
-}
-
-impl ProcessState {
-    fn from_raw(raw: u8) -> Self {
-        match raw {
-            1 => Self::Ready,
-            2 => Self::Running,
-            3 => Self::Waiting,
-            4 => Self::Terminated,
-            _ => Self::Created,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
