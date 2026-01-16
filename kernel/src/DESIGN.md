@@ -16,6 +16,7 @@
 - **util**: shared primitives (spin locks, lazy init, stream helpers) leveraged across modules.
 - **fs**: minimal VFS abstraction with read-only FAT32 support and a global file descriptor table.
 - **kernel_proc**: shell-facing utilities (interactive shell, Linux ELF launcher) grouped under one namespace.
+- **init**: boot-time orchestration of memory, interrupts, device probing, and filesystem setup.
 
 ## Design Principles
 - Keep subsystem boundaries explicit; cross-module dependencies must be routed through trait contracts to simplify future architecture additions.

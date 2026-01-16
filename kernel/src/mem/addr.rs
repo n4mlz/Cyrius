@@ -1,5 +1,27 @@
 use core::convert::TryInto;
 
+pub fn align_down(value: usize, align: usize) -> usize {
+    assert!(align.is_power_of_two(), "alignment must be a power of two");
+    value & !(align - 1)
+}
+
+pub fn align_up(value: usize, align: usize) -> usize {
+    assert!(align.is_power_of_two(), "alignment must be a power of two");
+    let add = align - 1;
+    value.checked_add(add).expect("align_up overflow") & !(align - 1)
+}
+
+pub fn align_down_u64(value: u64, align: u64) -> u64 {
+    assert!(align.is_power_of_two(), "alignment must be a power of two");
+    value & !(align - 1)
+}
+
+pub fn align_up_u64(value: u64, align: u64) -> Option<u64> {
+    assert!(align.is_power_of_two(), "alignment must be a power of two");
+    let add = align - 1;
+    value.checked_add(add).map(|v| v & !(align - 1))
+}
+
 pub trait Addr: Copy + core::fmt::Debug + Eq + Ord {
     type Raw: Copy + Ord + core::ops::Sub<Output = Self::Raw> + TryInto<usize>;
 

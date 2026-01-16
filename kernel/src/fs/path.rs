@@ -40,6 +40,25 @@ impl VfsPath {
         })
     }
 
+    pub fn resolve(raw: &str, base: &VfsPath) -> Result<Self, VfsError> {
+        if raw.is_empty() {
+            return Err(VfsError::InvalidPath);
+        }
+
+        let (absolute, mut components) = if raw.starts_with('/') {
+            (true, Vec::new())
+        } else {
+            (base.absolute, base.components.clone())
+        };
+
+        components = normalize_components(components, raw, false)?;
+
+        Ok(Self {
+            absolute,
+            components,
+        })
+    }
+
     pub fn is_absolute(&self) -> bool {
         self.absolute
     }
@@ -91,6 +110,34 @@ impl VfsPath {
             components: comps,
         })
     }
+}
+
+pub(crate) fn normalize_components(
+    mut components: Vec<PathComponent>,
+    raw: &str,
+    strict_parent: bool,
+) -> Result<Vec<PathComponent>, VfsError> {
+    let path = raw.strip_prefix('/').unwrap_or(raw);
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if components.is_empty() {
+                if strict_parent {
+                    return Err(VfsError::InvalidPath);
+                }
+            } else {
+                components.pop();
+            }
+            continue;
+        }
+        if part.len() > 255 {
+            return Err(VfsError::NameTooLong);
+        }
+        components.push(PathComponent::new(part));
+    }
+    Ok(components)
 }
 
 impl fmt::Display for VfsPath {

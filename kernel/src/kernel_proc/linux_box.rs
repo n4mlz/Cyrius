@@ -4,6 +4,7 @@ use alloc::string::{String, ToString};
 
 use crate::fs::{VfsError, VfsPath};
 use crate::loader::linux::{self, LinuxLoadError};
+use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::syscall::Abi;
 use crate::thread::{SCHEDULER, SpawnError};
@@ -77,17 +78,15 @@ fn wait_for_exit(pid: ProcessId) {
         .map(|count| count > 0)
         .unwrap_or(false)
     {
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::x86_64::halt();
+        #[cfg(not(target_arch = "x86_64"))]
         core::hint::spin_loop();
     }
 }
 
 fn absolute_path(origin_pid: ProcessId, raw: &str) -> Result<String, RunError> {
-    let cwd = PROCESS_TABLE.cwd(origin_pid)?;
-    let parsed = VfsPath::parse(raw)?;
-    let abs = if parsed.is_absolute() {
-        parsed
-    } else {
-        cwd.join(&parsed)?
-    };
+    let cwd = proc_fs::cwd(origin_pid)?;
+    let abs = VfsPath::resolve(raw, &cwd)?;
     Ok(abs.to_string())
 }

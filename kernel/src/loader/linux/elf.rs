@@ -1,0 +1,180 @@
+use alloc::vec::Vec;
+use core::convert::TryFrom;
+use core::mem::size_of;
+
+use crate::arch::api::ArchLinuxElfPlatform;
+use crate::mem::addr::VirtAddr;
+
+use super::LinuxLoadError;
+
+pub(crate) const ELF_MAGIC: &[u8; 4] = b"\x7FELF";
+pub(crate) const ELF_CLASS_64: u8 = 2;
+pub(crate) const ELF_DATA_LSB: u8 = 1;
+pub(crate) const ELF_VERSION_CURRENT: u8 = 1;
+pub(crate) const ELF_TYPE_EXEC: u16 = 2;
+pub(crate) const PT_LOAD: u32 = 1;
+
+pub struct ElfFile {
+    pub entry: VirtAddr,
+    pub segments: Vec<ProgramSegment>,
+}
+
+pub struct ProgramSegment {
+    pub flags: u32,
+    pub offset: usize,
+    pub vaddr: VirtAddr,
+    pub file_size: usize,
+    pub mem_size: usize,
+}
+
+impl ElfFile {
+    pub fn parse<P: ArchLinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+        let header = ElfHeader::parse::<P>(bytes)?;
+        let mut segments = Vec::new();
+        let phoff = usize::try_from(header.ph_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
+        let ent_size = usize::from(header.ph_entry_size);
+        let count = usize::from(header.ph_count);
+
+        for idx in 0..count {
+            let start = phoff
+                .checked_add(idx * ent_size)
+                .ok_or(LinuxLoadError::SizeOverflow)?;
+            let end = start
+                .checked_add(ent_size)
+                .ok_or(LinuxLoadError::SizeOverflow)?;
+            let ph_slice = bytes
+                .get(start..end)
+                .ok_or(LinuxLoadError::InvalidElf("program header out of range"))?;
+            let ph = ProgramHeader::parse(ph_slice)?;
+            if ph.typ == PT_LOAD {
+                segments.push(ProgramSegment {
+                    flags: ph.flags,
+                    offset: usize::try_from(ph.offset).map_err(|_| LinuxLoadError::SizeOverflow)?,
+                    vaddr: VirtAddr::new(
+                        usize::try_from(ph.vaddr).map_err(|_| LinuxLoadError::SizeOverflow)?,
+                    ),
+                    file_size: usize::try_from(ph.file_size)
+                        .map_err(|_| LinuxLoadError::SizeOverflow)?,
+                    mem_size: usize::try_from(ph.mem_size)
+                        .map_err(|_| LinuxLoadError::SizeOverflow)?,
+                });
+            }
+        }
+
+        Ok(Self {
+            entry: VirtAddr::new(
+                usize::try_from(header.entry).map_err(|_| LinuxLoadError::SizeOverflow)?,
+            ),
+            segments,
+        })
+    }
+}
+
+struct ElfHeader {
+    entry: u64,
+    ph_offset: u64,
+    ph_entry_size: u16,
+    ph_count: u16,
+}
+
+impl ElfHeader {
+    fn parse<P: ArchLinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+        if bytes.len() < 64 {
+            return Err(LinuxLoadError::InvalidElf("file too small"));
+        }
+        if &bytes[0..4] != ELF_MAGIC {
+            return Err(LinuxLoadError::InvalidElf("bad magic"));
+        }
+        if bytes[4] != ELF_CLASS_64 {
+            return Err(LinuxLoadError::InvalidElf("unsupported class"));
+        }
+        if bytes[5] != ELF_DATA_LSB {
+            return Err(LinuxLoadError::InvalidElf("unsupported endianness"));
+        }
+        if bytes[6] != ELF_VERSION_CURRENT {
+            return Err(LinuxLoadError::InvalidElf("unsupported version"));
+        }
+        let e_type = u16::from_le_bytes([bytes[16], bytes[17]]);
+        let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+        if e_type != ELF_TYPE_EXEC {
+            return Err(LinuxLoadError::InvalidElf("unsupported type"));
+        }
+        if e_machine != P::machine_id() {
+            return Err(LinuxLoadError::InvalidElf("unsupported machine"));
+        }
+        let entry = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let ph_offset = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
+        let ph_entry_size = u16::from_le_bytes(bytes[54..56].try_into().unwrap());
+        let ph_count = u16::from_le_bytes(bytes[56..58].try_into().unwrap());
+        if ph_entry_size as usize != size_of::<ProgramHeaderRaw>() {
+            return Err(LinuxLoadError::InvalidElf("unexpected program header size"));
+        }
+
+        Ok(Self {
+            entry,
+            ph_offset,
+            ph_entry_size,
+            ph_count,
+        })
+    }
+}
+
+pub(crate) struct ProgramHeaderRaw {
+    pub(crate) typ: u32,
+    pub(crate) flags: u32,
+    pub(crate) offset: u64,
+    pub(crate) vaddr: u64,
+    pub(crate) _paddr: u64,
+    pub(crate) file_size: u64,
+    pub(crate) mem_size: u64,
+    pub(crate) align: u64,
+}
+
+struct ProgramHeader {
+    typ: u32,
+    flags: u32,
+    offset: u64,
+    vaddr: u64,
+    file_size: u64,
+    mem_size: u64,
+    #[allow(dead_code)]
+    align: u64,
+}
+
+impl ProgramHeader {
+    fn parse(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
+        if bytes.len() < size_of::<ProgramHeaderRaw>() {
+            return Err(LinuxLoadError::InvalidElf("truncated program header"));
+        }
+        let raw = ProgramHeaderRaw {
+            typ: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            flags: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            offset: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            vaddr: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            _paddr: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            file_size: u64::from_le_bytes(bytes[32..40].try_into().unwrap()),
+            mem_size: u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+            align: u64::from_le_bytes(bytes[48..56].try_into().unwrap()),
+        };
+
+        if raw.mem_size < raw.file_size {
+            return Err(LinuxLoadError::InvalidElf("memsz < filesz"));
+        }
+        if raw.align != 0 && !raw.align.is_power_of_two() {
+            return Err(LinuxLoadError::InvalidElf("p_align must be power of two"));
+        }
+        if raw.align != 0 && (raw.vaddr % raw.align) != (raw.offset % raw.align) {
+            return Err(LinuxLoadError::AlignmentMismatch);
+        }
+
+        Ok(Self {
+            typ: raw.typ,
+            flags: raw.flags,
+            offset: raw.offset,
+            vaddr: raw.vaddr,
+            file_size: raw.file_size,
+            mem_size: raw.mem_size,
+            align: raw.align,
+        })
+    }
+}

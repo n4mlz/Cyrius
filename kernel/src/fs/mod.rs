@@ -1,18 +1,22 @@
 //! Virtual filesystem scaffolding with mount support and per-process FD tables.
 
 use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
+use core::convert::TryFrom;
 
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
 pub mod fat32;
 mod fd;
+pub mod init;
 pub mod memfs;
 mod node;
 mod path;
+pub mod probe;
 
 pub use fd::{Fd, FdTable};
 pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};
+use path::normalize_components;
 pub use path::{PathComponent, VfsPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,27 +194,12 @@ fn resolve_link_components(
     base: &[PathComponent],
     target: &str,
 ) -> Result<Vec<PathComponent>, VfsError> {
-    let mut components = if target.starts_with('/') {
+    let components = if target.starts_with('/') {
         Vec::new()
     } else {
         base.to_vec()
     };
-
-    for part in target.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            components.pop().ok_or(VfsError::InvalidPath)?;
-            continue;
-        }
-        if part.len() > 255 {
-            return Err(VfsError::NameTooLong);
-        }
-        components.push(PathComponent::new(part));
-    }
-
-    Ok(components)
+    normalize_components(components, target, true)
 }
 
 pub fn mount_root(root: Arc<dyn Directory>) -> Result<(), VfsError> {
@@ -234,6 +223,26 @@ pub fn with_vfs<R>(f: impl FnOnce(&Vfs) -> Result<R, VfsError>) -> Result<R, Vfs
     f(vfs)
 }
 
+pub fn read_to_end(path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+    let file = with_vfs(|vfs| match vfs.open_absolute(path)? {
+        NodeRef::File(file) => Ok(file),
+        NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
+    })?;
+
+    let meta = file.metadata()?;
+    let size = usize::try_from(meta.size).map_err(|_| VfsError::Corrupted)?;
+    let mut buf = vec![0u8; size];
+    let mut offset = 0usize;
+    while offset < size {
+        let read = file.read_at(offset, &mut buf[offset..])?;
+        if read == 0 {
+            return Err(VfsError::UnexpectedEof);
+        }
+        offset = offset.saturating_add(read);
+    }
+    Ok(buf)
+}
+
 pub fn vfs_guard() -> Result<SpinLockGuard<'static, Option<Vfs>>, VfsError> {
     Ok(VFS.get().lock())
 }
@@ -253,6 +262,7 @@ mod tests {
     use crate::fs::memfs::MemDirectory;
     use crate::println;
     use crate::process::PROCESS_TABLE;
+    use crate::process::fs as proc_fs;
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
@@ -291,13 +301,13 @@ mod tests {
 
         let path = "/mnt/HELLO.TXT";
         let pid = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
-        let fd = PROCESS_TABLE.open_path(pid, path).expect("open fd");
+        let fd = proc_fs::open_path(pid, path).expect("open fd");
         let mut buf = [0u8; 64];
-        let read = PROCESS_TABLE.read_fd(pid, fd, &mut buf).expect("read file");
+        let read = proc_fs::read_fd(pid, fd, &mut buf).expect("read file");
         let payload = b"Hello from FAT32!\n";
         assert_eq!(read, payload.len());
         assert_eq!(&buf[..read], payload);
-        let _ = PROCESS_TABLE.close_fd(pid, fd);
+        let _ = proc_fs::close_fd(pid, fd);
     }
 
     #[kernel_test_case]
@@ -339,7 +349,7 @@ mod tests {
         mount_at(VfsPath::parse("/mnt").unwrap(), mounted).expect("mount memfs at /mnt");
 
         let pid = PROCESS_TABLE.init_kernel().expect("kernel init");
-        let entries = PROCESS_TABLE.list_dir(pid, "/").expect("list root");
+        let entries = proc_fs::list_dir(pid, "/").expect("list root");
         let has_mnt = entries.iter().any(|entry| entry.name == "mnt");
         assert!(
             has_mnt,

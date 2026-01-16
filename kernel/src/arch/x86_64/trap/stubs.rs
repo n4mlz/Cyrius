@@ -1,5 +1,6 @@
 use super::build_trap_info;
 use super::context::{ORIGINAL_ERROR_OFFSET, TrapFrame};
+use crate::arch::{Arch, api::ArchTrap};
 
 macro_rules! define_trap_stub_no_error {
     ($name:ident, $vector:expr) => {
@@ -253,5 +254,5 @@ pub(super) const EXTERNAL_INTERRUPT_STUBS: [unsafe extern "C" fn() -> !;
 pub(super) unsafe extern "C" fn dispatch_trap(vector: u8, frame: *mut TrapFrame, has_error: u8) {
     let frame = unsafe { &mut *frame };
     let info = build_trap_info(vector, has_error != 0);
-    crate::trap::dispatch(info, frame);
+    <Arch as ArchTrap>::dispatch_trap(info, frame);
 }

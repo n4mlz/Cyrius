@@ -1,9 +1,9 @@
 use super::{DispatchResult, SysError, SysResult, SyscallInvocation};
 
-use crate::arch::Arch;
-use crate::arch::api::ArchDevice;
+use crate::io;
+use crate::mem::addr::VirtAddr;
+use crate::mem::user::copy_from_user;
 use crate::thread::SCHEDULER;
-use crate::util::stream::WriteOps;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,9 +64,11 @@ fn handle_write(invocation: &SyscallInvocation) -> SysResult {
     if len == 0 {
         return Ok(0);
     }
-    let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len.min(MAX_WRITE)) };
-    let console = Arch::console();
-    let written = console.write(bytes).unwrap_or(0);
+    let read_len = len.min(MAX_WRITE);
+    let mut buf = [0u8; MAX_WRITE];
+    let user_ptr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf[..read_len], user_ptr).map_err(|_| SysError::InvalidArgument)?;
+    let written = io::write_console(&buf[..read_len]);
     Ok(written as u64)
 }
 

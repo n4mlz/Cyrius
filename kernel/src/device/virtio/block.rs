@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 
-use crate::device::block::BlockDevice;
+use crate::device::block::{BlockDevice, BlockDeviceProvider};
 use crate::device::virtio::pci::{self, VirtioPciTransport};
 use crate::device::virtio::queue::{
     Descriptor, DescriptorFlags, QueueError, QueueMemory, UsedElem,
@@ -10,7 +10,7 @@ use crate::device::virtio::transport::{
 };
 use crate::device::{Device, DeviceType};
 use crate::interrupt::{INTERRUPTS, InterruptError, InterruptServiceRoutine};
-use crate::mem::addr::{Addr, PageSize, PhysAddr, VirtIntoPtr};
+use crate::mem::addr::{Addr, PageSize, PhysAddr, VirtIntoPtr, align_up};
 use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
@@ -36,6 +36,20 @@ fn fail_status<T: Transport>(transport: &mut T, err: VirtioBlkError) -> VirtioBl
 }
 
 pub type VirtioPciBlkDevice = VirtioBlkDevice<VirtioPciTransport>;
+
+pub struct VirtioBlockProvider;
+
+impl BlockDeviceProvider for VirtioBlockProvider {
+    type Device = VirtioPciBlkDevice;
+
+    fn probe(&self) -> usize {
+        probe_pci_devices()
+    }
+
+    fn with_devices<R>(&self, f: impl FnOnce(&[Arc<SpinLock<Self::Device>>]) -> R) -> R {
+        with_devices(f)
+    }
+}
 
 pub fn probe_pci_devices() -> usize {
     let transports = pci::enumerate_block_transports();
@@ -753,14 +767,6 @@ impl RequestBuffers {
     fn set_status(&mut self, value: u8) {
         unsafe { core::ptr::write_volatile(self.status_ptr(), value) }
     }
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    if align == 0 {
-        return value;
-    }
-    let mask = align - 1;
-    value.checked_add(mask).expect("alignment overflow") & !mask
 }
 
 #[cfg(test)]

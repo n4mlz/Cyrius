@@ -1,14 +1,18 @@
-use alloc::{string::ToString, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use alloc::{sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use atomic_enum::atomic_enum;
 
 use crate::arch::{Arch, api::ArchThread};
-use crate::fs::{DirEntry, Fd, FdTable, NodeRef, PathComponent, VfsError, VfsPath, with_vfs};
+use crate::fs::{FdTable, VfsPath};
 use crate::syscall::Abi;
 use crate::thread::ThreadId;
 use crate::util::spinlock::SpinLock;
 
+pub mod fs;
+
 pub type ProcessId = u64;
-pub type ProcessHandle = Arc<ProcessControl>;
+pub type ProcessHandle = Arc<Process>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
@@ -86,7 +90,7 @@ impl ProcessTable {
             return Err(ProcessError::AlreadyInitialised);
         }
 
-        let process = Arc::new(ProcessControl::kernel(0, "kernel", Abi::Host));
+        let process = Arc::new(Process::kernel(0, "kernel", Abi::Host));
         inner.kernel_pid = Some(process.id());
         inner.next_pid = 1;
         inner.processes.push(process);
@@ -111,7 +115,7 @@ impl ProcessTable {
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(ProcessControl::kernel(pid, name, Abi::Host));
+        let process = Arc::new(Process::kernel(pid, name, Abi::Host));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -132,7 +136,7 @@ impl ProcessTable {
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(ProcessControl::user(pid, name, abi));
+        let process = Arc::new(Process::user(pid, name, abi));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -172,177 +176,7 @@ impl ProcessTable {
         Some(process.abi())
     }
 
-    pub fn open_path(&self, pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let abs = absolute_path(raw_path, &process.cwd())?;
-        let file = with_vfs(|vfs| match vfs.open_absolute(&abs)? {
-            NodeRef::File(file) => Ok(file),
-            NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
-        })?;
-        process.fd_table().open_file(file)
-    }
-
-    pub fn read_fd(&self, pid: ProcessId, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        process.fd_table().read(fd, buf)
-    }
-
-    pub fn write_fd(&self, pid: ProcessId, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        process.fd_table().write(fd, data)
-    }
-
-    pub fn close_fd(&self, pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        process.fd_table().close(fd)
-    }
-
-    pub fn change_dir(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let abs = absolute_path(raw_path, &process.cwd())?;
-        let dir = with_vfs(|vfs| match vfs.open_absolute(&abs)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-        })?;
-        process.set_cwd(abs);
-        // Keep dir alive by ensuring mount lookup remains valid; cwd path suffices.
-        drop(dir);
-        Ok(())
-    }
-
-    pub fn list_dir(&self, pid: ProcessId, raw_path: &str) -> Result<Vec<DirEntry>, VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let abs = absolute_path(raw_path, &process.cwd())?;
-        with_vfs(|vfs| vfs.read_dir(&abs))
-    }
-
-    pub fn remove_path(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let abs = absolute_path(raw_path, &process.cwd())?;
-        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
-        let name = abs
-            .components()
-            .last()
-            .ok_or(VfsError::InvalidPath)?
-            .as_str()
-            .to_string();
-        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-        })?;
-        dir.remove(&name)
-    }
-
-    pub fn write_path(&self, pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let abs = absolute_path(raw_path, &process.cwd())?;
-        match with_vfs(|vfs| vfs.open_absolute(&abs)) {
-            Ok(NodeRef::File(f)) => {
-                f.truncate(0)?;
-                let _ = f.write_at(0, data)?;
-                Ok(())
-            }
-            Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
-            Err(VfsError::NotFound) => {
-                let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
-                let name = abs
-                    .components()
-                    .last()
-                    .ok_or(VfsError::InvalidPath)?
-                    .as_str()
-                    .to_string();
-                let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
-                    NodeRef::Directory(dir) => Ok(dir),
-                    NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-                })?;
-                let file = dir.create_file(&name)?;
-                file.truncate(0)?;
-                let _ = file.write_at(0, data)?;
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn create_dir(&self, pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let abs = absolute_path(raw_path, &process.cwd())?;
-        let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
-        let name = abs
-            .components()
-            .last()
-            .ok_or(VfsError::InvalidPath)?
-            .as_str()
-            .to_string();
-        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-        })?;
-        match dir.create_dir(&name) {
-            Ok(_) => Ok(()),
-            Err(VfsError::AlreadyExists) => Ok(()),
-            Err(err) => Err(err),
-        }
-    }
-
-    pub fn symlink(&self, pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let link_abs = absolute_path(link_path, &process.cwd())?;
-        let parent = link_abs.parent().ok_or(VfsError::InvalidPath)?;
-        let name = link_abs
-            .components()
-            .last()
-            .ok_or(VfsError::InvalidPath)?
-            .as_str()
-            .to_string();
-
-        let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-        })?;
-
-        dir.create_symlink(&name, target)?;
-        Ok(())
-    }
-
-    pub fn hard_link(
-        &self,
-        pid: ProcessId,
-        existing_path: &str,
-        link_path: &str,
-    ) -> Result<(), VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        let src_abs = absolute_path(existing_path, &process.cwd())?;
-        let link_abs = absolute_path(link_path, &process.cwd())?;
-
-        let parent = link_abs.parent().ok_or(VfsError::InvalidPath)?;
-        let name = link_abs
-            .components()
-            .last()
-            .ok_or(VfsError::InvalidPath)?
-            .as_str()
-            .to_string();
-
-        let (node, dir) = with_vfs(|vfs| {
-            let node = match vfs.open_absolute(&src_abs)? {
-                NodeRef::File(f) => NodeRef::File(f),
-                NodeRef::Directory(_) => return Err(VfsError::NotDirectory),
-                NodeRef::Symlink(_) => return Err(VfsError::NotFile),
-            };
-            let dir = match vfs.open_absolute(&parent)? {
-                NodeRef::Directory(dir) => Ok(dir),
-                NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-            }?;
-            Ok((node, dir))
-        })?;
-
-        dir.link(&name, node)
-    }
-
-    pub fn cwd(&self, pid: ProcessId) -> Result<VfsPath, VfsError> {
-        let process = self.process_handle(pid).map_err(|_| VfsError::NotFound)?;
-        Ok(process.cwd())
-    }
+    // File-system operations moved to `process::fs`.
 }
 
 impl Default for ProcessTable {
@@ -373,11 +207,11 @@ impl ProcessTableInner {
     }
 }
 
-pub struct ProcessControl {
+pub struct Process {
     id: ProcessId,
-    _name: &'static str,
+    name: &'static str,
     address_space: <Arch as ArchThread>::AddressSpace,
-    state: AtomicU8,
+    state: AtomicProcessState,
     #[allow(dead_code)]
     kind: ProcessKind,
     threads: SpinLock<Vec<ThreadId>>,
@@ -385,13 +219,13 @@ pub struct ProcessControl {
     abi: Abi,
 }
 
-impl ProcessControl {
+impl Process {
     fn kernel(id: ProcessId, name: &'static str, abi: Abi) -> Self {
         Self {
             id,
-            _name: name,
+            name,
             address_space: <Arch as ArchThread>::current_address_space(),
-            state: AtomicU8::new(ProcessState::Created as u8),
+            state: AtomicProcessState::new(ProcessState::Created),
             kind: ProcessKind::Kernel,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
@@ -402,9 +236,9 @@ impl ProcessControl {
     fn user(id: ProcessId, name: &'static str, abi: Abi) -> Self {
         Self {
             id,
-            _name: name,
+            name,
             address_space: <Arch as ArchThread>::current_address_space(),
-            state: AtomicU8::new(ProcessState::Created as u8),
+            state: AtomicProcessState::new(ProcessState::Created),
             kind: ProcessKind::User,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
@@ -416,6 +250,10 @@ impl ProcessControl {
         self.id
     }
 
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
     pub fn abi(&self) -> Abi {
         self.abi
     }
@@ -425,7 +263,7 @@ impl ProcessControl {
     }
 
     pub fn state(&self) -> ProcessState {
-        ProcessState::from_raw(self.state.load(Ordering::Acquire))
+        self.state.load(Ordering::Acquire)
     }
 
     pub fn mark_ready(&self) {
@@ -443,7 +281,7 @@ impl ProcessControl {
 
     pub fn mark_terminated(&self) {
         self.state
-            .store(ProcessState::Terminated as u8, Ordering::Release);
+            .store(ProcessState::Terminated, Ordering::Release);
     }
 
     pub fn thread_count(&self) -> usize {
@@ -495,52 +333,17 @@ impl ProcessControl {
         if matches!(self.state(), ProcessState::Terminated) {
             return;
         }
-        self.state.store(state as u8, Ordering::Release);
+        self.state.store(state, Ordering::Release);
     }
 }
 
-fn absolute_path(raw: &str, cwd: &VfsPath) -> Result<VfsPath, VfsError> {
-    if raw.starts_with('/') {
-        return VfsPath::parse(raw);
-    }
-
-    let mut components = cwd.components().to_vec();
-    for part in raw.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            components.pop();
-            continue;
-        }
-        if part.len() > 255 {
-            return Err(VfsError::NameTooLong);
-        }
-        components.push(PathComponent::new(part));
-    }
-
-    Ok(VfsPath::from_components(true, components))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[atomic_enum]
 pub enum ProcessState {
     Created = 0,
     Ready = 1,
     Running = 2,
     Waiting = 3,
     Terminated = 4,
-}
-
-impl ProcessState {
-    fn from_raw(raw: u8) -> Self {
-        match raw {
-            1 => Self::Ready,
-            2 => Self::Running,
-            3 => Self::Waiting,
-            4 => Self::Terminated,
-            _ => Self::Created,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

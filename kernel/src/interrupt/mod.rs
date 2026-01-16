@@ -6,11 +6,13 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, ArchTrap, InterruptInitError},
 };
-use crate::println;
-use crate::trap::{self, CurrentTrapFrame, TrapFrame, TrapHandler, TrapInfo, TrapOrigin};
+use crate::trap::{self, CurrentTrapFrame, TrapHandler, TrapInfo, TrapOrigin};
 use crate::util::spinlock::SpinLock;
 
+mod logging;
 pub mod timer;
+
+use logging::TrapLogger;
 
 pub use crate::arch::api::{TimerError, TimerMode, TimerTicks};
 pub use timer::{SYSTEM_TIMER, SystemTimer};
@@ -158,31 +160,10 @@ impl InterruptController {
         if let Some(handler) = handler {
             handler.handle(info, frame);
         } else {
-            self.log_unhandled_interrupt(info);
+            logging::DEFAULT_TRAP_LOGGER.log_unhandled_interrupt(info);
         }
 
         <Arch as ArchInterrupt>::end_of_interrupt(info.vector);
-    }
-
-    fn log_unhandled_interrupt(&self, info: TrapInfo) {
-        println!(
-            "[interrupt] vector={} origin={:?} desc={} (no handler)",
-            info.vector, info.origin, info.description
-        );
-    }
-
-    fn log_trap(&self, info: TrapInfo, frame: &mut CurrentTrapFrame) {
-        println!(
-            "[trap] vector={} origin={:?} desc={}",
-            info.vector, info.origin, info.description
-        );
-        if info.has_error_code {
-            match frame.error_code() {
-                Some(code) => println!("[trap] error_code={:#x}", code),
-                None => println!("[trap] error_code=<not exposed>"),
-            }
-        }
-        println!("[trap] frame={:#?}", frame);
     }
 }
 
@@ -198,7 +179,7 @@ impl TrapHandler for InterruptController {
             TrapOrigin::Interrupt => self.handle_interrupt(info, frame),
             TrapOrigin::Exception | TrapOrigin::NonMaskable | TrapOrigin::Unknown => {
                 if !<Arch as ArchTrap>::handle_exception(info, frame) {
-                    self.log_trap(info, frame);
+                    logging::DEFAULT_TRAP_LOGGER.log_trap(info, frame);
                 }
             }
         }

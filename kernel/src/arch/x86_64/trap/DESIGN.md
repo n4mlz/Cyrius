@@ -14,7 +14,7 @@
 
 ## Trap Stubs
 - Naked assembly routines in `stubs` save general-purpose registers, normalise error codes, maintain stack alignment for `call`, and end with `iretq`.
-- Each stub invokes `dispatch_trap`, which constructs a `TrapInfo` (vector, origin, description) and hands control to `crate::trap::dispatch`.
+- Each stub invokes `dispatch_trap`, which constructs a `TrapInfo` (vector, origin, description) and hands control to `ArchTrap::dispatch_trap` so the architecture layer can route through the generic trap handler without hard-wiring the entry point.
 - Timer interrupts reuse the same mechanism, so the scheduler observes consistent metadata regardless of source.
 
 ## Trap Frame Representation

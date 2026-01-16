@@ -8,6 +8,7 @@ use crate::device::char::CharDevice;
 use crate::fs::DirEntry;
 use crate::kernel_proc::{linux_box, oci_runtime, tar};
 use crate::loader::linux::LinuxLoadError;
+use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::thread::SpawnError;
 use crate::{print, println};
@@ -28,21 +29,74 @@ pub enum ShellError {
     Tar(tar::TarError),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Command<'a> {
-    Ls(Option<&'a str>),
-    Cd(&'a str),
-    Cat(&'a str),
-    Rm(&'a str),
-    Write(&'a str, &'a str),
-    Mkdir(&'a str),
-    Pwd,
-    Help,
-    LinuxBoxRun(&'a str),
-    Tar(&'a str, Option<&'a str>),
-    OciRuntimeCreate(&'a str, &'a str),
-    Unknown,
+struct CommandSpec {
+    name: &'static str,
+    usage: &'static str,
+    handler: fn(ProcessId, &str) -> Result<Option<String>, ShellError>,
 }
+
+struct CommandInvocation<'a> {
+    spec: &'static CommandSpec,
+    args: &'a str,
+}
+
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "ls",
+        usage: "ls [path]",
+        handler: cmd_ls,
+    },
+    CommandSpec {
+        name: "cd",
+        usage: "cd <path>",
+        handler: cmd_cd,
+    },
+    CommandSpec {
+        name: "cat",
+        usage: "cat <path>",
+        handler: cmd_cat,
+    },
+    CommandSpec {
+        name: "rm",
+        usage: "rm <path>",
+        handler: cmd_rm,
+    },
+    CommandSpec {
+        name: "wt",
+        usage: "wt <path> <content>",
+        handler: cmd_write,
+    },
+    CommandSpec {
+        name: "mkdir",
+        usage: "mkdir <path>",
+        handler: cmd_mkdir,
+    },
+    CommandSpec {
+        name: "pwd",
+        usage: "pwd",
+        handler: cmd_pwd,
+    },
+    CommandSpec {
+        name: "tar",
+        usage: "tar <archive> [dest]",
+        handler: cmd_tar,
+    },
+    CommandSpec {
+        name: "oci-runtime",
+        usage: "oci-runtime create <id> <bundle>",
+        handler: cmd_oci_runtime,
+    },
+    CommandSpec {
+        name: "linux-box",
+        usage: "linux-box run <path>",
+        handler: cmd_linux_box,
+    },
+    CommandSpec {
+        name: "help",
+        usage: "help",
+        handler: cmd_help,
+    },
+];
 
 pub fn spawn_shell() -> Result<(), ProcessError> {
     let pid = PROCESS_TABLE.create_kernel_process("shell")?;
@@ -59,7 +113,7 @@ fn shell_thread_entry() -> ! {
 }
 
 fn shell_loop(pid: ProcessId) -> ! {
-    println!("[shell] ready; commands: ls/cd/cat/rm/wt/tar/linux-box/help");
+    println!("[shell] ready; type `help` for command list");
     let console = Arch::console();
     let mut buf = [0u8; INPUT_BUF];
     loop {
@@ -75,65 +129,25 @@ fn shell_loop(pid: ProcessId) -> ! {
 }
 
 pub fn run_command(pid: ProcessId, line: &str) -> Result<Option<String>, ShellError> {
-    let cmd = parse_command(line.trim_end_matches(['\n', '\r']));
-    match cmd {
-        Command::Ls(path) => shell_ls(pid, path).map(|entries| Some(format_ls(entries))),
-        Command::Cd(path) => {
-            shell_cd(pid, path)?;
-            Ok(None)
-        }
-        Command::Cat(path) => shell_cat(pid, path).map(Some),
-        Command::Rm(path) => {
-            shell_rm(pid, path)?;
-            Ok(None)
-        }
-        Command::Write(path, data) => {
-            shell_write(pid, path, data)?;
-            Ok(None)
-        }
-        Command::Mkdir(path) => {
-            shell_mkdir(pid, path)?;
-            Ok(None)
-        }
-        Command::Pwd => shell_pwd(pid).map(Some),
-        Command::Help => Ok(Some(help_text())),
-        Command::LinuxBoxRun(path) => {
-            linux_box::run_and_wait(pid, path).map_err(|err| match err {
-                linux_box::RunError::Process(err) => ShellError::Process(err),
-                linux_box::RunError::Path(err) => ShellError::Fs(err),
-                linux_box::RunError::Loader(err) => ShellError::Loader(err),
-                linux_box::RunError::Spawn(err) => ShellError::Spawn(err),
-            })?;
-            Ok(None)
-        }
-        Command::Tar(path, dest) => {
-            shell_tar(pid, path, dest)?;
-            Ok(None)
-        }
-        Command::OciRuntimeCreate(id, bundle) => {
-            let output =
-                oci_runtime::create_container(pid, id, bundle).map_err(ShellError::OciRuntime)?;
-            Ok(Some(output))
-        }
-        Command::Unknown => Err(ShellError::UnknownCommand),
-    }
+    let cmd = parse_command(line.trim_end_matches(['\n', '\r']))?;
+    (cmd.spec.handler)(pid, cmd.args)
 }
 
 fn shell_ls(pid: ProcessId, path: Option<&str>) -> Result<Vec<DirEntry>, ShellError> {
     let path = path.unwrap_or(".");
-    PROCESS_TABLE.list_dir(pid, path).map_err(ShellError::Fs)
+    proc_fs::list_dir(pid, path).map_err(ShellError::Fs)
 }
 
 fn shell_cd(pid: ProcessId, path: &str) -> Result<(), ShellError> {
-    PROCESS_TABLE.change_dir(pid, path).map_err(ShellError::Fs)
+    proc_fs::change_dir(pid, path).map_err(ShellError::Fs)
 }
 
 fn shell_cat(pid: ProcessId, path: &str) -> Result<String, ShellError> {
-    let fd = PROCESS_TABLE.open_path(pid, path).map_err(ShellError::Fs)?;
+    let fd = proc_fs::open_path(pid, path).map_err(ShellError::Fs)?;
     let mut buf = [0u8; 128];
     let mut out = String::new();
     loop {
-        match PROCESS_TABLE.read_fd(pid, fd, &mut buf) {
+        match proc_fs::read_fd(pid, fd, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if let Ok(text) = core::str::from_utf8(&buf[..n]) {
@@ -145,31 +159,29 @@ fn shell_cat(pid: ProcessId, path: &str) -> Result<String, ShellError> {
                 }
             }
             Err(err) => {
-                let _ = PROCESS_TABLE.close_fd(pid, fd);
+                let _ = proc_fs::close_fd(pid, fd);
                 return Err(ShellError::Fs(err));
             }
         }
     }
-    let _ = PROCESS_TABLE.close_fd(pid, fd);
+    let _ = proc_fs::close_fd(pid, fd);
     Ok(out)
 }
 
 fn shell_rm(pid: ProcessId, path: &str) -> Result<(), ShellError> {
-    PROCESS_TABLE.remove_path(pid, path).map_err(ShellError::Fs)
+    proc_fs::remove_path(pid, path).map_err(ShellError::Fs)
 }
 
 fn shell_write(pid: ProcessId, path: &str, data: &str) -> Result<(), ShellError> {
-    PROCESS_TABLE
-        .write_path(pid, path, data.as_bytes())
-        .map_err(ShellError::Fs)
+    proc_fs::write_path(pid, path, data.as_bytes()).map_err(ShellError::Fs)
 }
 
 fn shell_mkdir(pid: ProcessId, path: &str) -> Result<(), ShellError> {
-    PROCESS_TABLE.create_dir(pid, path).map_err(ShellError::Fs)
+    proc_fs::create_dir(pid, path).map_err(ShellError::Fs)
 }
 
 fn shell_pwd(pid: ProcessId) -> Result<String, ShellError> {
-    let cwd = PROCESS_TABLE.cwd(pid).map_err(ShellError::Fs)?;
+    let cwd = proc_fs::cwd(pid).map_err(ShellError::Fs)?;
     Ok(cwd.to_string())
 }
 
@@ -177,83 +189,17 @@ fn shell_tar(pid: ProcessId, path: &str, dest: Option<&str>) -> Result<(), Shell
     tar::extract_to_ramfs(pid, path, dest).map_err(ShellError::Tar)
 }
 
-fn parse_command(line: &str) -> Command<'_> {
+fn parse_command(line: &str) -> Result<CommandInvocation<'_>, ShellError> {
     let mut parts = line
         .splitn(2, char::is_whitespace)
         .filter(|s| !s.is_empty());
-    let cmd = match parts.next() {
-        Some(cmd) => cmd,
-        None => return Command::Unknown,
-    };
-
-    match cmd {
-        "ls" => {
-            let arg = parts.next().and_then(|rest| rest.split_whitespace().next());
-            Command::Ls(arg)
-        }
-        "cd" => parts
-            .next()
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(Command::Cd)
-            .unwrap_or(Command::Unknown),
-        "cat" => parts
-            .next()
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(Command::Cat)
-            .unwrap_or(Command::Unknown),
-        "rm" => parts
-            .next()
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(Command::Rm)
-            .unwrap_or(Command::Unknown),
-        "pwd" => Command::Pwd,
-        "mkdir" => parts
-            .next()
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(Command::Mkdir)
-            .unwrap_or(Command::Unknown),
-        "wt" => {
-            if let Some(rest) = parts.next() {
-                let mut args = rest
-                    .splitn(2, char::is_whitespace)
-                    .filter(|s| !s.is_empty());
-                if let (Some(path), Some(data)) = (args.next(), args.next()) {
-                    Command::Write(path, data)
-                } else {
-                    Command::Unknown
-                }
-            } else {
-                Command::Unknown
-            }
-        }
-        "help" => Command::Help,
-        "linux-box" => {
-            let mut args = parts.next().unwrap_or("").split_whitespace();
-            match (args.next(), args.next(), args.next()) {
-                (Some("run"), Some(path), None) => Command::LinuxBoxRun(path),
-                _ => Command::Unknown,
-            }
-        }
-        "tar" => {
-            let mut args = parts.next().unwrap_or("").split_whitespace();
-            let archive = args.next();
-            let dest = args.next();
-            match (archive, args.next()) {
-                (Some(archive), None) => Command::Tar(archive, dest),
-                _ => Command::Unknown,
-            }
-        }
-        "oci-runtime" => {
-            let mut args = parts.next().unwrap_or("").split_whitespace();
-            match (args.next(), args.next(), args.next(), args.next()) {
-                (Some("create"), Some(id), Some(bundle), None) => {
-                    Command::OciRuntimeCreate(id, bundle)
-                }
-                _ => Command::Unknown,
-            }
-        }
-        _ => Command::Unknown,
-    }
+    let name = parts.next().ok_or(ShellError::UnknownCommand)?;
+    let args = parts.next().unwrap_or("").trim();
+    let spec = COMMANDS
+        .iter()
+        .find(|spec| spec.name == name)
+        .ok_or(ShellError::UnknownCommand)?;
+    Ok(CommandInvocation { spec, args })
 }
 
 fn format_ls(entries: Vec<DirEntry>) -> String {
@@ -271,8 +217,110 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
 }
 
 fn help_text() -> String {
-    "commands:\n  ls [path]\n  cd <path>\n  cat <path>\n  rm <path>\n  wt <path> <content>\n  mkdir <path>\n  pwd\n  tar <archive> [dest]\n  oci-runtime create <id> <bundle>\n  help\n  linux-box run <path>\n"
-        .to_string()
+    let mut out = String::from("commands:\n");
+    for spec in COMMANDS {
+        out.push_str("  ");
+        out.push_str(spec.usage);
+        out.push('\n');
+    }
+    out
+}
+
+fn cmd_ls(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let path = args.split_whitespace().next();
+    shell_ls(pid, path).map(|entries| Some(format_ls(entries)))
+}
+
+fn cmd_cd(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
+    shell_cd(pid, path)?;
+    Ok(None)
+}
+
+fn cmd_cat(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
+    shell_cat(pid, path).map(Some)
+}
+
+fn cmd_rm(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
+    shell_rm(pid, path)?;
+    Ok(None)
+}
+
+fn cmd_write(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let mut parts = args
+        .splitn(2, char::is_whitespace)
+        .filter(|s| !s.is_empty());
+    let path = parts.next().ok_or(ShellError::UnknownCommand)?;
+    let data = parts.next().ok_or(ShellError::UnknownCommand)?;
+    shell_write(pid, path, data)?;
+    Ok(None)
+}
+
+fn cmd_mkdir(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
+    shell_mkdir(pid, path)?;
+    Ok(None)
+}
+
+fn cmd_pwd(pid: ProcessId, _args: &str) -> Result<Option<String>, ShellError> {
+    shell_pwd(pid).map(Some)
+}
+
+fn cmd_tar(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let mut parts = args.split_whitespace();
+    let archive = parts.next().ok_or(ShellError::UnknownCommand)?;
+    let dest = parts.next();
+    if parts.next().is_some() {
+        return Err(ShellError::UnknownCommand);
+    }
+    shell_tar(pid, archive, dest)?;
+    Ok(None)
+}
+
+fn cmd_oci_runtime(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let mut parts = args.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("create"), Some(id), Some(bundle), None) => {
+            let output =
+                oci_runtime::create_container(pid, id, bundle).map_err(ShellError::OciRuntime)?;
+            Ok(Some(output))
+        }
+        _ => Err(ShellError::UnknownCommand),
+    }
+}
+
+fn cmd_linux_box(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
+    let mut parts = args.split_whitespace();
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("run"), Some(path), None) => {
+            linux_box::run_and_wait(pid, path).map_err(|err| match err {
+                linux_box::RunError::Process(err) => ShellError::Process(err),
+                linux_box::RunError::Path(err) => ShellError::Fs(err),
+                linux_box::RunError::Loader(err) => ShellError::Loader(err),
+                linux_box::RunError::Spawn(err) => ShellError::Spawn(err),
+            })?;
+            Ok(None)
+        }
+        _ => Err(ShellError::UnknownCommand),
+    }
+}
+
+fn cmd_help(_pid: ProcessId, _args: &str) -> Result<Option<String>, ShellError> {
+    Ok(Some(help_text()))
 }
 
 fn read_line(console: &impl CharDevice, buf: &mut [u8]) -> usize {
@@ -319,31 +367,57 @@ mod tests {
     fn parse_commands() {
         println!("[test] parse_commands");
 
-        assert_eq!(parse_command("ls"), Command::Ls(None));
-        assert_eq!(parse_command("ls /mnt"), Command::Ls(Some("/mnt")));
-        assert_eq!(parse_command("cd /"), Command::Cd("/"));
-        assert_eq!(parse_command("cat a"), Command::Cat("a"));
-        assert_eq!(parse_command("rm a"), Command::Rm("a"));
-        assert_eq!(parse_command("wt a hello"), Command::Write("a", "hello"));
-        assert_eq!(parse_command("help"), Command::Help);
-        assert_eq!(parse_command("mkdir /x"), Command::Mkdir("/x"));
-        assert_eq!(parse_command("pwd"), Command::Pwd);
-        assert_eq!(
-            parse_command("linux-box run /mnt/demo1.elf"),
-            Command::LinuxBoxRun("/mnt/demo1.elf")
-        );
-        assert_eq!(
-            parse_command("tar busybox.tar"),
-            Command::Tar("busybox.tar", None)
-        );
-        assert_eq!(
-            parse_command("tar busybox.tar /out"),
-            Command::Tar("busybox.tar", Some("/out"))
-        );
-        assert_eq!(
-            parse_command("oci-runtime create demo /bundle"),
-            Command::OciRuntimeCreate("demo", "/bundle")
-        );
+        let cmd = parse_command("ls").expect("parse");
+        assert_eq!(cmd.spec.name, "ls");
+        assert_eq!(cmd.args, "");
+
+        let cmd = parse_command("ls /mnt").expect("parse");
+        assert_eq!(cmd.spec.name, "ls");
+        assert_eq!(cmd.args, "/mnt");
+
+        let cmd = parse_command("cd /").expect("parse");
+        assert_eq!(cmd.spec.name, "cd");
+        assert_eq!(cmd.args, "/");
+
+        let cmd = parse_command("cat a").expect("parse");
+        assert_eq!(cmd.spec.name, "cat");
+        assert_eq!(cmd.args, "a");
+
+        let cmd = parse_command("rm a").expect("parse");
+        assert_eq!(cmd.spec.name, "rm");
+        assert_eq!(cmd.args, "a");
+
+        let cmd = parse_command("wt a hello").expect("parse");
+        assert_eq!(cmd.spec.name, "wt");
+        assert_eq!(cmd.args, "a hello");
+
+        let cmd = parse_command("help").expect("parse");
+        assert_eq!(cmd.spec.name, "help");
+        assert_eq!(cmd.args, "");
+
+        let cmd = parse_command("mkdir /x").expect("parse");
+        assert_eq!(cmd.spec.name, "mkdir");
+        assert_eq!(cmd.args, "/x");
+
+        let cmd = parse_command("pwd").expect("parse");
+        assert_eq!(cmd.spec.name, "pwd");
+        assert_eq!(cmd.args, "");
+
+        let cmd = parse_command("linux-box run /mnt/demo1.elf").expect("parse");
+        assert_eq!(cmd.spec.name, "linux-box");
+        assert_eq!(cmd.args, "run /mnt/demo1.elf");
+
+        let cmd = parse_command("tar busybox.tar").expect("parse");
+        assert_eq!(cmd.spec.name, "tar");
+        assert_eq!(cmd.args, "busybox.tar");
+
+        let cmd = parse_command("tar busybox.tar /out").expect("parse");
+        assert_eq!(cmd.spec.name, "tar");
+        assert_eq!(cmd.args, "busybox.tar /out");
+
+        let cmd = parse_command("oci-runtime create demo /bundle").expect("parse");
+        assert_eq!(cmd.spec.name, "oci-runtime");
+        assert_eq!(cmd.args, "create demo /bundle");
     }
 
     #[kernel_test_case]
@@ -389,9 +463,7 @@ mod tests {
             .expect("create process");
 
         let archive = build_test_tar();
-        PROCESS_TABLE
-            .write_path(pid, "/busybox.tar", &archive)
-            .expect("write tar archive");
+        proc_fs::write_path(pid, "/busybox.tar", &archive).expect("write tar archive");
 
         run_command(pid, "tar /busybox.tar").expect("tar");
 

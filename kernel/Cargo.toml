@@ -11,6 +11,7 @@ path = "src/kernel.rs"
 bitflags.workspace = true
 bootloader_api.workspace = true
 num-traits.workspace = true
+atomic_enum.workspace = true
 oci-spec = { git = "https://github.com/n4mlz/oci-spec-rs-nostd", default-features = false, features = ["runtime"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 x86_64 = { version = "0.15", default-features = false, features = ["instructions"] }

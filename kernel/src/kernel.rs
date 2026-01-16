@@ -7,15 +7,15 @@
 
 extern crate alloc;
 
-use alloc::string::ToString;
-use core::convert::TryFrom;
 use core::panic::PanicInfo;
 
 pub mod arch;
 pub mod container;
 pub mod device;
 pub mod fs;
+pub mod init;
 pub mod interrupt;
+pub mod io;
 pub mod kernel_proc;
 pub mod loader;
 pub mod mem;
@@ -27,19 +27,6 @@ pub mod thread;
 pub mod trap;
 pub mod util;
 
-use crate::arch::{
-    Arch,
-    api::{ArchDevice, ArchMemory},
-};
-use crate::device::block::{BlockDevice, SharedBlockDevice};
-use crate::device::char::uart::Uart;
-use crate::device::virtio::block;
-use crate::fs::{VfsPath, fat32::FatFileSystem, memfs::MemDirectory, mount_at, mount_root};
-use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
-use crate::mem::addr::{AddrRange, PhysAddr};
-use crate::mem::allocator;
-use crate::mem::manager;
-use crate::thread::SCHEDULER;
 use bootloader_api::{
     BootInfo,
     config::{BootloaderConfig, Mapping},
@@ -52,8 +39,6 @@ const BOOTLOADER_CONFIG: BootloaderConfig = {
     config
 };
 
-const SYSTEM_TIMER_TICKS: TimerTicks = TimerTicks::new(10_000_000);
-
 #[cfg(not(test))]
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
@@ -61,8 +46,8 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 entry_point!(test_kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    init_runtime(boot_info);
-    initialise_scheduler();
+    init::init_runtime(boot_info);
+    init::initialise_scheduler();
 
     println!("[kernel] scheduler started");
 
@@ -73,105 +58,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 #[cfg(test)]
 fn test_kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    init_runtime(boot_info);
+    init::init_runtime(boot_info);
     test_main();
     test::exit_qemu(test::QemuExitCode::Success)
-}
-
-fn init_runtime(boot_info: &'static mut BootInfo) {
-    Arch::console()
-        .init()
-        .unwrap_or_else(|err| panic!("failed to initialise console: {err:?}"));
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::arch::x86_64::init_cpu_features();
-    }
-
-    let heap_range = {
-        let info: &'static BootInfo = &*boot_info;
-        <Arch as ArchMemory>::locate_kernel_heap(info)
-            .unwrap_or_else(|err| panic!("failed to locate kernel heap: {err:?}"))
-    };
-
-    let phys_offset = boot_info
-        .physical_memory_offset
-        .as_ref()
-        .copied()
-        .unwrap_or_else(|| panic!("bootloader did not provide a physical memory offset"));
-
-    let heap_reserved = AddrRange {
-        start: PhysAddr::new(
-            usize::try_from(
-                (heap_range.start.as_raw() as u64)
-                    .checked_sub(phys_offset)
-                    .unwrap_or_else(|| panic!("heap start below physical mapping")),
-            )
-            .unwrap_or_else(|_| panic!("heap start exceeds usize")),
-        ),
-        end: PhysAddr::new(
-            usize::try_from(
-                (heap_range.end.as_raw() as u64)
-                    .checked_sub(phys_offset)
-                    .unwrap_or_else(|| panic!("heap end below physical mapping")),
-            )
-            .unwrap_or_else(|_| panic!("heap end exceeds usize")),
-        ),
-    };
-
-    allocator::init_heap(heap_range)
-        .unwrap_or_else(|err| panic!("failed to initialise kernel heap: {err:?}"));
-
-    let info: &'static BootInfo = &*boot_info;
-    let reserved = [heap_reserved];
-    manager::init(info, &reserved)
-        .unwrap_or_else(|err| panic!("failed to initialise memory manager: {err:?}"));
-
-    INTERRUPTS
-        .init(boot_info)
-        .unwrap_or_else(|err| panic!("failed to initialise interrupts: {err:?}"));
-
-    crate::arch::x86_64::syscall::init()
-        .unwrap_or_else(|err| panic!("failed to initialise syscalls: {err:?}"));
-
-    SYSTEM_TIMER
-        .start_periodic(SYSTEM_TIMER_TICKS)
-        .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
-
-    INTERRUPTS.enable();
-
-    let discovered_blocks = block::probe_pci_devices();
-    if discovered_blocks > 0 {
-        println!("[blk] discovered {discovered_blocks} virtio block device(s)",);
-    }
-
-    init_filesystems();
-}
-
-fn initialise_scheduler() {
-    SCHEDULER
-        .init()
-        .unwrap_or_else(|err| panic!("failed to initialise scheduler: {err:?}"));
-
-    // SCHEDULER
-    //     .spawn_kernel_thread("worker-a", scheduler_worker_a)
-    //     .unwrap_or_else(|err| panic!("failed to spawn worker-a: {err:?}"));
-
-    // SCHEDULER
-    //     .spawn_kernel_thread("worker-b", scheduler_worker_b)
-    //     .unwrap_or_else(|err| panic!("failed to spawn worker-b: {err:?}"));
-
-    init_shell();
-
-    SCHEDULER
-        .start()
-        .unwrap_or_else(|err| panic!("failed to start scheduler: {err:?}"));
-}
-
-fn init_shell() {
-    if let Err(err) = crate::kernel_proc::shell::spawn_shell() {
-        println!("[shell] failed to start shell: {err:?}");
-    }
 }
 
 #[allow(dead_code)]
@@ -195,48 +84,6 @@ fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
         }
         counter = counter.wrapping_add(1);
         core::hint::spin_loop();
-    }
-}
-
-fn init_filesystems() {
-    let root = MemDirectory::new();
-    mount_root(root.clone()).expect("mount memfs root");
-    let mut best: Option<(
-        u64,
-        alloc::sync::Arc<dyn crate::fs::Directory>,
-        alloc::string::String,
-    )> = None;
-    block::with_devices(|devices| {
-        for dev in devices {
-            let shared = SharedBlockDevice::from_arc(dev.clone());
-            let name = shared.label().to_string();
-            let capacity = shared.num_blocks();
-            match FatFileSystem::new(shared) {
-                Ok(fs) => {
-                    let fat_root: alloc::sync::Arc<dyn crate::fs::Directory> = fs.root_dir();
-                    match &best {
-                        Some((best_cap, _, _)) if *best_cap >= capacity => {}
-                        _ => best = Some((capacity, fat_root, name)),
-                    }
-                }
-                Err(err) => {
-                    println!("[vfs] skipped {name}: {:?}", err);
-                }
-            }
-        }
-    });
-
-    let mut mounted = false;
-    if let Some((cap, root_dir, name)) = best {
-        let mount_path = VfsPath::parse("/mnt").expect("mount path");
-        if mount_at(mount_path, root_dir).is_ok() {
-            println!("[vfs] mounted FAT32 at /mnt from {name} ({} blocks)", cap);
-            mounted = true;
-        }
-    }
-
-    if !mounted {
-        println!("[vfs] no FAT32 root mounted");
     }
 }
 
@@ -314,7 +161,7 @@ mod tests {
             if SYSTEM_TIMER.observed_ticks() > start_ticks {
                 SYSTEM_TIMER.stop().ok();
                 SYSTEM_TIMER
-                    .start_periodic(super::SYSTEM_TIMER_TICKS)
+                    .start_periodic(TimerTicks::new(10_000_000))
                     .expect("failed to restore system timer configuration");
                 return;
             }
@@ -406,7 +253,7 @@ mod tests {
         SCHEDULER.shutdown();
 
         SYSTEM_TIMER
-            .start_periodic(super::SYSTEM_TIMER_TICKS)
+            .start_periodic(TimerTicks::new(10_000_000))
             .expect("failed to restart system timer after scheduler test");
         INTERRUPTS.enable();
     }

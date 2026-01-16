@@ -54,6 +54,10 @@ impl ArchTrap for X86_64 {
         trap::init();
     }
 
+    fn dispatch_trap(info: crate::trap::TrapInfo, frame: &mut Self::Frame) {
+        crate::trap::dispatch(info, frame);
+    }
+
     fn handle_exception(info: crate::trap::TrapInfo, frame: &mut Self::Frame) -> bool {
         trap::handle_exception(info, frame)
     }
@@ -65,6 +69,10 @@ impl ArchMemory for X86_64 {
     ) -> Result<AddrRange<VirtAddr>, HeapRegionError> {
         self::mem::locate_kernel_heap(boot_info)
     }
+}
+
+pub fn halt() {
+    x86_64::instructions::hlt();
 }
 
 impl ArchInterrupt for X86_64 {

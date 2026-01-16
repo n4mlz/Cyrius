@@ -10,7 +10,7 @@
 
 ## Handler Dispatch
 - Maintains a fixed-size table (`handlers[256]`) protected by a `SpinLock`; vector 0–31 remain reserved for exceptions.
-- Exceptions and NMIs fall back to structured logging, while external interrupts invoke registered `InterruptServiceRoutine`s and automatically issue end-of-interrupt acknowledgements.
+- Exceptions and NMIs fall back to the default `TrapLogger`, while external interrupts invoke registered `InterruptServiceRoutine`s and automatically issue end-of-interrupt acknowledgements.
 - Vectors `0x60..0x6F` are dedicated to devices. Drivers call `allocate_vector`/`release_vector` instead of hard-coding IDs, letting the controller enforce exclusivity before the architecture-specific entry point (IDT) hands control to the driver handler.
 
 ## Timer Integration

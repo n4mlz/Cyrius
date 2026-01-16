@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::mem::addr::{Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr};
+use crate::mem::addr::{Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr, align_up};
 use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, PhysMapper};
 
@@ -115,13 +115,6 @@ fn allocate_region(size: usize, align: usize) -> Result<DmaRegion, DmaError> {
         len: page_count * PAGE_BYTES,
         frames,
     })
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    if align == 0 {
-        return value;
-    }
-    (value + align - 1) & !(align - 1)
 }
 
 #[cfg(test)]

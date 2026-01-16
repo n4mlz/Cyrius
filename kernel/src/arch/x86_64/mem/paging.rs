@@ -7,6 +7,8 @@ use x86_64::structures::paging::{
 };
 
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr};
+#[cfg(not(test))]
+use crate::mem::manager;
 use crate::mem::paging::{
     FrameAllocator, MapError, PageTableOps, PhysMapper, TranslationError, UnmapError,
 };
@@ -376,6 +378,48 @@ impl<M: PhysMapper> X86PageTable<M> {
         Err(MapError::InternalError)
     }
 
+    pub fn update_flags_for_addr(
+        &mut self,
+        addr: VirtAddr,
+        flags: PageTableFlags,
+    ) -> Result<(), MapError> {
+        let indices = indices_for(addr, self.paging_mode);
+        let mut table_ptr = self.root_table_mut() as *mut PageTable;
+
+        for (level, &idx) in indices[..self.paging_mode.table_levels()]
+            .iter()
+            .enumerate()
+        {
+            unsafe {
+                let table = &mut *table_ptr;
+                let entry = &mut table[idx];
+                if !entry.flags().contains(PageTableFlags::PRESENT) {
+                    return Err(MapError::NotMapped);
+                }
+
+                let is_leaf = level == self.paging_mode.table_levels() - 1
+                    || entry.flags().contains(PageTableFlags::HUGE_PAGE);
+
+                if is_leaf {
+                    let mut current = entry.flags();
+                    current.insert(flags);
+                    entry.set_flags(current);
+                    if entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                        self.flush_all_tlb();
+                    } else {
+                        self.flush_page(addr);
+                    }
+                    return Ok(());
+                }
+
+                let next_phys = phys_from_x86(entry.addr());
+                table_ptr = self.table_from_phys_mut(next_phys) as *mut PageTable;
+            }
+        }
+
+        Err(MapError::InternalError)
+    }
+
     fn walk_for_translation(
         &self,
         addr: VirtAddr,
@@ -536,14 +580,19 @@ impl<M: PhysMapper> X86PageTable<M> {
             if unsafe { self.is_table_empty(child_phys) } {
                 // Mark the parent entry as unused
                 parent_entry.set_unused();
-
-                // Note: In a real implementation, you would deallocate the physical frame
-                // here using a frame allocator. For now, we just mark it as unused.
-                // TODO: Add frame deallocation when frame allocator supports it.
+                self.deallocate_table_frame(Page::new(child_phys, PageSize::SIZE_4K));
             } else {
                 // If this table is not empty, no need to check higher levels
                 break;
             }
+        }
+    }
+
+    fn deallocate_table_frame(&mut self, _frame: Page<PhysAddr>) {
+        #[cfg(not(test))]
+        {
+            let mut allocator = manager::frame_allocator();
+            allocator.deallocate(_frame);
         }
     }
 }
