@@ -80,9 +80,7 @@ pub fn init_runtime(boot_info: &'static mut BootInfo) {
 
     let discovered_blocks = probe::probe_block_devices();
     if discovered_blocks > 0 {
-        crate::println!(
-            "[blk] discovered {discovered_blocks} virtio block device(s)",
-        );
+        crate::println!("[blk] discovered {discovered_blocks} virtio block device(s)",);
     }
 
     init_filesystems();

@@ -14,8 +14,8 @@ pub mod container;
 pub mod device;
 pub mod fs;
 pub mod init;
-pub mod io;
 pub mod interrupt;
+pub mod io;
 pub mod kernel_proc;
 pub mod loader;
 pub mod mem;
@@ -86,7 +86,6 @@ fn scheduler_worker_loop(name: &'static str, token: char) -> ! {
         core::hint::spin_loop();
     }
 }
-
 
 #[cfg(not(test))]
 #[panic_handler]

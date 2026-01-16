@@ -46,7 +46,9 @@ impl SpecLoader {
 
         with_vfs(|vfs| match vfs.open_absolute(&abs)? {
             crate::fs::NodeRef::Directory(dir) => Ok(dir),
-            crate::fs::NodeRef::File(_) | crate::fs::NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+            crate::fs::NodeRef::File(_) | crate::fs::NodeRef::Symlink(_) => {
+                Err(VfsError::NotDirectory)
+            }
         })
         .map_err(ContainerError::Vfs)
     }

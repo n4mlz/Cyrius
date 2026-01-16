@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
-use crate::device::block::{BlockDevice, SharedBlockDevice};
 use crate::device::Device;
+use crate::device::block::{BlockDevice, SharedBlockDevice};
 
 use super::{Directory, VfsError, fat32::FatFileSystem};
 

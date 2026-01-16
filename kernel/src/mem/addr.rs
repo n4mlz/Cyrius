@@ -8,10 +8,7 @@ pub fn align_down(value: usize, align: usize) -> usize {
 pub fn align_up(value: usize, align: usize) -> usize {
     assert!(align.is_power_of_two(), "alignment must be a power of two");
     let add = align - 1;
-    value
-        .checked_add(add)
-        .expect("align_up overflow")
-        & !(align - 1)
+    value.checked_add(add).expect("align_up overflow") & !(align - 1)
 }
 
 pub fn align_down_u64(value: u64, align: u64) -> u64 {

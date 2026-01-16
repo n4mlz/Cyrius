@@ -17,7 +17,11 @@ impl ContainerRepository {
         }
     }
 
-    pub fn insert(&self, id: &str, container: Arc<Container>) -> Result<Arc<Container>, ContainerError> {
+    pub fn insert(
+        &self,
+        id: &str,
+        container: Arc<Container>,
+    ) -> Result<Arc<Container>, ContainerError> {
         let mut guard = self.inner.lock();
         if guard.contains_key(id) {
             return Err(ContainerError::DuplicateId);

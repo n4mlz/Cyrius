@@ -8,9 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use bootloader_api::BootInfo;
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind};
 
-use crate::mem::addr::{
-    Addr, AddrRange, Page, PageSize, PhysAddr, align_down_u64, align_up_u64,
-};
+use crate::mem::addr::{Addr, AddrRange, Page, PageSize, PhysAddr, align_down_u64, align_up_u64};
 use crate::mem::paging::FrameAllocator;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 

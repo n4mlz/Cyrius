@@ -270,8 +270,8 @@ impl TarReader {
             crate::println!("[tar] read_exact offset={} len={}", self.cursor, buf.len());
         }
         while filled < buf.len() {
-            let read = proc_fs::read_fd(self.pid, self.fd, &mut buf[filled..])
-                .map_err(TarError::Fs)?;
+            let read =
+                proc_fs::read_fd(self.pid, self.fd, &mut buf[filled..]).map_err(TarError::Fs)?;
             if read == 0 {
                 return Err(TarError::UnexpectedEof);
             }

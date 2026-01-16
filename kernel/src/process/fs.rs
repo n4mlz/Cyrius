@@ -3,10 +3,12 @@ use alloc::vec::Vec;
 
 use crate::fs::{DirEntry, Fd, NodeRef, VfsError, VfsPath, with_vfs};
 
-use super::{ProcessHandle, ProcessId, PROCESS_TABLE};
+use super::{PROCESS_TABLE, ProcessHandle, ProcessId};
 
 fn process_handle(pid: ProcessId) -> Result<ProcessHandle, VfsError> {
-    PROCESS_TABLE.process_handle(pid).map_err(|_| VfsError::NotFound)
+    PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| VfsError::NotFound)
 }
 
 pub fn open_path(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
@@ -142,11 +144,7 @@ pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsE
     Ok(())
 }
 
-pub fn hard_link(
-    pid: ProcessId,
-    existing_path: &str,
-    link_path: &str,
-) -> Result<(), VfsError> {
+pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
     let src_abs = VfsPath::resolve(existing_path, &process.cwd())?;
     let link_abs = VfsPath::resolve(link_path, &process.cwd())?;

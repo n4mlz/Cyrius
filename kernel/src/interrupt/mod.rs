@@ -165,7 +165,6 @@ impl InterruptController {
 
         <Arch as ArchInterrupt>::end_of_interrupt(info.vector);
     }
-
 }
 
 impl Default for InterruptController {

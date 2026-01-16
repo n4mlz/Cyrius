@@ -2,9 +2,9 @@ use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
 use crate::mem::addr::{MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up};
 use crate::mem::paging::{FrameAllocator, PageTableOps};
 
+use super::LinuxLoadError;
 use super::elf::{ElfFile, ProgramSegment};
 use super::patch::rewrite_syscalls;
-use super::LinuxLoadError;
 
 pub fn map_segments<P: ArchLinuxElfPlatform>(
     space: &P::AddressSpace,

@@ -7,11 +7,11 @@ use x86_64::structures::paging::{
 };
 
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr};
+#[cfg(not(test))]
+use crate::mem::manager;
 use crate::mem::paging::{
     FrameAllocator, MapError, PageTableOps, PhysMapper, TranslationError, UnmapError,
 };
-#[cfg(not(test))]
-use crate::mem::manager;
 
 const ENTRY_MASK: usize = 0x1FF;
 const PAGE_SHIFT: usize = 12;
@@ -397,9 +397,8 @@ impl<M: PhysMapper> X86PageTable<M> {
                     return Err(MapError::NotMapped);
                 }
 
-                let is_leaf =
-                    level == self.paging_mode.table_levels() - 1
-                        || entry.flags().contains(PageTableFlags::HUGE_PAGE);
+                let is_leaf = level == self.paging_mode.table_levels() - 1
+                    || entry.flags().contains(PageTableFlags::HUGE_PAGE);
 
                 if is_leaf {
                     let mut current = entry.flags();

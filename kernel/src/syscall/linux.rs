@@ -67,8 +67,7 @@ fn handle_write(invocation: &SyscallInvocation) -> SysResult {
     let read_len = len.min(MAX_WRITE);
     let mut buf = [0u8; MAX_WRITE];
     let user_ptr = VirtAddr::new(ptr as usize);
-    copy_from_user(&mut buf[..read_len], user_ptr)
-        .map_err(|_| SysError::InvalidArgument)?;
+    copy_from_user(&mut buf[..read_len], user_ptr).map_err(|_| SysError::InvalidArgument)?;
     let written = io::write_console(&buf[..read_len]);
     Ok(written as u64)
 }

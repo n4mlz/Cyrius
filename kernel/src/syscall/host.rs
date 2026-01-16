@@ -73,8 +73,7 @@ fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {
         return Err(SysError::InvalidArgument);
     }
     let mut buf = alloc::vec![0u8; len];
-    copy_from_user(&mut buf, VirtAddr::new(ptr as usize))
-        .map_err(|_| SysError::InvalidArgument)?;
+    copy_from_user(&mut buf, VirtAddr::new(ptr as usize)).map_err(|_| SysError::InvalidArgument)?;
     let text = core::str::from_utf8(&buf).map_err(|_| SysError::InvalidArgument)?;
     Ok(text.to_string())
 }

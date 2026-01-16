@@ -7,8 +7,8 @@ use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
 pub mod fat32;
-pub mod init;
 mod fd;
+pub mod init;
 pub mod memfs;
 mod node;
 mod path;
@@ -16,8 +16,8 @@ pub mod probe;
 
 pub use fd::{Fd, FdTable};
 pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};
-pub use path::{PathComponent, VfsPath};
 use path::normalize_components;
+pub use path::{PathComponent, VfsPath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfsError {

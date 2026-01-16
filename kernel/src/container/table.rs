@@ -4,9 +4,9 @@ use alloc::sync::Arc;
 use crate::container::{Container, ContainerContext, ContainerState, ContainerStatus};
 use crate::fs::VfsPath;
 
+use super::ContainerError;
 use super::repository::ContainerRepository;
 use super::spec::SpecLoader;
-use super::ContainerError;
 
 pub struct ContainerTable {
     repo: ContainerRepository,

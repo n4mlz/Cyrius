@@ -8,8 +8,8 @@ use crate::device::char::CharDevice;
 use crate::fs::DirEntry;
 use crate::kernel_proc::{linux_box, oci_runtime, tar};
 use crate::loader::linux::LinuxLoadError;
-use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::process::fs as proc_fs;
+use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::thread::SpawnError;
 use crate::{print, println};
 
@@ -232,24 +232,35 @@ fn cmd_ls(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
 }
 
 fn cmd_cd(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
-    let path = args.split_whitespace().next().ok_or(ShellError::UnknownCommand)?;
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
     shell_cd(pid, path)?;
     Ok(None)
 }
 
 fn cmd_cat(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
-    let path = args.split_whitespace().next().ok_or(ShellError::UnknownCommand)?;
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
     shell_cat(pid, path).map(Some)
 }
 
 fn cmd_rm(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
-    let path = args.split_whitespace().next().ok_or(ShellError::UnknownCommand)?;
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
     shell_rm(pid, path)?;
     Ok(None)
 }
 
 fn cmd_write(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
-    let mut parts = args.splitn(2, char::is_whitespace).filter(|s| !s.is_empty());
+    let mut parts = args
+        .splitn(2, char::is_whitespace)
+        .filter(|s| !s.is_empty());
     let path = parts.next().ok_or(ShellError::UnknownCommand)?;
     let data = parts.next().ok_or(ShellError::UnknownCommand)?;
     shell_write(pid, path, data)?;
@@ -257,7 +268,10 @@ fn cmd_write(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
 }
 
 fn cmd_mkdir(pid: ProcessId, args: &str) -> Result<Option<String>, ShellError> {
-    let path = args.split_whitespace().next().ok_or(ShellError::UnknownCommand)?;
+    let path = args
+        .split_whitespace()
+        .next()
+        .ok_or(ShellError::UnknownCommand)?;
     shell_mkdir(pid, path)?;
     Ok(None)
 }

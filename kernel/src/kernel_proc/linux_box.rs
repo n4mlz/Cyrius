@@ -4,8 +4,8 @@ use alloc::string::{String, ToString};
 
 use crate::fs::{VfsError, VfsPath};
 use crate::loader::linux::{self, LinuxLoadError};
-use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::process::fs as proc_fs;
+use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::syscall::Abi;
 use crate::thread::{SCHEDULER, SpawnError};
 
