@@ -52,6 +52,10 @@ impl Container {
         self.mutable.lock().context.clone()
     }
 
+    pub fn vfs(&self) -> Arc<crate::fs::Vfs> {
+        self.mutable.lock().context.vfs()
+    }
+
     pub fn rootfs(&self) -> Arc<dyn crate::fs::Directory> {
         self.mutable.lock().context.rootfs()
     }

@@ -5,8 +5,8 @@
   required to track lifecycle transitions (status/pid).
 - Provides a `ContainerTable` for creating and looking up containers by ID, backed by a
   `ContainerRepository` that encapsulates the lock-protected map.
-- Resolves the bundle rootfs directory specified in `config.json` and stores a handle so container
-  processes can be isolated from the host filesystem.
+- Builds a container-scoped VFS instance rooted at the bundle rootfs directory specified in
+  `config.json`, so container processes resolve paths without touching the host VFS.
 
 ## Static vs Dynamic Data
 - `ContainerState` holds the OCI-style runtime state (`ociVersion`, `id`, `status`, `pid`,
@@ -16,8 +16,10 @@
 
 ## OCI Bundle Handling
 - The bundle path must be absolute and must contain `config.json` in the global VFS.
-- `SpecLoader` handles reading/parsing `config.json` and resolving the rootfs directory; table
-  management stays in `ContainerTable`/`ContainerRepository`.
+- `SpecLoader` handles reading/parsing `config.json` and building the container VFS rooted at the
+  resolved rootfs directory; table management stays in `ContainerTable`/`ContainerRepository`.
+- The container VFS currently copies the rootfs directory into container-owned memfs, so the mount
+  table and storage are isolated from the host VFS.
 
 ## Future Work
 - Connect the container rootfs to process creation so container processes see only their own VFS.
