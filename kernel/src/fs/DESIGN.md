@@ -8,6 +8,8 @@
   filesystem types.
 - Each process owns its own `FdTable` and current working directory; `open` binds a file descriptor
   to that process at allocation time.
+- Common filesystem helpers that operate directly on `Directory`/`File` live in `fs::ops`; any
+  process-aware path handling stays in `process::fs`.
 
 ## VFS Behaviour
 - `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths

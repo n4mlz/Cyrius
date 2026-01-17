@@ -11,6 +11,7 @@ mod fd;
 pub mod init;
 pub mod memfs;
 mod node;
+pub mod ops;
 mod path;
 pub mod probe;
 
