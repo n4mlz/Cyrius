@@ -18,7 +18,7 @@
 ## Linux Box
 - Resolves paths relative to the caller’s CWD, switches the target process ABI to Linux, loads a static ELF64, rewrites `syscall` opcodes to `int 0x80`, and spawns a user thread using the loader-prepared stack pointer.
 - Surfaces errors directly from existing subsystems (process table, VFS, ELF loader, thread spawning) for transparency.
-- Known constraints: only `write`/`getpid`/`exit` syscalls, static non-PIE ELF64, no dynamic linking.
+- Known constraints: only `open`/`read`/`write`/`close`/`getpid`/`exit` syscalls, static non-PIE ELF64, no dynamic linking.
 
 ## Future Work
 - Add richer status reporting (exit code, stdout capture) once process lifecycle management and IPC mature.

@@ -50,6 +50,15 @@ impl FdTable {
         Ok(fd)
     }
 
+    pub fn open_fixed(&self, fd: Fd, file: Arc<dyn File>) -> Result<(), VfsError> {
+        let mut guard = self.inner.lock();
+        if guard.exists(fd) {
+            return Err(VfsError::AlreadyExists);
+        }
+        guard.set(fd, OpenFile { file, offset: 0 })?;
+        Ok(())
+    }
+
     pub fn read(&self, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError> {
         let mut guard = self.inner.lock();
         let file = guard.get_mut(fd)?;
@@ -101,6 +110,13 @@ impl FdTableInner {
         }
         self.slots[index] = Some(entry);
         Ok(())
+    }
+
+    fn exists(&self, fd: Fd) -> bool {
+        self.slots
+            .get(fd as usize)
+            .and_then(|entry| entry.as_ref())
+            .is_some()
     }
 
     fn get_mut(&mut self, fd: Fd) -> Result<&mut OpenFile, VfsError> {

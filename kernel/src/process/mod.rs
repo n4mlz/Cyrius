@@ -30,10 +30,23 @@ pub struct ProcessFs {
 
 impl ProcessFs {
     pub fn new() -> Self {
-        Self {
+        let fs = Self {
             fd_table: FdTable::new(),
             cwd: SpinLock::new(VfsPath::root()),
-        }
+        };
+        fs.install_stdio();
+        fs
+    }
+
+    fn install_stdio(&self) {
+        let tty = crate::fs::tty::global_tty();
+        self.fd_table
+            .open_fixed(0, tty.clone())
+            .expect("install stdin");
+        self.fd_table
+            .open_fixed(1, tty.clone())
+            .expect("install stdout");
+        self.fd_table.open_fixed(2, tty).expect("install stderr");
     }
 
     pub fn set_cwd(&self, path: VfsPath) {
