@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -33,6 +34,108 @@ pub fn ensure_tar_assets(out_dir: &Path) -> io::Result<AssetPaths> {
         sample_with_links,
         busybox,
     })
+}
+
+pub fn ensure_linux_syscall_elf(out_dir: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(out_dir)?;
+    let out_path = out_dir.join("linux-syscall.elf");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src_dir = manifest_dir.join("fixtures").join("linux-syscall");
+    let src = src_dir.join("main.c");
+    let lib = src_dir.join("libsyscall.c");
+    if !src.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "linux-syscall fixture missing",
+        ));
+    }
+
+    if !needs_rebuild_multi(&[&src, &lib], &out_path)? {
+        return Ok(out_path);
+    }
+
+    build_linux_syscall_elf(&[&src, &lib], &out_path)?;
+
+    Ok(out_path)
+}
+
+pub fn run_linux_syscall_host_test(out_dir: &Path) -> io::Result<()> {
+    let elf = ensure_linux_syscall_elf(out_dir)?;
+    let test_dir = out_dir.join("host-test");
+    fs::create_dir_all(&test_dir)?;
+    fs::write(test_dir.join("msg.txt"), b"FILE\n")?;
+
+    let mut child = Command::new(&elf)
+        .current_dir(&test_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(b"IN\n")?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("linux-syscall host test failed: {output:?}"),
+        ));
+    }
+    if output.stdout != b"IN\nFILE\n" {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("linux-syscall stdout mismatch: {:?}", output.stdout),
+        ));
+    }
+
+    Ok(())
+}
+
+fn needs_rebuild_multi(srcs: &[&Path], out: &Path) -> io::Result<bool> {
+    if !out.exists() {
+        return Ok(true);
+    }
+    let out_time = file_mtime(out)?;
+    for src in srcs {
+        let src_time = file_mtime(src)?;
+        if src_time > out_time {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn file_mtime(path: &Path) -> io::Result<SystemTime> {
+    fs::metadata(path)?.modified()
+}
+
+fn build_linux_syscall_elf(srcs: &[&Path], out_path: &Path) -> io::Result<()> {
+    let tmp = out_path.with_extension("tmp");
+    // Dependencies: a host C toolchain (`cc`/`gcc`/`clang`) with static linking support.
+    let mut cmd = Command::new("cc");
+    cmd.args([
+        "-nostdlib",
+        "-static",
+        "-fno-pie",
+        "-no-pie",
+        "-fno-stack-protector",
+        "-fno-asynchronous-unwind-tables",
+        "-fno-unwind-tables",
+        "-Wl,-e,_start",
+        "-Wl,--build-id=none",
+        "-o",
+    ])
+    .arg(&tmp);
+    for src in srcs {
+        cmd.arg(src);
+    }
+
+    run_checked(&mut cmd, "cc linux-syscall")?;
+    fs::rename(tmp, out_path)?;
+    Ok(())
 }
 
 fn write_if_missing(path: &Path, generator: fn() -> Vec<u8>) -> io::Result<()> {

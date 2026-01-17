@@ -65,6 +65,12 @@ impl Tty {
     }
 }
 
+impl Default for Tty {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl File for Tty {
     fn metadata(&self) -> Result<Metadata, VfsError> {
         Ok(Metadata {
