@@ -18,6 +18,13 @@ pub use spec::{SpecLoader, SpecMetadata};
 pub use state::{ContainerState, ContainerStatus};
 pub use table::{CONTAINER_TABLE, ContainerTable};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerVfsBacking {
+    Ramfs,
+}
+
+pub const CONTAINER_VFS_BACKING: ContainerVfsBacking = ContainerVfsBacking::Ramfs;
+
 struct ContainerMutable {
     state: ContainerState,
     context: ContainerContext,
@@ -50,6 +57,10 @@ impl Container {
 
     pub fn context(&self) -> ContainerContext {
         self.mutable.lock().context.clone()
+    }
+
+    pub fn vfs(&self) -> Arc<crate::fs::Vfs> {
+        self.mutable.lock().context.vfs()
     }
 
     pub fn rootfs(&self) -> Arc<dyn crate::fs::Directory> {

@@ -45,7 +45,7 @@
 ## Error Model and Synchronization
 - `ProcessError` signals precondition violations and internal consistency issues to callers such as the scheduler.
 - The process table is guarded by a spin lock, while per-process state (`threads`, `cwd`) uses dedicated spin locks inside `Process`.
-- Path resolution and FD/VFS operations live in the `process::fs` helper module; `ProcessTable` now focuses on lifecycle and thread association.
+- Path resolution and process-facing filesystem operations live in the `process::fs` helper module; reusable filesystem utilities live in `fs::ops`.
 - Locks are expected to be held briefly; interrupt handlers should avoid taking process-table locks.
 
 ## Future Extensions

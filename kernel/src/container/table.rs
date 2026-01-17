@@ -44,8 +44,8 @@ impl ContainerTable {
             bundle_path: bundle.to_string(),
             annotations: meta.annotations,
         };
-        let rootfs = SpecLoader::resolve_rootfs(&bundle, &spec)?;
-        let context = ContainerContext::new(rootfs);
+        let vfs = SpecLoader::build_container_vfs(&bundle, &spec)?;
+        let context = ContainerContext::new(vfs);
         let container = Arc::new(Container::new(state, spec, context));
 
         self.repo.insert(id, container)
@@ -73,6 +73,7 @@ pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
 mod tests {
     use super::*;
     use crate::fs::Directory;
+    use crate::fs::VfsPath;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -87,7 +88,8 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
+        let rootfs_dir = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
+        let _ = rootfs_dir.create_file("probe").expect("create probe file");
         let config = bundle_dir
             .create_file("config.json")
             .expect("create config");
@@ -99,6 +101,15 @@ mod tests {
             .create("demo", "/bundle")
             .expect("create container");
         assert_eq!(container.id(), "demo");
+        let _ = rootfs_dir
+            .create_file("host-only")
+            .expect("create host-only file");
+        let root_entries = container
+            .vfs()
+            .read_dir(&VfsPath::parse("/").expect("parse root"))
+            .expect("read rootfs");
+        assert!(root_entries.iter().any(|entry| entry.name == "probe"));
+        assert!(!root_entries.iter().any(|entry| entry.name == "host-only"));
 
         let state = container.state();
         assert_eq!(state.status, ContainerStatus::Created);
