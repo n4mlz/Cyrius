@@ -79,16 +79,15 @@ pub fn run_linux_syscall_host_test(out_dir: &Path) -> io::Result<()> {
 
     let output = child.wait_with_output()?;
     if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("linux-syscall host test failed: {output:?}"),
-        ));
+        return Err(io::Error::other(format!(
+            "linux-syscall host test failed: {output:?}"
+        )));
     }
     if output.stdout != b"IN\nFILE\n" {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("linux-syscall stdout mismatch: {:?}", output.stdout),
-        ));
+        return Err(io::Error::other(format!(
+            "linux-syscall stdout mismatch: {:?}",
+            output.stdout
+        )));
     }
 
     Ok(())
