@@ -14,12 +14,13 @@
 
 ### Process
 - Stored as `Arc<Process>` so threads can hold a direct reference to their owning process without touching the global table.
-- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, `parent`, `exit_code`, `reaped`, `brk`, and `abi`.
+- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, `parent`, `exit_code`, `reaped`, `brk`, `abi`, and an optional container handle.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` now spans `Created`, `Ready`, `Running`, `Waiting`, `Terminated`; transitions are simple and primarily driven by thread attach/detach and scheduler ticks.
 - `abi` is fixed at process creation; callers choose host or Linux ABI up front (linux-box creates a Linux ABI process).
 - `brk` tracks the user-mode heap break (base/current), seeded by Linux ELF loading and advanced by the `brk` syscall.
 - `parent`/`exit_code`/`reaped` provide minimal wait4 support: fork assigns a parent, exit writes a code, and wait4 marks the child as reaped.
+- If a process is created for a container, it retains the container handle and filesystem operations route through the container VFS.
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.

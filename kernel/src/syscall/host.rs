@@ -2,6 +2,7 @@ use alloc::string::{String, ToString};
 
 use super::{SysError, SysResult, SyscallInvocation};
 use crate::container::{CONTAINER_TABLE, ContainerError};
+use crate::container::runtime::start_container_by_id;
 use crate::mem::addr::VirtAddr;
 use crate::mem::user::copy_from_user;
 
@@ -18,12 +19,14 @@ pub enum HostErrno {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostSyscall {
     ContainerCreate = 1,
+    ContainerStart = 2,
 }
 
 impl HostSyscall {
     pub fn from_raw(value: u64) -> Option<Self> {
         match value {
             1 => Some(Self::ContainerCreate),
+            2 => Some(Self::ContainerStart),
             _ => None,
         }
     }
@@ -33,6 +36,7 @@ impl HostSyscall {
 pub fn dispatch(invocation: &SyscallInvocation) -> SysResult {
     match HostSyscall::from_raw(invocation.number) {
         Some(HostSyscall::ContainerCreate) => handle_container_create(invocation),
+        Some(HostSyscall::ContainerStart) => handle_container_start(invocation),
         None => Err(SysError::NotImplemented),
     }
 }
@@ -69,6 +73,16 @@ fn handle_container_create(invocation: &SyscallInvocation) -> SysResult {
         }
         Err(_) => Err(SysError::InvalidArgument),
     }
+}
+
+fn handle_container_start(invocation: &SyscallInvocation) -> SysResult {
+    let id_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let id_len = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let id = read_str(id_ptr, id_len)?;
+
+    start_container_by_id(id.as_str())
+        .map(|pid| pid as u64)
+        .map_err(|_| SysError::InvalidArgument)
 }
 
 fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {

@@ -101,6 +101,7 @@ mod tests {
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::fs::tty::global_tty;
+    use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
     use crate::println;
     use crate::process::PROCESS_TABLE;
     use crate::test::kernel_test_case;
@@ -152,6 +153,10 @@ mod tests {
 
         if started {
             SCHEDULER.shutdown();
+            SYSTEM_TIMER
+                .start_periodic(TimerTicks::new(10_000_000))
+                .expect("failed to restart system timer after linux-box test");
+            INTERRUPTS.enable();
         }
     }
 

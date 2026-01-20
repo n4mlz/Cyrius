@@ -226,10 +226,14 @@ pub fn with_vfs<R>(f: impl FnOnce(&Vfs) -> Result<R, VfsError>) -> Result<R, Vfs
 }
 
 pub fn read_to_end(path: &VfsPath) -> Result<Vec<u8>, VfsError> {
-    let file = with_vfs(|vfs| match vfs.open_absolute(path)? {
+    with_vfs(|vfs| read_to_end_with_vfs(vfs, path))
+}
+
+pub fn read_to_end_with_vfs(vfs: &Vfs, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+    let file = match vfs.open_absolute(path)? {
         NodeRef::File(file) => Ok(file),
         NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
-    })?;
+    }?;
 
     let meta = file.metadata()?;
     let size = usize::try_from(meta.size).map_err(|_| VfsError::Corrupted)?;

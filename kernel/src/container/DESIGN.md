@@ -7,10 +7,14 @@
   `ContainerRepository` that encapsulates the lock-protected map.
 - Builds a container-scoped VFS instance rooted at the bundle rootfs directory specified in
   `config.json`, so container processes resolve paths without touching the host VFS.
+- Tracks container-owned process IDs so process visibility stays container-scoped even before
+  full PID namespaces exist.
 
 ## Static vs Dynamic Data
 - `ContainerState` holds the OCI-style runtime state (`ociVersion`, `id`, `status`, `pid`,
   `bundlePath`, `annotations`) and is paired with `ContainerContext` inside a single lock.
+- `ContainerMutable` also keeps a process list for the container; the init process PID is mirrored
+  in `ContainerState::pid` so OCI `state` reports it consistently.
 - The parsed OCI `Spec` (`config.json`) is stored immutably as `Arc<Spec>` so it can be shared
   without additional locking.
 
@@ -23,6 +27,12 @@
 - The container VFS backing is selected by `CONTAINER_VFS_BACKING` and currently hard-coded to
   ramfs.
 
+## Runtime Start Flow
+- `container::runtime` parses `Spec.process`, resolves `args[0]` as the entrypoint, and applies
+  `cwd` before loading the ELF image.
+- Container init processes are created with Linux ABI and are tied to the container VFS at process
+  creation time, ensuring path resolution never touches the host VFS.
+- Starting a container transitions status from `Created` to `Running` and stores the init PID.
+
 ## Future Work
-- Connect the container rootfs to process creation so container processes see only their own VFS.
 - Add state persistence and OCI `state` serialization once the host ABI exposes `container_state`.

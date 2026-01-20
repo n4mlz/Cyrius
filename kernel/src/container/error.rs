@@ -4,6 +4,8 @@ use crate::fs::VfsError;
 pub enum ContainerError {
     DuplicateId,
     InvalidId,
+    NotFound,
+    InvalidState,
     BundlePathNotAbsolute,
     MissingRoot,
     Vfs(VfsError),

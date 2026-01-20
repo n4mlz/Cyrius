@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use atomic_enum::atomic_enum;
 
 use crate::arch::{Arch, api::ArchThread};
+use crate::container::Container;
 use crate::fs::{FdTable, VfsPath};
 use crate::mem::addr::VirtAddr;
 use crate::syscall::Abi;
@@ -162,7 +163,28 @@ impl ProcessTable {
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(Process::user(pid, name, abi, space));
+        let process = Arc::new(Process::user(pid, name, abi, space, None));
+        inner.next_pid = pid.checked_add(1).expect("process id overflow");
+        inner.processes.push(process);
+        Ok(pid)
+    }
+
+    pub fn create_user_process_with_abi_in_container(
+        &self,
+        name: &'static str,
+        abi: Abi,
+        container: Arc<Container>,
+    ) -> Result<ProcessId, ProcessError> {
+        if !self.initialised.load(Ordering::Acquire) {
+            return Err(ProcessError::NotInitialised);
+        }
+
+        let space = <Arch as ArchThread>::create_user_address_space()
+            .map_err(ProcessError::AddressSpace)?;
+
+        let mut inner = self.inner.lock();
+        let pid = inner.next_pid;
+        let process = Arc::new(Process::user(pid, name, abi, space, Some(container)));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -283,6 +305,7 @@ pub struct Process {
     reaped: SpinLock<bool>,
     brk: SpinLock<BrkState>,
     abi: Abi,
+    container: Option<Arc<Container>>,
 }
 
 impl Process {
@@ -300,6 +323,7 @@ impl Process {
             reaped: SpinLock::new(false),
             brk: SpinLock::new(BrkState::empty()),
             abi,
+            container: None,
         }
     }
 
@@ -308,6 +332,7 @@ impl Process {
         name: &'static str,
         abi: Abi,
         address_space: <Arch as ArchThread>::AddressSpace,
+        container: Option<Arc<Container>>,
     ) -> Self {
         Self {
             id,
@@ -322,6 +347,7 @@ impl Process {
             reaped: SpinLock::new(false),
             brk: SpinLock::new(BrkState::empty()),
             abi,
+            container,
         }
     }
 
@@ -335,6 +361,10 @@ impl Process {
 
     pub fn abi(&self) -> Abi {
         self.abi
+    }
+
+    pub fn container(&self) -> Option<Arc<Container>> {
+        self.container.clone()
     }
 
     pub fn address_space(&self) -> <Arch as ArchThread>::AddressSpace {

@@ -1,5 +1,5 @@
-use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
-use crate::fs::{VfsError, VfsPath, read_to_end};
+use crate::arch::api::ArchLinuxElfPlatform;
+use crate::fs::{VfsError, VfsPath};
 use crate::loader::DefaultLinuxElfPlatform;
 use crate::mem::addr::{VirtAddr, align_up};
 use crate::mem::paging::MapError;
@@ -87,7 +87,7 @@ where
     P: ArchLinuxElfPlatform<AddressSpace = crate::arch::x86_64::AddressSpace>,
 {
     let abs = resolve_path(pid, raw_path)?;
-    let elf_bytes = read_to_end(&abs)?;
+    let elf_bytes = proc_fs::read_to_end_at(pid, &abs)?;
     let elf = elf::ElfFile::parse::<P>(&elf_bytes)?;
 
     let space: P::AddressSpace = PROCESS_TABLE
