@@ -14,6 +14,7 @@ mod node;
 pub mod ops;
 mod path;
 pub mod probe;
+pub mod tty;
 
 pub use fd::{Fd, FdTable};
 pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};

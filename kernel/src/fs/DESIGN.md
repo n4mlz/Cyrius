@@ -10,6 +10,8 @@
   to that process at allocation time.
 - Common filesystem helpers that operate directly on `Directory`/`File` live in `fs::ops`; any
   process-aware path handling stays in `process::fs`.
+- A global tty implements the `File` trait so processes can install stdin/stdout/stderr in their
+  `FdTable` without exposing UART details.
 
 ## VFS Behaviour
 - `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths

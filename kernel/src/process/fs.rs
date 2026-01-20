@@ -21,6 +21,31 @@ pub fn open_path(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
     process.fd_table().open_file(file)
 }
 
+pub fn open_path_with_create(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
+    let process = process_handle(pid)?;
+    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    match with_vfs(|vfs| vfs.open_absolute(&abs)) {
+        Ok(NodeRef::File(file)) => process.fd_table().open_file(file),
+        Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
+        Err(VfsError::NotFound) => {
+            let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+            let name = abs
+                .components()
+                .last()
+                .ok_or(VfsError::InvalidPath)?
+                .as_str()
+                .to_string();
+            let dir = with_vfs(|vfs| match vfs.open_absolute(&parent)? {
+                NodeRef::Directory(dir) => Ok(dir),
+                NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+            })?;
+            let file = dir.create_file(&name)?;
+            process.fd_table().open_file(file)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn read_fd(pid: ProcessId, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError> {
     let process = process_handle(pid)?;
     process.fd_table().read(fd, buf)

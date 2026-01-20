@@ -664,6 +664,10 @@ fn ensure_xtask_assets_dir() -> Result<PathBuf> {
     let assets_dir = cwd.join("target").join("xtask-assets");
     xtask_assets::ensure_tar_assets(&assets_dir)
         .with_context(|| format!("ensure tar assets in {}", assets_dir.display()))?;
+    xtask_assets::ensure_linux_syscall_elf(&assets_dir)
+        .with_context(|| format!("ensure linux syscall elf in {}", assets_dir.display()))?;
+    xtask_assets::run_linux_syscall_host_test(&assets_dir)
+        .with_context(|| "run linux syscall host test")?;
     Ok(assets_dir)
 }
 
