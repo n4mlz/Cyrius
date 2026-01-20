@@ -5,6 +5,7 @@ use atomic_enum::atomic_enum;
 
 use crate::arch::{Arch, api::ArchThread};
 use crate::fs::{FdTable, VfsPath};
+use crate::mem::addr::VirtAddr;
 use crate::syscall::Abi;
 use crate::thread::ThreadId;
 use crate::util::spinlock::SpinLock;
@@ -229,6 +230,7 @@ pub struct Process {
     kind: ProcessKind,
     threads: SpinLock<Vec<ThreadId>>,
     fs: ProcessFs,
+    brk: SpinLock<BrkState>,
     abi: Abi,
 }
 
@@ -242,6 +244,7 @@ impl Process {
             kind: ProcessKind::Kernel,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
+            brk: SpinLock::new(BrkState::empty()),
             abi,
         }
     }
@@ -255,6 +258,7 @@ impl Process {
             kind: ProcessKind::User,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
+            brk: SpinLock::new(BrkState::empty()),
             abi,
         }
     }
@@ -342,11 +346,41 @@ impl Process {
         &self.fs.fd_table
     }
 
+    pub fn brk_state(&self) -> BrkState {
+        *self.brk.lock()
+    }
+
+    pub fn set_brk_state(&self, state: BrkState) {
+        let mut guard = self.brk.lock();
+        *guard = state;
+    }
+
+    pub fn set_brk_base(&self, base: VirtAddr) {
+        let mut guard = self.brk.lock();
+        guard.base = base;
+        guard.current = base;
+    }
+
     fn set_state_if_alive(&self, state: ProcessState) {
         if matches!(self.state(), ProcessState::Terminated) {
             return;
         }
         self.state.store(state, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct BrkState {
+    pub base: VirtAddr,
+    pub current: VirtAddr,
+}
+
+impl BrkState {
+    const fn empty() -> Self {
+        Self {
+            base: VirtAddr::new(0),
+            current: VirtAddr::new(0),
+        }
     }
 }
 

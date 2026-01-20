@@ -66,6 +66,14 @@ impl UserStack {
             .checked_add(self.size)
             .expect("user stack top overflow")
     }
+
+    pub(crate) fn base(&self) -> VirtAddr {
+        self.base
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
 }
 
 impl Drop for UserStack {
@@ -178,6 +186,14 @@ impl Context {
     /// Return the stack segment selector.
     pub fn stack_segment(&self) -> u64 {
         self.ss
+    }
+
+    pub fn set_syscall_return(&mut self, value: u64) {
+        self.regs.rax = value;
+    }
+
+    pub fn set_stack_pointer(&mut self, stack_pointer: VirtAddr) {
+        self.rsp = virt_to_u64(stack_pointer);
     }
 }
 

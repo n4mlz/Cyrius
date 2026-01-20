@@ -18,7 +18,7 @@
 ## Linux Box
 - Resolves paths relative to the caller’s CWD, switches the target process ABI to Linux, loads a static ELF64, rewrites `syscall` opcodes to `int 0x80`, and spawns a user thread using the loader-prepared stack pointer.
 - Surfaces errors directly from existing subsystems (process table, VFS, ELF loader, thread spawning) for transparency.
-- Known constraints: only `open`/`read`/`write`/`close`/`getpid`/`exit` syscalls, static non-PIE ELF64, no dynamic linking.
+- Known constraints: static non-PIE ELF64, no dynamic linking, and a limited Linux syscall surface (basic process, brk, stat, and console I/O).
 - The linux-syscall test fixture binary is compiled via `xtask-assets` using the host C toolchain
   (`cc`/`gcc`/`clang`) into `target/xtask-assets/linux-syscall.elf`.
 - `xtask` also runs the linux-syscall binary on the host to confirm Linux and Cyrius produce the

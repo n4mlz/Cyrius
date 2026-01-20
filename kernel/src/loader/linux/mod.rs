@@ -1,7 +1,7 @@
 use crate::arch::api::ArchLinuxElfPlatform;
 use crate::fs::{VfsError, VfsPath, read_to_end};
 use crate::loader::DefaultLinuxElfPlatform;
-use crate::mem::addr::VirtAddr;
+use crate::mem::addr::{VirtAddr, align_up};
 use crate::mem::paging::MapError;
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
@@ -16,6 +16,7 @@ pub struct LinuxProgram<S> {
     pub entry: VirtAddr,
     pub user_stack: S,
     pub stack_pointer: VirtAddr,
+    pub heap_base: VirtAddr,
 }
 
 #[derive(Debug)]
@@ -86,17 +87,37 @@ where
     let user_stack = P::allocate_user_stack(&space, 32 * 1024)?;
     let stack_top = P::user_stack_top(&user_stack);
     let stack_pointer = stack::initialise_minimal_stack(stack_top);
+    let heap_base = compute_heap_base::<P>(&elf)?;
 
     Ok(LinuxProgram {
         entry: elf.entry,
         user_stack,
         stack_pointer,
+        heap_base,
     })
 }
 
 fn resolve_path(pid: ProcessId, raw: &str) -> Result<VfsPath, LinuxLoadError> {
     let cwd = proc_fs::cwd(pid)?;
     VfsPath::resolve(raw, &cwd).map_err(LinuxLoadError::from)
+}
+
+fn compute_heap_base<P: ArchLinuxElfPlatform>(
+    elf: &elf::ElfFile,
+) -> Result<VirtAddr, LinuxLoadError> {
+    let mut max_end = 0usize;
+    for seg in &elf.segments {
+        let end = seg
+            .vaddr
+            .as_raw()
+            .checked_add(seg.mem_size)
+            .ok_or(LinuxLoadError::SizeOverflow)?;
+        if end > max_end {
+            max_end = end;
+        }
+    }
+    let aligned = align_up(max_end, P::page_size());
+    Ok(VirtAddr::new(aligned))
 }
 
 #[cfg(test)]
@@ -135,6 +156,7 @@ mod tests {
 
         let program = load_elf(pid, "/demo").expect("load ELF");
         assert_eq!(program.entry.as_raw(), 0x400080);
+        assert_eq!(program.heap_base.as_raw(), 0x402000);
         unsafe {
             let first = core::ptr::read(program.entry.into_ptr());
             let second = core::ptr::read(program.entry.into_ptr().add(1));

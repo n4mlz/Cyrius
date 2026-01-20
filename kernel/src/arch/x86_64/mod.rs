@@ -14,6 +14,7 @@ pub use trap::{GeneralRegisters, SYSCALL_VECTOR, TrapFrame};
 use self::trap::gdt;
 
 use bootloader_api::BootInfo;
+use core::arch::asm;
 
 use crate::arch::api::{
     ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchThread, ArchTrap, HeapRegionError,
@@ -30,6 +31,12 @@ pub struct X86_64;
 /// not yet save/restore FPU state per thread.
 pub fn init_cpu_features() {
     xsave::enable_sse();
+}
+
+const IA32_FS_BASE: u32 = 0xC000_0100;
+
+pub fn set_fs_base(value: u64) {
+    unsafe { wrmsr(IA32_FS_BASE, value) };
 }
 
 impl ArchPlatform for X86_64 {
@@ -156,6 +163,22 @@ impl ArchThread for X86_64 {
         stack.top()
     }
 
+    fn user_stack_base(stack: &Self::UserStack) -> VirtAddr {
+        stack.base()
+    }
+
+    fn user_stack_size(stack: &Self::UserStack) -> usize {
+        stack.size()
+    }
+
+    fn set_syscall_return(ctx: &mut Self::Context, value: u64) {
+        ctx.set_syscall_return(value);
+    }
+
+    fn set_stack_pointer(ctx: &mut Self::Context, stack_pointer: VirtAddr) {
+        ctx.set_stack_pointer(stack_pointer);
+    }
+
     fn update_privilege_stack(stack_top: VirtAddr) {
         gdt::set_privilege_stack(stack_top);
     }
@@ -163,4 +186,18 @@ impl ArchThread for X86_64 {
 
 impl crate::arch::api::ArchPlatformHooks for X86_64 {
     type LinuxElfPlatform = loader::X86LinuxElfPlatform;
+}
+
+unsafe fn wrmsr(msr: u32, value: u64) {
+    let low = value as u32;
+    let high = (value >> 32) as u32;
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("edx") high,
+            in("eax") low,
+            options(nostack, preserves_flags)
+        );
+    }
 }

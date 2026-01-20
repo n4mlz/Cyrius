@@ -10,6 +10,8 @@ use crate::mem::user::copy_from_user;
 pub enum HostErrno {
     NotImplemented = 1,
     InvalidArgument = 2,
+    NotFound = 3,
+    BadAddress = 4,
 }
 
 #[repr(u64)]
@@ -46,6 +48,8 @@ fn encode_error(err: SysError) -> u64 {
     match err {
         SysError::NotImplemented => HostErrno::NotImplemented as u64,
         SysError::InvalidArgument => HostErrno::InvalidArgument as u64,
+        SysError::NotFound => HostErrno::NotFound as u64,
+        SysError::BadAddress => HostErrno::BadAddress as u64,
     }
 }
 

@@ -61,6 +61,9 @@ fn launch_process(path: &str) -> Result<ProcessId, RunError> {
     let pid = PROCESS_TABLE.create_user_process_with_abi("linux-proc", Abi::Linux)?;
 
     let program = linux::load_elf(pid, path)?;
+    if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+        process.set_brk_base(program.heap_base);
+    }
     let _tid = SCHEDULER.spawn_user_thread_with_stack(
         pid,
         "linux-main",
