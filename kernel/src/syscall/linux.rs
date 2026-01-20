@@ -6,7 +6,7 @@ use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
 use crate::fs::{FileType, VfsPath, with_vfs};
 use crate::io;
-use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, align_up};
+use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
 use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::user::{copy_from_user, copy_to_user, with_user_slice};
 use crate::process::PROCESS_TABLE;
@@ -182,10 +182,18 @@ fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
 
 fn handle_exit(invocation: &SyscallInvocation) -> DispatchResult {
     let code = invocation.arg(0).unwrap_or(0) as i32;
+    if let Ok(pid) = current_pid() {
+        if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+            // Store the exit code for wait4; the last exiting thread wins.
+            process.set_exit_code(code);
+        }
+    }
     DispatchResult::Terminate(code)
 }
 
 fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
+    // TODO: This is a minimal stat: inode/device/mtime fields are zeroed because we do not
+    // track them in the current VFS layer. Busybox only needs size/type bits for now.
     let path_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
     let stat_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
 
@@ -207,6 +215,8 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
 }
 
 fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
+    // TODO: This is a grow-only brk; shrinking does not unmap pages and no heap upper bound
+    // is enforced yet. The behavior is enough for busybox's basic allocator path.
     let requested = invocation.arg(0).unwrap_or(0);
     let pid = current_pid()?;
     let process = PROCESS_TABLE
@@ -243,10 +253,32 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                     allocator.deallocate(frame);
                     return Err(SysError::InvalidArgument);
                 }
+                unsafe {
+                    core::ptr::write_bytes(
+                        VirtAddr::new(addr).into_mut_ptr(),
+                        0,
+                        PageSize::SIZE_4K.bytes(),
+                    );
+                }
             }
             Ok::<_, SysError>(())
         });
         map_result?;
+    } else if requested < state.current {
+        let page_size = PageSize::SIZE_4K.bytes();
+        let start = align_up(requested.as_raw(), page_size);
+        let end = align_up(state.current.as_raw(), page_size);
+        address_space.with_page_table(|table, allocator| {
+            for addr in (start..end).step_by(page_size) {
+                let page = Page::new(VirtAddr::new(addr), PageSize::SIZE_4K);
+                match table.unmap(page) {
+                    Ok(frame) => allocator.deallocate(frame),
+                    Err(crate::mem::paging::UnmapError::NotMapped) => {}
+                    Err(_) => return Err(SysError::InvalidArgument),
+                }
+            }
+            Ok::<_, SysError>(())
+        })?;
     }
 
     state.current = requested;
@@ -258,6 +290,8 @@ fn handle_fork(
     _invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
+    // TODO: This is a minimal fork: it clones only the user stack and assumes a shared address
+    // space. Full fork would require address-space duplication (COW) and proper child tracking.
     let frame = match frame {
         Some(frame) => frame,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
@@ -286,6 +320,7 @@ fn handle_fork(
     if let Ok(parent_proc) = PROCESS_TABLE.process_handle(pid) {
         if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
             child_proc.set_brk_state(parent_proc.brk_state());
+            child_proc.set_parent(pid);
         }
     }
 
@@ -326,7 +361,8 @@ fn handle_execve(
         Some(frame) => frame,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    // argv/envp are ignored until stack/auxv setup is implemented.
+    // TODO: argv/envp/auxv are ignored. This relies on a minimal ELF stack layout and
+    // is sufficient for busybox's static binary path but not full Linux execve semantics.
     let path_ptr = match invocation.arg(0) {
         Some(ptr) => ptr,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
@@ -359,13 +395,21 @@ fn handle_execve(
 }
 
 fn handle_wait4(invocation: &SyscallInvocation) -> SysResult {
+    // TODO: This is a polling wait without a full child/zombie model; it reports exit status from
+    // a stored process exit code and marks the child as reaped. This is enough for busybox, but
+    // does not implement full Linux wait semantics.
+    const ANY_CHILD: i64 = -1;
     const WNOHANG: i32 = 1;
 
     let pid = invocation.arg(0).ok_or(SysError::InvalidArgument)? as i64;
     let status_ptr = invocation.arg(1).unwrap_or(0);
     let options = invocation.arg(2).unwrap_or(0) as i32;
 
-    if pid <= 0 {
+    let current = current_pid()?;
+    if pid == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    if pid < ANY_CHILD {
         return Err(SysError::InvalidArgument);
     }
 
@@ -373,18 +417,38 @@ fn handle_wait4(invocation: &SyscallInvocation) -> SysResult {
     let wnohang = options & WNOHANG != 0;
 
     loop {
-        let done = PROCESS_TABLE
-            .thread_count(target_pid)
-            .map(|count| count == 0)
-            .unwrap_or(true);
+        let pid = if target_pid == u64::MAX {
+            PROCESS_TABLE.find_terminated_child(current)
+        } else if PROCESS_TABLE.is_child(current, target_pid) {
+            PROCESS_TABLE
+                .process_handle(target_pid)
+                .ok()
+                .filter(|proc| matches!(proc.state(), crate::process::ProcessState::Terminated))
+                .filter(|proc| !proc.is_reaped())
+                .map(|proc| proc.id())
+        } else {
+            return Err(SysError::NotFound);
+        };
 
-        if done {
+        if let Some(pid) = pid {
+            let exit_code = PROCESS_TABLE
+                .process_handle(pid)
+                .ok()
+                .and_then(|proc| proc.exit_code())
+                .unwrap_or(0);
+            if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+                process.mark_reaped();
+            }
             if status_ptr != 0 {
-                let status = 0u32;
+                let status = encode_wait_status(exit_code);
                 let dst = VirtAddr::new(status_ptr as usize);
                 copy_to_user(dst, &status.to_ne_bytes()).map_err(|_| SysError::BadAddress)?;
             }
-            return Ok(target_pid);
+            return Ok(pid);
+        }
+
+        if target_pid == u64::MAX && !PROCESS_TABLE.has_child(current) {
+            return Err(SysError::NotFound);
         }
 
         if wnohang {
@@ -495,6 +559,10 @@ fn writev_from_iovecs(iovecs: &[LinuxIovec], total: &mut u64) -> Result<(), SysE
         }
     }
     Ok(())
+}
+
+fn encode_wait_status(code: i32) -> u32 {
+    ((code as u32) & 0xFF) << 8
 }
 
 fn copy_user_stack(info: UserStackInfo, child_base: VirtAddr) -> Result<(), SysError> {
@@ -754,14 +822,79 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         SCHEDULER.init().expect("scheduler init");
+        let parent = PROCESS_TABLE
+            .kernel_process_id()
+            .expect("kernel pid");
         let pid = PROCESS_TABLE
             .create_user_process_with_abi("wait4-test", Abi::Linux)
             .expect("create process");
+        let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
+        proc.set_parent(parent);
+        proc.set_exit_code(7);
+        proc.mark_terminated();
 
-        let invocation =
-            SyscallInvocation::new(LinuxSyscall::Wait4 as u64, [pid as u64, 0, 0, 0, 0, 0]);
+        let mut status = 0u32;
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::Wait4 as u64,
+            [pid as u64, &mut status as *mut u32 as u64, 0, 0, 0, 0],
+        );
         match dispatch(&invocation, None) {
             DispatchResult::Completed(Ok(val)) => assert_eq!(val, pid),
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+        assert_eq!(status, 7u32 << 8);
+    }
+
+    #[kernel_test_case]
+    fn wait4_any_child_picks_terminated_one() {
+        println!("[test] wait4_any_child_picks_terminated_one");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+        let parent = PROCESS_TABLE
+            .kernel_process_id()
+            .expect("kernel pid");
+        let child = PROCESS_TABLE
+            .create_user_process_with_abi("wait4-any", Abi::Linux)
+            .expect("create process");
+        let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
+        proc.set_parent(parent);
+        proc.set_exit_code(3);
+        proc.mark_terminated();
+
+        let mut status = 0u32;
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::Wait4 as u64,
+            [u64::MAX, &mut status as *mut u32 as u64, 0, 0, 0, 0],
+        );
+        match dispatch(&invocation, None) {
+            DispatchResult::Completed(Ok(val)) => assert_eq!(val, child),
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+        assert_eq!(status, 3u32 << 8);
+    }
+
+    #[kernel_test_case]
+    fn wait4_returns_nohang_when_running() {
+        println!("[test] wait4_returns_nohang_when_running");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+        let parent = PROCESS_TABLE
+            .kernel_process_id()
+            .expect("kernel pid");
+        let child = PROCESS_TABLE
+            .create_user_process_with_abi("wait4-running", Abi::Linux)
+            .expect("create process");
+        let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
+        proc.set_parent(parent);
+
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::Wait4 as u64,
+            [child as u64, 0, 1, 0, 0, 0],
+        );
+        match dispatch(&invocation, None) {
+            DispatchResult::Completed(Ok(0)) => {}
             other => panic!("unexpected dispatch result: {:?}", other),
         }
     }

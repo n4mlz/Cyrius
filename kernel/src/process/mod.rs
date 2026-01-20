@@ -190,6 +190,35 @@ impl ProcessTable {
         Some(process.abi())
     }
 
+    pub fn has_child(&self, parent: ProcessId) -> bool {
+        self.processes_snapshot()
+            .iter()
+            .any(|proc| proc.parent() == Some(parent))
+    }
+
+    pub fn is_child(&self, parent: ProcessId, child: ProcessId) -> bool {
+        self.process_handle(child)
+            .ok()
+            .and_then(|proc| proc.parent())
+            .map(|pid| pid == parent)
+            .unwrap_or(false)
+    }
+
+    pub fn find_terminated_child(&self, parent: ProcessId) -> Option<ProcessId> {
+        for proc in self.processes_snapshot() {
+            if proc.parent() != Some(parent) {
+                continue;
+            }
+            if proc.is_reaped() {
+                continue;
+            }
+            if matches!(proc.state(), ProcessState::Terminated) {
+                return Some(proc.id());
+            }
+        }
+        None
+    }
+
     // File-system operations moved to `process::fs`.
 }
 
@@ -221,6 +250,13 @@ impl ProcessTableInner {
     }
 }
 
+impl ProcessTable {
+    fn processes_snapshot(&self) -> Vec<ProcessHandle> {
+        let inner = self.inner.lock();
+        inner.processes.iter().cloned().collect()
+    }
+}
+
 pub struct Process {
     id: ProcessId,
     name: &'static str,
@@ -230,6 +266,9 @@ pub struct Process {
     kind: ProcessKind,
     threads: SpinLock<Vec<ThreadId>>,
     fs: ProcessFs,
+    parent: SpinLock<Option<ProcessId>>,
+    exit_code: SpinLock<Option<i32>>,
+    reaped: SpinLock<bool>,
     brk: SpinLock<BrkState>,
     abi: Abi,
 }
@@ -244,6 +283,9 @@ impl Process {
             kind: ProcessKind::Kernel,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
+            parent: SpinLock::new(None),
+            exit_code: SpinLock::new(None),
+            reaped: SpinLock::new(false),
             brk: SpinLock::new(BrkState::empty()),
             abi,
         }
@@ -258,6 +300,9 @@ impl Process {
             kind: ProcessKind::User,
             threads: SpinLock::new(Vec::new()),
             fs: ProcessFs::new(),
+            parent: SpinLock::new(None),
+            exit_code: SpinLock::new(None),
+            reaped: SpinLock::new(false),
             brk: SpinLock::new(BrkState::empty()),
             abi,
         }
@@ -344,6 +389,33 @@ impl Process {
 
     pub fn fd_table(&self) -> &FdTable {
         &self.fs.fd_table
+    }
+
+    pub fn parent(&self) -> Option<ProcessId> {
+        *self.parent.lock()
+    }
+
+    pub fn set_parent(&self, parent: ProcessId) {
+        let mut guard = self.parent.lock();
+        *guard = Some(parent);
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        *self.exit_code.lock()
+    }
+
+    pub fn set_exit_code(&self, code: i32) {
+        let mut guard = self.exit_code.lock();
+        *guard = Some(code);
+    }
+
+    pub fn is_reaped(&self) -> bool {
+        *self.reaped.lock()
+    }
+
+    pub fn mark_reaped(&self) {
+        let mut guard = self.reaped.lock();
+        *guard = true;
     }
 
     pub fn brk_state(&self) -> BrkState {
