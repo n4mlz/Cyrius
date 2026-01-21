@@ -878,10 +878,7 @@ mod tests {
             other => panic!("unexpected dispatch result: {:?}", other),
         }
 
-        let set_inv = SyscallInvocation::new(
-            LinuxSyscall::Brk as u64,
-            [0x601000, 0, 0, 0, 0, 0],
-        );
+        let set_inv = SyscallInvocation::new(LinuxSyscall::Brk as u64, [0x601000, 0, 0, 0, 0, 0]);
         match dispatch(&set_inv, None) {
             DispatchResult::Completed(Ok(val)) => assert_eq!(val, 0x601000),
             other => panic!("unexpected dispatch result: {:?}", other),
