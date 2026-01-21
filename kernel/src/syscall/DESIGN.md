@@ -18,8 +18,8 @@
   registers a new container entry. Host pointers are treated as kernel-mapped addresses until
   userland separation exists.
 - Linux dispatch implements a minimal set of process/syscall plumbing needed by static busybox:
-  `read`, `write`, `writev`, `stat`, `brk`, `fork`, `execve`, `wait4`, `arch_prctl`, plus stubbed
-  signal/ioctl calls. Unsupported numbers map to `ENOSYS`.
+  `read`, `write`, `open`, `close`, `writev`, `stat`, `brk`, `fork`, `execve`, `wait4`, `arch_prctl`,
+  plus stubbed signal/ioctl calls. Unsupported numbers map to `ENOSYS`.
 
 ## Extension Points / TODO
 - Add architecture-specific fast paths (`syscall`/`sysret`) once MSR programming is available.

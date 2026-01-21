@@ -29,6 +29,8 @@ pub enum LinuxErrno {
 pub enum LinuxSyscall {
     Read = 0,
     Write = 1,
+    Open = 2,
+    Close = 3,
     Stat = 4,
     Brk = 12,
     RtSigaction = 13,
@@ -49,6 +51,8 @@ impl LinuxSyscall {
         match value {
             0 => Some(Self::Read),
             1 => Some(Self::Write),
+            2 => Some(Self::Open),
+            3 => Some(Self::Close),
             4 => Some(Self::Stat),
             12 => Some(Self::Brk),
             13 => Some(Self::RtSigaction),
@@ -75,6 +79,8 @@ pub fn dispatch(
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
+        Some(LinuxSyscall::Open) => DispatchResult::Completed(handle_open(invocation)),
+        Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
@@ -145,6 +151,40 @@ fn handle_write(invocation: &SyscallInvocation) -> SysResult {
     let written = proc_fs::write_fd(pid, fd as u32, &buf[..read_len])
         .map_err(|_| SysError::InvalidArgument)?;
     Ok(written as u64)
+}
+
+fn handle_open(invocation: &SyscallInvocation) -> SysResult {
+    let pid = SCHEDULER
+        .current_process_id()
+        .ok_or(SysError::InvalidArgument)?;
+    let ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, ptr)
+    })?;
+
+    let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
+    let fd = if create {
+        proc_fs::open_path_with_create(pid, &path)
+    } else {
+        proc_fs::open_path(pid, &path)
+    }
+    .map_err(|_| SysError::InvalidArgument)?;
+
+    Ok(fd as u64)
+}
+
+fn handle_close(invocation: &SyscallInvocation) -> SysResult {
+    let pid = SCHEDULER
+        .current_process_id()
+        .ok_or(SysError::InvalidArgument)?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    proc_fs::close_fd(pid, fd as u32).map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
 }
 
 fn handle_writev(invocation: &SyscallInvocation) -> SysResult {
@@ -683,6 +723,11 @@ fn spawn_error_to_sys(err: crate::thread::SpawnError) -> SysError {
         crate::thread::SpawnError::Process(_) => SysError::InvalidArgument,
         crate::thread::SpawnError::UserStack(_) => SysError::InvalidArgument,
     }
+}
+
+#[repr(u64)]
+enum LinuxOpenFlags {
+    Creat = 0x40,
 }
 
 #[repr(C)]

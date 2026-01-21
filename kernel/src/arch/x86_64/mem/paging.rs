@@ -23,7 +23,6 @@ const P4_SHIFT: usize = PAGE_SHIFT + 3 * LEVEL_STRIDE;
 const P3_SHIFT: usize = PAGE_SHIFT + 2 * LEVEL_STRIDE;
 const P2_SHIFT: usize = PAGE_SHIFT + LEVEL_STRIDE;
 const P5_SHIFT: usize = PAGE_SHIFT + 4 * LEVEL_STRIDE;
-const USER_P4_ENTRIES: usize = 256;
 
 const PHYS_ADDR_RANGE_ERR: &str = "physical address exceeds target width";
 const VIRT_ADDR_RANGE_ERR: &str = "virtual address exceeds u64 range";
@@ -229,25 +228,34 @@ impl<M: PhysMapper> X86PageTable<M> {
     pub fn copy_kernel_p4_entries_from(&mut self, source: &Self) {
         let dst = self.root_table_mut();
         let src = source.root_table();
-        for index in USER_P4_ENTRIES..512 {
-            dst[index] = src[index].clone();
+        for index in 0..512 {
+            let entry = &src[index];
+            if entry.flags().contains(PageTableFlags::PRESENT)
+                && !entry.flags().contains(PageTableFlags::USER_ACCESSIBLE)
+            {
+                dst[index] = entry.clone();
+            }
         }
     }
 
-    pub fn kernel_p4_entries(&self) -> Vec<PageTableEntry> {
+    pub fn kernel_p4_entries(&self) -> Vec<(usize, PageTableEntry)> {
         let src = self.root_table();
-        let mut entries = Vec::with_capacity(512 - USER_P4_ENTRIES);
-        for index in USER_P4_ENTRIES..512 {
-            entries.push(src[index].clone());
+        let mut entries = Vec::new();
+        for index in 0..512 {
+            let entry = &src[index];
+            if entry.flags().contains(PageTableFlags::PRESENT)
+                && !entry.flags().contains(PageTableFlags::USER_ACCESSIBLE)
+            {
+                entries.push((index, entry.clone()));
+            }
         }
         entries
     }
 
-    pub fn install_kernel_p4_entries(&mut self, entries: &[PageTableEntry]) {
-        debug_assert_eq!(entries.len(), 512 - USER_P4_ENTRIES);
+    pub fn install_kernel_p4_entries(&mut self, entries: &[(usize, PageTableEntry)]) {
         let dst = self.root_table_mut();
-        for (offset, entry) in entries.iter().enumerate() {
-            dst[USER_P4_ENTRIES + offset] = entry.clone();
+        for (index, entry) in entries {
+            dst[*index] = entry.clone();
         }
     }
 
@@ -258,7 +266,7 @@ impl<M: PhysMapper> X86PageTable<M> {
     ) -> Result<(), UserMappingError> {
         let src_root = source.root_table();
         let dst_root = self.root_table_mut() as *mut PageTable;
-        for p4 in 0..USER_P4_ENTRIES {
+        for p4 in 0..512 {
             let src_entry = &src_root[p4];
             let flags = src_entry.flags();
             if !flags.contains(PageTableFlags::PRESENT) {
@@ -295,7 +303,7 @@ impl<M: PhysMapper> X86PageTable<M> {
         allocator: &mut A,
     ) -> Result<(), UserMappingError> {
         let root = self.root_table_mut() as *mut PageTable;
-        for p4 in 0..USER_P4_ENTRIES {
+        for p4 in 0..512 {
             let flags = unsafe { (&*root)[p4].flags() };
             if !flags.contains(PageTableFlags::PRESENT) {
                 continue;

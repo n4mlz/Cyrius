@@ -279,7 +279,16 @@ impl Scheduler {
     }
 
     fn switch_current(&self, frame: &mut CurrentTrapFrame, mode: SwitchMode) {
-        let (next_ctx, next_space, next_stack, next_is_user, next_abi, next_process, detach_target) = {
+        let (
+            next_id,
+            next_ctx,
+            next_space,
+            next_stack,
+            next_is_user,
+            next_abi,
+            next_process,
+            detach_target,
+        ) = {
             let mut inner = self.inner.lock();
             let current_id = match inner.current {
                 Some(id) => id,
@@ -332,7 +341,16 @@ impl Scheduler {
                 })
                 .expect("next thread must exist");
 
-            (ctx, space, stack_top, is_user, abi, process, detach_target)
+            (
+                next_id,
+                ctx,
+                space,
+                stack_top,
+                is_user,
+                abi,
+                process,
+                detach_target,
+            )
         };
 
         if let Some((process, tid)) = detach_target {
