@@ -162,7 +162,7 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
-            .create_user_process("linux-proc")
+            .create_user_process("linux-proc", crate::process::ProcessDomain::Host)
             .expect("create user process");
 
         let root = MemDirectory::new();

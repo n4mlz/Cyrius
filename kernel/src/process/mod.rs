@@ -137,24 +137,24 @@ impl ProcessTable {
         Ok(pid)
     }
 
-    pub fn create_user_process(&self, name: &'static str) -> Result<ProcessId, ProcessError> {
-        self.create_user_process_with_abi(name, Abi::Host)
-    }
-
-    pub fn create_user_process_with_abi(
+    /// Create a user process bound to a specific domain.
+    ///
+    /// The domain decides the ABI and the VFS contract. Callers must choose `Host` vs `Container`
+    /// explicitly so container processes cannot accidentally access the host VFS.
+    pub fn create_user_process(
         &self,
         name: &'static str,
-        abi: Abi,
+        domain: ProcessDomain,
     ) -> Result<ProcessId, ProcessError> {
         let space = <Arch as ArchThread>::create_user_address_space()
             .map_err(ProcessError::AddressSpace)?;
-        self.create_user_process_with_abi_and_space(name, abi, space)
+        self.create_user_process_with_domain_and_space(name, domain, space)
     }
 
-    pub fn create_user_process_with_abi_and_space(
+    pub fn create_user_process_with_domain_and_space(
         &self,
         name: &'static str,
-        abi: Abi,
+        domain: ProcessDomain,
         space: <Arch as ArchThread>::AddressSpace,
     ) -> Result<ProcessId, ProcessError> {
         if !self.initialised.load(Ordering::Acquire) {
@@ -163,28 +163,7 @@ impl ProcessTable {
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(Process::user(pid, name, abi, space, None));
-        inner.next_pid = pid.checked_add(1).expect("process id overflow");
-        inner.processes.push(process);
-        Ok(pid)
-    }
-
-    pub fn create_user_process_with_abi_in_container(
-        &self,
-        name: &'static str,
-        abi: Abi,
-        container: Arc<Container>,
-    ) -> Result<ProcessId, ProcessError> {
-        if !self.initialised.load(Ordering::Acquire) {
-            return Err(ProcessError::NotInitialised);
-        }
-
-        let space = <Arch as ArchThread>::create_user_address_space()
-            .map_err(ProcessError::AddressSpace)?;
-
-        let mut inner = self.inner.lock();
-        let pid = inner.next_pid;
-        let process = Arc::new(Process::user(pid, name, abi, space, Some(container)));
+        let process = Arc::new(Process::user(pid, name, space, domain));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -305,7 +284,50 @@ pub struct Process {
     reaped: SpinLock<bool>,
     brk: SpinLock<BrkState>,
     abi: Abi,
-    container: Option<Arc<Container>>,
+    domain: ProcessDomain,
+}
+
+/// Process domain determines the ABI and VFS visibility contract.
+///
+/// # Contract
+/// - Container processes always use the container VFS.
+/// - Host processes never access container VFS.
+/// - Container processes currently require Linux ABI.
+/// - The domain is immutable after process creation.
+/// - HostLinux uses Linux ABI while still bound to the host VFS (used for linux-box tests).
+///
+/// # Temporary note
+/// This domain split is temporary. Once container functionality matures, the domain will collapse
+/// into ABI selection: host ABI implies non-container process, Linux ABI implies container process.
+#[derive(Clone)]
+pub enum ProcessDomain {
+    Host,
+    /// Linux ABI on the host VFS (test helper).
+    HostLinux,
+    Container(Arc<Container>),
+}
+
+impl ProcessDomain {
+    pub fn vfs(&self) -> ProcessVfs {
+        match self {
+            Self::Host => ProcessVfs::Host,
+            Self::HostLinux => ProcessVfs::Host,
+            Self::Container(container) => ProcessVfs::Container(container.vfs()),
+        }
+    }
+
+    pub fn abi(&self) -> Abi {
+        match self {
+            Self::Host => Abi::Host,
+            Self::HostLinux => Abi::Linux,
+            Self::Container(_) => Abi::Linux,
+        }
+    }
+}
+
+pub enum ProcessVfs {
+    Host,
+    Container(Arc<crate::fs::Vfs>),
 }
 
 impl Process {
@@ -323,17 +345,17 @@ impl Process {
             reaped: SpinLock::new(false),
             brk: SpinLock::new(BrkState::empty()),
             abi,
-            container: None,
+            domain: ProcessDomain::Host,
         }
     }
 
     fn user(
         id: ProcessId,
         name: &'static str,
-        abi: Abi,
         address_space: <Arch as ArchThread>::AddressSpace,
-        container: Option<Arc<Container>>,
+        domain: ProcessDomain,
     ) -> Self {
+        let abi = domain.abi();
         Self {
             id,
             name,
@@ -347,7 +369,7 @@ impl Process {
             reaped: SpinLock::new(false),
             brk: SpinLock::new(BrkState::empty()),
             abi,
-            container,
+            domain,
         }
     }
 
@@ -363,8 +385,8 @@ impl Process {
         self.abi
     }
 
-    pub fn container(&self) -> Option<Arc<Container>> {
-        self.container.clone()
+    pub fn domain(&self) -> &ProcessDomain {
+        &self.domain
     }
 
     pub fn address_space(&self) -> <Arch as ArchThread>::AddressSpace {
@@ -520,6 +542,7 @@ enum ProcessKind {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::String;
     use alloc::sync::Arc;
 
     use super::*;
@@ -546,7 +569,7 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
-            .create_user_process("user-proc")
+            .create_user_process("user-proc", ProcessDomain::Host)
             .expect("create user process");
         assert!(pid > 0);
         let addr_space = PROCESS_TABLE
@@ -564,7 +587,7 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
-            .create_user_process("abi-proc")
+            .create_user_process("abi-proc", ProcessDomain::Host)
             .expect("create user process");
         let abi = PROCESS_TABLE.abi(pid).expect("abi present");
         assert_eq!(abi, Abi::Host);
@@ -575,8 +598,25 @@ mod tests {
         println!("[test] process_abi_is_set_at_creation");
 
         let _ = PROCESS_TABLE.init_kernel();
+        let container = Arc::new(crate::container::Container::new(
+            crate::container::ContainerState {
+                oci_version: String::from("1.0.2"),
+                id: String::from("test"),
+                status: crate::container::ContainerStatus::Created,
+                pid: None,
+                bundle_path: String::from("/bundle"),
+                annotations: Default::default(),
+            },
+            oci_spec::runtime::Spec::default(),
+            crate::container::ContainerContext::new(Arc::new(crate::fs::Vfs::new(
+                crate::fs::memfs::MemDirectory::new(),
+            ))),
+        ));
         let pid = PROCESS_TABLE
-            .create_user_process_with_abi("abi-linux", Abi::Linux)
+            .create_user_process(
+                "abi-linux",
+                crate::process::ProcessDomain::Container(container),
+            )
             .expect("create linux process");
         let abi = PROCESS_TABLE.abi(pid).expect("abi present");
         assert_eq!(abi, Abi::Linux);

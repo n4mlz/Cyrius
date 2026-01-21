@@ -10,7 +10,7 @@ use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, ali
 use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
 use crate::process::fs as proc_fs;
-use crate::process::{PROCESS_TABLE, ProcessId};
+use crate::process::{PROCESS_TABLE, ProcessDomain, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 
@@ -367,18 +367,20 @@ fn handle_fork(
         Ok(space) => space,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    let child_pid = match PROCESS_TABLE.create_user_process_with_abi_and_space(
+    let parent_proc = match PROCESS_TABLE.process_handle(pid) {
+        Ok(proc) => proc,
+        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+    };
+    let child_pid = match PROCESS_TABLE.create_user_process_with_domain_and_space(
         "linux-child",
-        Abi::Linux,
+        parent_proc.domain().clone(),
         child_space.clone(),
     ) {
         Ok(pid) => pid,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
-    if let Ok(parent_proc) = PROCESS_TABLE.process_handle(pid)
-        && let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid)
-    {
+    if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
         child_proc.set_brk_state(parent_proc.brk_state());
         child_proc.set_parent(pid);
     }
@@ -975,7 +977,7 @@ mod tests {
         SCHEDULER.init().expect("scheduler init");
         let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let pid = PROCESS_TABLE
-            .create_user_process_with_abi("wait4-test", Abi::Linux)
+            .create_user_process("wait4-test", ProcessDomain::HostLinux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
         proc.set_parent(parent);
@@ -1002,7 +1004,7 @@ mod tests {
         SCHEDULER.init().expect("scheduler init");
         let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let child = PROCESS_TABLE
-            .create_user_process_with_abi("wait4-any", Abi::Linux)
+            .create_user_process("wait4-any", ProcessDomain::HostLinux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
         proc.set_parent(parent);
@@ -1029,7 +1031,7 @@ mod tests {
         SCHEDULER.init().expect("scheduler init");
         let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let child = PROCESS_TABLE
-            .create_user_process_with_abi("wait4-running", Abi::Linux)
+            .create_user_process("wait4-running", ProcessDomain::HostLinux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
         proc.set_parent(parent);

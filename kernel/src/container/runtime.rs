@@ -5,7 +5,6 @@ use crate::container::{CONTAINER_TABLE, Container, ContainerError, ContainerStat
 use crate::fs::VfsPath;
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
-use crate::syscall::Abi;
 use crate::thread::{SCHEDULER, SpawnError};
 
 #[derive(Debug)]
@@ -71,12 +70,13 @@ pub fn start_container(container: Arc<Container>) -> Result<ProcessId, Container
     let cwd_raw = process_spec.cwd();
     let cwd = parse_cwd(cwd_raw)?;
 
-    let pid = PROCESS_TABLE.create_user_process_with_abi_in_container(
+    let pid = PROCESS_TABLE.create_user_process(
         "container-init",
-        Abi::Linux,
-        container.clone(),
+        crate::process::ProcessDomain::Container(container.clone()),
     )?;
-    let process = PROCESS_TABLE.process_handle(pid).map_err(ContainerStartError::from)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(ContainerStartError::from)?;
     process.set_cwd(cwd);
 
     let program = linux::load_elf(pid, entry)?;

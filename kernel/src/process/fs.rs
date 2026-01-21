@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use crate::fs::{DirEntry, Fd, NodeRef, Vfs, VfsError, VfsPath, read_to_end_with_vfs, with_vfs};
 
-use super::{PROCESS_TABLE, ProcessHandle, ProcessId};
+use super::{PROCESS_TABLE, ProcessHandle, ProcessId, ProcessVfs};
 
 fn process_handle(pid: ProcessId) -> Result<ProcessHandle, VfsError> {
     PROCESS_TABLE
@@ -11,14 +11,17 @@ fn process_handle(pid: ProcessId) -> Result<ProcessHandle, VfsError> {
         .map_err(|_| VfsError::NotFound)
 }
 
+/// Resolve VFS access based on the process domain contract.
+///
+/// Host/HostLinux use the global VFS, while Container uses its private VFS.
 fn with_process_vfs<R>(
     process: &ProcessHandle,
     f: impl FnOnce(&Vfs) -> Result<R, VfsError>,
 ) -> Result<R, VfsError> {
-    if let Some(container) = process.container() {
-        return f(container.vfs().as_ref());
+    match process.domain().vfs() {
+        ProcessVfs::Host => with_vfs(f),
+        ProcessVfs::Container(vfs) => f(vfs.as_ref()),
     }
-    with_vfs(f)
 }
 
 pub fn open_path(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
@@ -233,7 +236,6 @@ mod tests {
     use crate::fs::memfs::MemDirectory;
     use crate::println;
     use crate::process::PROCESS_TABLE;
-    use crate::syscall::Abi;
     use crate::test::kernel_test_case;
 
     #[kernel_test_case]
@@ -253,9 +255,7 @@ mod tests {
             .write_at(0, b"container")
             .expect("write container file");
 
-        let host_file = root
-            .create_file("shadow.txt")
-            .expect("create host file");
+        let host_file = root.create_file("shadow.txt").expect("create host file");
         let _ = host_file.write_at(0, b"host").expect("write host file");
 
         let config = bundle_dir
@@ -271,7 +271,10 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
-            .create_user_process_with_abi_in_container("cont-proc", Abi::Linux, container)
+            .create_user_process(
+                "cont-proc",
+                crate::process::ProcessDomain::Container(container),
+            )
             .expect("create container process");
 
         let fd = open_path(pid, "/shadow.txt").expect("open container file");
