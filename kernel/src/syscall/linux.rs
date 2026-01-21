@@ -1,6 +1,7 @@
 use super::{Abi, DispatchResult, SysError, SysResult, SyscallInvocation};
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
@@ -11,7 +12,7 @@ use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::user::{copy_from_user, copy_to_user, with_user_slice};
 use crate::process::PROCESS_TABLE;
 use crate::process::fs as proc_fs;
-use crate::thread::{SCHEDULER, UserStackInfo};
+use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 
 #[repr(u16)]
@@ -290,8 +291,9 @@ fn handle_fork(
     _invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
-    // TODO: This is a minimal fork: it clones only the user stack and assumes a shared address
-    // space. Full fork would require address-space duplication (COW) and proper child tracking.
+    // TODO: This fork clones the user address space without COW; it copies each user page and
+    // rebuilds a stack handle for the cloned region. This is enough for busybox but not a
+    // complete Linux fork implementation.
     let frame = match frame {
         Some(frame) => frame,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
@@ -307,14 +309,21 @@ fn handle_fork(
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
-    let child_pid = match PROCESS_TABLE.create_user_process_with_abi("linux-child", Abi::Linux) {
-        Ok(pid) => pid,
-        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
-    };
-
-    let address_space = match PROCESS_TABLE.address_space(child_pid) {
+    let parent_space = match PROCESS_TABLE.address_space(pid) {
         Some(space) => space,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+    };
+    let child_space = match <Arch as ArchThread>::clone_user_address_space(&parent_space) {
+        Ok(space) => space,
+        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+    };
+    let child_pid = match PROCESS_TABLE.create_user_process_with_abi_and_space(
+        "linux-child",
+        Abi::Linux,
+        child_space.clone(),
+    ) {
+        Ok(pid) => pid,
+        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
     if let Ok(parent_proc) = PROCESS_TABLE.process_handle(pid) {
@@ -325,16 +334,16 @@ fn handle_fork(
     }
 
     let stack_size = parent_stack.size;
-    let child_stack = match <Arch as ArchThread>::allocate_user_stack(&address_space, stack_size) {
+    let child_base = parent_stack.base;
+    let child_stack = match <Arch as ArchThread>::user_stack_from_existing(
+        &child_space,
+        child_base,
+        stack_size,
+    ) {
         Ok(stack) => stack,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    let child_base = <Arch as ArchThread>::user_stack_base(&child_stack);
     let child_top = <Arch as ArchThread>::user_stack_top(&child_stack);
-
-    if let Err(err) = copy_user_stack(parent_stack, child_base) {
-        return DispatchResult::Completed(Err(err));
-    }
 
     let parent_rsp = frame.rsp as usize;
     let offset = parent_rsp.saturating_sub(parent_stack.base.as_raw());
@@ -361,8 +370,8 @@ fn handle_execve(
         Some(frame) => frame,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    // TODO: argv/envp/auxv are ignored. This relies on a minimal ELF stack layout and
-    // is sufficient for busybox's static binary path but not full Linux execve semantics.
+    // TODO: auxv is minimal (pagesize/entry only). This is enough for busybox but not a full
+    // Linux execve environment.
     let path_ptr = match invocation.arg(0) {
         Some(ptr) => ptr,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
@@ -375,9 +384,52 @@ fn handle_execve(
         Ok(pid) => pid,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
+    let argv_ptr = invocation.arg(1).unwrap_or(0);
+    let envp_ptr = invocation.arg(2).unwrap_or(0);
+
+    let argv = match read_cstring_array(argv_ptr, 128) {
+        Ok(list) => list,
+        Err(err) => return DispatchResult::Completed(Err(err)),
+    };
+    let envp = match read_cstring_array(envp_ptr, 128) {
+        Ok(list) => list,
+        Err(err) => return DispatchResult::Completed(Err(err)),
+    };
+
+    if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+        if let Err(_) = <Arch as ArchThread>::clear_user_mappings(&process.address_space()) {
+            return DispatchResult::Completed(Err(SysError::InvalidArgument));
+        }
+    }
+
     let program = match crate::loader::linux::load_elf(pid, &path) {
         Ok(program) => program,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+    };
+
+    let auxv = [
+        crate::loader::linux::AuxvEntry {
+            key: 6, // AT_PAGESZ
+            value: PageSize::SIZE_4K.bytes() as u64,
+        },
+        crate::loader::linux::AuxvEntry {
+            key: 9, // AT_ENTRY
+            value: program.entry.as_raw() as u64,
+        },
+    ];
+    let argv_refs: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let envp_refs: alloc::vec::Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
+    let stack_top = <Arch as ArchThread>::user_stack_top(&program.user_stack);
+    let stack_pointer = match PROCESS_TABLE.address_space(pid) {
+        Some(space) => match space.with_page_table(|table, _| {
+            crate::loader::linux::initialise_stack_with_args_in_table(
+                table, stack_top, &argv_refs, &envp_refs, &auxv,
+            )
+        }) {
+            Ok(ptr) => ptr,
+            Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+        },
+        None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
     if let Err(err) = SCHEDULER.replace_current_user_stack(program.user_stack) {
@@ -389,7 +441,7 @@ fn handle_execve(
     }
 
     frame.rip = program.entry.as_raw() as u64;
-    frame.rsp = program.stack_pointer.as_raw() as u64;
+    frame.rsp = stack_pointer.as_raw() as u64;
     frame.regs.rax = 0;
     DispatchResult::Completed(Ok(0))
 }
@@ -512,6 +564,34 @@ fn read_cstring(ptr: u64) -> Result<String, SysError> {
     Ok(String::from(text))
 }
 
+fn read_u64(ptr: u64) -> Result<u64, SysError> {
+    let mut buf = [0u8; 8];
+    let addr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf, addr).map_err(|_| SysError::BadAddress)?;
+    Ok(u64::from_ne_bytes(buf))
+}
+
+fn read_cstring_array(ptr: u64, max: usize) -> Result<Vec<String>, SysError> {
+    if ptr == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for index in 0..max {
+        let offset = index
+            .checked_mul(core::mem::size_of::<u64>())
+            .ok_or(SysError::InvalidArgument)?;
+        let entry_ptr = ptr
+            .checked_add(offset as u64)
+            .ok_or(SysError::InvalidArgument)?;
+        let value = read_u64(entry_ptr)?;
+        if value == 0 {
+            break;
+        }
+        out.push(read_cstring(value)?);
+    }
+    Ok(out)
+}
+
 fn current_pid() -> Result<u64, SysError> {
     SCHEDULER
         .current_process_id()
@@ -563,21 +643,6 @@ fn writev_from_iovecs(iovecs: &[LinuxIovec], total: &mut u64) -> Result<(), SysE
 
 fn encode_wait_status(code: i32) -> u32 {
     ((code as u32) & 0xFF) << 8
-}
-
-fn copy_user_stack(info: UserStackInfo, child_base: VirtAddr) -> Result<(), SysError> {
-    const CHUNK: usize = 4096;
-    let mut buf = [0u8; CHUNK];
-    let mut offset = 0usize;
-    while offset < info.size {
-        let len = (info.size - offset).min(CHUNK);
-        let src = VirtAddr::new(info.base.as_raw() + offset);
-        let dst = VirtAddr::new(child_base.as_raw() + offset);
-        copy_from_user(&mut buf[..len], src).map_err(|_| SysError::BadAddress)?;
-        copy_to_user(dst, &buf[..len]).map_err(|_| SysError::BadAddress)?;
-        offset += len;
-    }
-    Ok(())
 }
 
 fn spawn_error_to_sys(err: crate::thread::SpawnError) -> SysError {
@@ -822,9 +887,7 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         SCHEDULER.init().expect("scheduler init");
-        let parent = PROCESS_TABLE
-            .kernel_process_id()
-            .expect("kernel pid");
+        let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let pid = PROCESS_TABLE
             .create_user_process_with_abi("wait4-test", Abi::Linux)
             .expect("create process");
@@ -851,9 +914,7 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         SCHEDULER.init().expect("scheduler init");
-        let parent = PROCESS_TABLE
-            .kernel_process_id()
-            .expect("kernel pid");
+        let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let child = PROCESS_TABLE
             .create_user_process_with_abi("wait4-any", Abi::Linux)
             .expect("create process");
@@ -880,19 +941,15 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         SCHEDULER.init().expect("scheduler init");
-        let parent = PROCESS_TABLE
-            .kernel_process_id()
-            .expect("kernel pid");
+        let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let child = PROCESS_TABLE
             .create_user_process_with_abi("wait4-running", Abi::Linux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
         proc.set_parent(parent);
 
-        let invocation = SyscallInvocation::new(
-            LinuxSyscall::Wait4 as u64,
-            [child as u64, 0, 1, 0, 0, 0],
-        );
+        let invocation =
+            SyscallInvocation::new(LinuxSyscall::Wait4 as u64, [child as u64, 0, 1, 0, 0, 0]);
         match dispatch(&invocation, None) {
             DispatchResult::Completed(Ok(0)) => {}
             other => panic!("unexpected dispatch result: {:?}", other),

@@ -13,7 +13,7 @@
 - Before mapping a new image, any existing mappings in the target segment range are unmapped and frames are returned to the allocator. This allows repeated loads in the shared kernel address space without colliding at fixed ELF virtual addresses.
 - Builds a minimal SysV-style stack: `argc=0`, `argv[0]=NULL`, `envp[0]=NULL`, `AT_NULL` terminator. The stack pointer is 16-byte aligned before pushing.
 - Segments are initially mapped writable to populate contents, then write permission is dropped if the ELF flags omit it so CR0.WP=1 でもロード時に落ちない。
-- The loader writes directly to user virtual addresses, assuming the kernel shares the active address space with the target process. Once per-process address-space isolation is introduced, we will need a staging map (or copy-on-write) path.
+- The loader copies bytes by translating target virtual addresses to physical frames and writing through the physical mapper, so it no longer depends on the target address space being active.
 
 ## API Contracts
 - `load_elf(pid, path)` resolves paths relative to the process CWD and expects the VFS to be initialised. It returns `LinuxProgram { entry, user_stack, stack_pointer, heap_base }`.

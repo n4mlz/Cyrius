@@ -3,7 +3,8 @@ use core::convert::TryFrom;
 
 use crate::arch::x86_64::mem::address_space::{self, AddressSpace as InnerAddressSpace};
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down_u64};
-use crate::mem::paging::{FrameAllocator, PageTableOps, UnmapError};
+use crate::mem::manager;
+use crate::mem::paging::{FrameAllocator, PageTableOps, PhysMapper, UnmapError};
 
 use super::trap::{GeneralRegisters, TrapFrame, gdt};
 
@@ -41,7 +42,10 @@ impl UserStack {
                 }
 
                 unsafe {
-                    core::ptr::write_bytes(addr.into_mut_ptr(), 0, PageSize::SIZE_4K.bytes());
+                    // The user address space is not active; zero via the phys mapper.
+                    let mapper = manager::phys_mapper();
+                    let ptr = mapper.phys_to_virt(frame.start);
+                    core::ptr::write_bytes(ptr.into_mut_ptr(), 0, PageSize::SIZE_4K.bytes());
                 }
 
                 mapped_pages.push(addr);
@@ -73,6 +77,21 @@ impl UserStack {
 
     pub(crate) fn size(&self) -> usize {
         self.size
+    }
+
+    pub(crate) fn from_existing(
+        space: &AddressSpace,
+        base: VirtAddr,
+        size: usize,
+    ) -> Result<Self, crate::arch::api::UserStackError> {
+        space
+            .inner()
+            .reserve_user_stack_region(base.as_raw(), size)?;
+        Ok(Self {
+            space: space.clone(),
+            base,
+            size,
+        })
     }
 }
 

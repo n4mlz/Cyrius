@@ -90,6 +90,20 @@ impl AddressSpace {
         let mut allocator = self.user_stack_allocator.lock();
         allocator.deallocate(base, size);
     }
+
+    pub fn reserve_user_stack_region(
+        &self,
+        base: usize,
+        size: usize,
+    ) -> Result<(), crate::arch::api::UserStackError> {
+        let mut allocator = self.user_stack_allocator.lock();
+        allocator.reserve(base, size)
+    }
+
+    fn reset_user_stack_allocator(&self) {
+        let mut allocator = self.user_stack_allocator.lock();
+        *allocator = UserStackAllocator::new();
+    }
 }
 
 impl Drop for AddressSpace {
@@ -104,6 +118,27 @@ impl Drop for AddressSpace {
 #[derive(Debug)]
 pub enum AddressSpaceError {
     FrameAllocationFailed,
+    MapFailed(crate::mem::paging::MapError),
+    UnsupportedMapping,
+}
+
+impl From<crate::arch::x86_64::mem::paging::UserMappingError> for AddressSpaceError {
+    fn from(err: crate::arch::x86_64::mem::paging::UserMappingError) -> Self {
+        match err {
+            crate::arch::x86_64::mem::paging::UserMappingError::FrameAllocationFailed => {
+                AddressSpaceError::FrameAllocationFailed
+            }
+            crate::arch::x86_64::mem::paging::UserMappingError::UnsupportedHugePage => {
+                AddressSpaceError::UnsupportedMapping
+            }
+        }
+    }
+}
+
+impl From<crate::mem::paging::MapError> for AddressSpaceError {
+    fn from(err: crate::mem::paging::MapError) -> Self {
+        AddressSpaceError::MapFailed(err)
+    }
 }
 
 /// Allocate a fresh address space with an empty root page table.
@@ -121,6 +156,52 @@ pub fn create_empty() -> Result<Arc<AddressSpace>, AddressSpaceError> {
 
     let (_, flags) = Cr3::read();
     Ok(Arc::new(AddressSpace::new(frame, flags, true)))
+}
+
+/// Allocate a fresh user address space with kernel mappings copied in.
+pub fn create_user_space() -> Result<Arc<AddressSpace>, AddressSpaceError> {
+    let space = create_empty()?;
+    let kernel = kernel_address_space();
+    // Avoid nested with_table: FrameAllocatorGuard uses a global lock that is not re-entrant.
+    let kernel_entries = kernel.with_table(|table, _| table.kernel_p4_entries());
+    space.with_table(|dst_table, _| {
+        dst_table.install_kernel_p4_entries(&kernel_entries);
+    });
+    Ok(space)
+}
+
+/// Clone the user portion of an existing address space into a new one.
+pub fn clone_user_space(
+    parent: &Arc<AddressSpace>,
+) -> Result<Arc<AddressSpace>, AddressSpaceError> {
+    let space = create_user_space()?;
+    let mut result = Ok(());
+    space.with_table(|dst_table, allocator| {
+        parent.with_table(|src_table, _| {
+            if result.is_ok() {
+                result = dst_table
+                    .clone_user_mappings_from(src_table, allocator)
+                    .map_err(AddressSpaceError::from);
+            }
+        });
+    });
+    result?;
+    Ok(space)
+}
+
+pub fn clear_user_mappings(space: &Arc<AddressSpace>) -> Result<(), AddressSpaceError> {
+    let mut result = Ok(());
+    space.with_table(|table, allocator| {
+        if result.is_ok() {
+            result = table
+                .clear_user_mappings(allocator)
+                .map_err(AddressSpaceError::from);
+        }
+    });
+    if result.is_ok() {
+        space.reset_user_stack_allocator();
+    }
+    result
 }
 
 /// Obtain a reference-counted handle to the kernel's current address space.
@@ -179,6 +260,29 @@ impl UserStackAllocator {
 
     fn deallocate(&mut self, base: usize, size: usize) {
         self.free.push((base, size));
+    }
+
+    fn reserve(
+        &mut self,
+        base: usize,
+        size: usize,
+    ) -> Result<(), crate::arch::api::UserStackError> {
+        if size == 0 {
+            return Err(crate::arch::api::UserStackError::InvalidSize);
+        }
+        let aligned = align_up(size, USER_STACK_ALIGNMENT);
+        if aligned != size {
+            return Err(crate::arch::api::UserStackError::InvalidSize);
+        }
+        let end = base
+            .checked_add(size)
+            .ok_or(crate::arch::api::UserStackError::InvalidSize)?;
+        if end != self.next {
+            // Current allocator only supports reserving the most-recent region.
+            return Err(crate::arch::api::UserStackError::AddressSpaceExhausted);
+        }
+        self.next = base;
+        Ok(())
     }
 }
 

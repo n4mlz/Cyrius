@@ -22,6 +22,7 @@ pub enum ProcessError {
     NotFound,
     DuplicateThread,
     ThreadNotAttached,
+    AddressSpace(crate::arch::api::UserAddressSpaceError),
 }
 
 pub struct ProcessFs {
@@ -144,13 +145,24 @@ impl ProcessTable {
         name: &'static str,
         abi: Abi,
     ) -> Result<ProcessId, ProcessError> {
+        let space = <Arch as ArchThread>::create_user_address_space()
+            .map_err(ProcessError::AddressSpace)?;
+        self.create_user_process_with_abi_and_space(name, abi, space)
+    }
+
+    pub fn create_user_process_with_abi_and_space(
+        &self,
+        name: &'static str,
+        abi: Abi,
+        space: <Arch as ArchThread>::AddressSpace,
+    ) -> Result<ProcessId, ProcessError> {
         if !self.initialised.load(Ordering::Acquire) {
             return Err(ProcessError::NotInitialised);
         }
 
         let mut inner = self.inner.lock();
         let pid = inner.next_pid;
-        let process = Arc::new(Process::user(pid, name, abi));
+        let process = Arc::new(Process::user(pid, name, abi, space));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
         Ok(pid)
@@ -291,11 +303,16 @@ impl Process {
         }
     }
 
-    fn user(id: ProcessId, name: &'static str, abi: Abi) -> Self {
+    fn user(
+        id: ProcessId,
+        name: &'static str,
+        abi: Abi,
+        address_space: <Arch as ArchThread>::AddressSpace,
+    ) -> Self {
         Self {
             id,
             name,
-            address_space: <Arch as ArchThread>::current_address_space(),
+            address_space,
             state: AtomicProcessState::new(ProcessState::Created),
             kind: ProcessKind::User,
             threads: SpinLock::new(Vec::new()),

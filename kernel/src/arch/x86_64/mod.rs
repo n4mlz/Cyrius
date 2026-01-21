@@ -18,7 +18,7 @@ use core::arch::asm;
 
 use crate::arch::api::{
     ArchDevice, ArchInterrupt, ArchMemory, ArchPlatform, ArchThread, ArchTrap, HeapRegionError,
-    InterruptInitError, MsiMessage, UserStackError,
+    InterruptInitError, MsiMessage, UserAddressSpaceError, UserStackError,
 };
 use crate::device::char::uart::ns16550::Ns16550;
 use crate::mem::addr::{AddrRange, VirtAddr};
@@ -26,6 +26,22 @@ use crate::mem::addr::{AddrRange, VirtAddr};
 use self::bus::Pio;
 
 pub struct X86_64;
+
+impl From<mem::address_space::AddressSpaceError> for UserAddressSpaceError {
+    fn from(err: mem::address_space::AddressSpaceError) -> Self {
+        match err {
+            mem::address_space::AddressSpaceError::FrameAllocationFailed => {
+                UserAddressSpaceError::FrameAllocationFailed
+            }
+            mem::address_space::AddressSpaceError::MapFailed(err) => {
+                UserAddressSpaceError::MapFailed(err)
+            }
+            mem::address_space::AddressSpaceError::UnsupportedMapping => {
+                UserAddressSpaceError::UnsupportedMapping
+            }
+        }
+    }
+}
 
 /// Enable FPU/SSE for user code by configuring CR0/CR4. This is a coarse initialisation and does
 /// not yet save/restore FPU state per thread.
@@ -171,6 +187,14 @@ impl ArchThread for X86_64 {
         stack.size()
     }
 
+    fn user_stack_from_existing(
+        space: &Self::AddressSpace,
+        base: VirtAddr,
+        size: usize,
+    ) -> Result<Self::UserStack, UserStackError> {
+        thread::UserStack::from_existing(space, base, size)
+    }
+
     fn set_syscall_return(ctx: &mut Self::Context, value: u64) {
         ctx.set_syscall_return(value);
     }
@@ -181,6 +205,23 @@ impl ArchThread for X86_64 {
 
     fn update_privilege_stack(stack_top: VirtAddr) {
         gdt::set_privilege_stack(stack_top);
+    }
+
+    fn create_user_address_space() -> Result<Self::AddressSpace, UserAddressSpaceError> {
+        let inner = mem::address_space::create_user_space().map_err(UserAddressSpaceError::from)?;
+        Ok(thread::AddressSpace::from_arc(inner))
+    }
+
+    fn clone_user_address_space(
+        source: &Self::AddressSpace,
+    ) -> Result<Self::AddressSpace, UserAddressSpaceError> {
+        let inner = mem::address_space::clone_user_space(source.inner())
+            .map_err(UserAddressSpaceError::from)?;
+        Ok(thread::AddressSpace::from_arc(inner))
+    }
+
+    fn clear_user_mappings(space: &Self::AddressSpace) -> Result<(), UserAddressSpaceError> {
+        mem::address_space::clear_user_mappings(space.inner()).map_err(UserAddressSpaceError::from)
     }
 }
 

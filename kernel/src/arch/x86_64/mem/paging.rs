@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::marker::PhantomData;
 
@@ -22,6 +23,7 @@ const P4_SHIFT: usize = PAGE_SHIFT + 3 * LEVEL_STRIDE;
 const P3_SHIFT: usize = PAGE_SHIFT + 2 * LEVEL_STRIDE;
 const P2_SHIFT: usize = PAGE_SHIFT + LEVEL_STRIDE;
 const P5_SHIFT: usize = PAGE_SHIFT + 4 * LEVEL_STRIDE;
+const USER_P4_ENTRIES: usize = 256;
 
 const PHYS_ADDR_RANGE_ERR: &str = "physical address exceeds target width";
 const VIRT_ADDR_RANGE_ERR: &str = "virtual address exceeds u64 range";
@@ -44,6 +46,12 @@ enum PagingMode {
     /// 5-level paging (57-bit virtual addresses, LA57)
     #[allow(dead_code)] // LA57 support is planned but not yet wired up
     Level5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserMappingError {
+    FrameAllocationFailed,
+    UnsupportedHugePage,
 }
 
 impl PagingMode {
@@ -216,6 +224,189 @@ impl<M: PhysMapper> X86PageTable<M> {
 
     fn root_table(&self) -> &PageTable {
         unsafe { &*(self.root_virt.into_ptr() as *const PageTable) }
+    }
+
+    pub fn copy_kernel_p4_entries_from(&mut self, source: &Self) {
+        let dst = self.root_table_mut();
+        let src = source.root_table();
+        for index in USER_P4_ENTRIES..512 {
+            dst[index] = src[index].clone();
+        }
+    }
+
+    pub fn kernel_p4_entries(&self) -> Vec<PageTableEntry> {
+        let src = self.root_table();
+        let mut entries = Vec::with_capacity(512 - USER_P4_ENTRIES);
+        for index in USER_P4_ENTRIES..512 {
+            entries.push(src[index].clone());
+        }
+        entries
+    }
+
+    pub fn install_kernel_p4_entries(&mut self, entries: &[PageTableEntry]) {
+        debug_assert_eq!(entries.len(), 512 - USER_P4_ENTRIES);
+        let dst = self.root_table_mut();
+        for (offset, entry) in entries.iter().enumerate() {
+            dst[USER_P4_ENTRIES + offset] = entry.clone();
+        }
+    }
+
+    pub fn clone_user_mappings_from<A: FrameAllocator>(
+        &mut self,
+        source: &Self,
+        allocator: &mut A,
+    ) -> Result<(), UserMappingError> {
+        let src_root = source.root_table();
+        let dst_root = self.root_table_mut() as *mut PageTable;
+        for p4 in 0..USER_P4_ENTRIES {
+            let src_entry = &src_root[p4];
+            let flags = src_entry.flags();
+            if !flags.contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                continue;
+            }
+            if flags.contains(PageTableFlags::HUGE_PAGE) {
+                return Err(UserMappingError::UnsupportedHugePage);
+            }
+
+            let frame = allocator
+                .allocate(PageSize::SIZE_4K)
+                .ok_or(UserMappingError::FrameAllocationFailed)?;
+            let dst_table_ptr = unsafe { self.table_from_phys_mut(frame.start) as *mut PageTable };
+            unsafe {
+                (*dst_table_ptr).zero();
+                (&mut *dst_root)[p4].set_addr(x86_from_phys(frame.start), flags);
+            }
+
+            let src_p3_phys = phys_from_x86(src_entry.addr());
+            let src_p3 = unsafe { source.table_from_phys(src_p3_phys) };
+            unsafe {
+                self.clone_level(source, src_p3, &mut *dst_table_ptr, allocator, 3)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn clear_user_mappings<A: FrameAllocator>(
+        &mut self,
+        allocator: &mut A,
+    ) -> Result<(), UserMappingError> {
+        let root = self.root_table_mut() as *mut PageTable;
+        for p4 in 0..USER_P4_ENTRIES {
+            let flags = unsafe { (&*root)[p4].flags() };
+            if !flags.contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                continue;
+            }
+            if flags.contains(PageTableFlags::HUGE_PAGE) {
+                return Err(UserMappingError::UnsupportedHugePage);
+            }
+            let phys = phys_from_x86(unsafe { (&*root)[p4].addr() });
+            let table_ptr = unsafe { self.table_from_phys_mut(phys) as *mut PageTable };
+            unsafe {
+                self.clear_level(&mut *table_ptr, allocator, 3)?;
+                (&mut *root)[p4].set_unused();
+            }
+            allocator.deallocate(Page::new(phys, PageSize::SIZE_4K));
+        }
+
+        self.flush_all_tlb();
+        Ok(())
+    }
+
+    fn clone_level<A: FrameAllocator>(
+        &mut self,
+        source: &Self,
+        src: &PageTable,
+        dst: &mut PageTable,
+        allocator: &mut A,
+        level: usize,
+    ) -> Result<(), UserMappingError> {
+        for index in 0..512 {
+            let src_entry = &src[index];
+            let flags = src_entry.flags();
+            if !flags.contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if flags.contains(PageTableFlags::HUGE_PAGE) {
+                return Err(UserMappingError::UnsupportedHugePage);
+            }
+
+            if level == 1 {
+                let frame = allocator
+                    .allocate(PageSize::SIZE_4K)
+                    .ok_or(UserMappingError::FrameAllocationFailed)?;
+                let src_phys = phys_from_x86(src_entry.addr());
+                let dst_phys = frame.start;
+                unsafe {
+                    let src_ptr = source.mapper.phys_to_virt(src_phys);
+                    let dst_ptr = self.mapper.phys_to_virt(dst_phys);
+                    core::ptr::copy_nonoverlapping(
+                        src_ptr.into_ptr(),
+                        dst_ptr.into_mut_ptr(),
+                        PageSize::SIZE_4K.bytes(),
+                    );
+                }
+                dst[index].set_addr(x86_from_phys(dst_phys), flags);
+                continue;
+            }
+
+            let frame = allocator
+                .allocate(PageSize::SIZE_4K)
+                .ok_or(UserMappingError::FrameAllocationFailed)?;
+            let child_dst_ptr = unsafe { self.table_from_phys_mut(frame.start) as *mut PageTable };
+            unsafe {
+                (*child_dst_ptr).zero();
+            }
+            dst[index].set_addr(x86_from_phys(frame.start), flags);
+
+            let src_phys = phys_from_x86(src_entry.addr());
+            let child_src = unsafe { source.table_from_phys(src_phys) };
+            unsafe {
+                self.clone_level(source, child_src, &mut *child_dst_ptr, allocator, level - 1)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn clear_level<A: FrameAllocator>(
+        &mut self,
+        table: &mut PageTable,
+        allocator: &mut A,
+        level: usize,
+    ) -> Result<(), UserMappingError> {
+        for index in 0..512 {
+            let entry = &mut table[index];
+            let flags = entry.flags();
+            if !flags.contains(PageTableFlags::PRESENT) {
+                continue;
+            }
+            if flags.contains(PageTableFlags::HUGE_PAGE) {
+                return Err(UserMappingError::UnsupportedHugePage);
+            }
+
+            let phys = phys_from_x86(entry.addr());
+            if level == 1 {
+                entry.set_unused();
+                allocator.deallocate(Page::new(phys, PageSize::SIZE_4K));
+                continue;
+            }
+
+            let child_ptr = unsafe { self.table_from_phys_mut(phys) as *mut PageTable };
+            unsafe {
+                self.clear_level(&mut *child_ptr, allocator, level - 1)?;
+            }
+            entry.set_unused();
+            allocator.deallocate(Page::new(phys, PageSize::SIZE_4K));
+        }
+
+        Ok(())
     }
 
     fn flush_page(&self, addr: VirtAddr) {

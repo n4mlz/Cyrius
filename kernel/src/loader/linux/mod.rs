@@ -1,4 +1,4 @@
-use crate::arch::api::ArchLinuxElfPlatform;
+use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
 use crate::fs::{VfsError, VfsPath, read_to_end};
 use crate::loader::DefaultLinuxElfPlatform;
 use crate::mem::addr::{VirtAddr, align_up};
@@ -10,6 +10,11 @@ mod elf;
 mod map;
 mod patch;
 mod stack;
+
+pub use stack::{
+    AuxvEntry, StackBuildError, initialise_minimal_stack_in_table, initialise_stack_with_args,
+    initialise_stack_with_args_in_table,
+};
 
 /// Linux ELF image loaded into a process address space.
 pub struct LinuxProgram<S> {
@@ -28,6 +33,7 @@ pub enum LinuxLoadError {
     FrameAllocationFailed,
     SizeOverflow,
     UserStack(crate::arch::api::UserStackError),
+    StackBuild(StackBuildError),
     NotFound,
     AlignmentMismatch,
 }
@@ -53,6 +59,12 @@ impl From<MapError> for LinuxLoadError {
 impl From<crate::arch::api::UserStackError> for LinuxLoadError {
     fn from(err: crate::arch::api::UserStackError) -> Self {
         Self::UserStack(err)
+    }
+}
+
+impl From<StackBuildError> for LinuxLoadError {
+    fn from(err: StackBuildError) -> Self {
+        Self::StackBuild(err)
     }
 }
 
@@ -86,7 +98,9 @@ where
 
     let user_stack = P::allocate_user_stack(&space, 32 * 1024)?;
     let stack_top = P::user_stack_top(&user_stack);
-    let stack_pointer = stack::initialise_minimal_stack(stack_top);
+    let stack_pointer = space
+        .with_page_table(|table, _| stack::initialise_minimal_stack_in_table(table, stack_top))
+        .map_err(LinuxLoadError::from)?;
     let heap_base = compute_heap_base::<P>(&elf)?;
 
     Ok(LinuxProgram {
@@ -125,9 +139,13 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use crate::arch::{Arch, api::ArchThread};
+    use crate::arch::{
+        Arch,
+        api::{ArchPageTableAccess, ArchThread},
+    };
     use crate::fs::{Directory, memfs::MemDirectory};
-    use crate::mem::addr::VirtIntoPtr;
+    use crate::mem::addr::{Addr, VirtIntoPtr};
+    use crate::mem::paging::{MapError, PageTableOps, PhysMapper};
     use crate::println;
     use crate::test::kernel_test_case;
 
@@ -157,22 +175,44 @@ mod tests {
         let program = load_elf(pid, "/demo").expect("load ELF");
         assert_eq!(program.entry.as_raw(), 0x400080);
         assert_eq!(program.heap_base.as_raw(), 0x402000);
-        unsafe {
-            let first = core::ptr::read(program.entry.into_ptr());
-            let second = core::ptr::read(program.entry.into_ptr().add(1));
-            assert_eq!(first, 0xCD);
-            assert_eq!(second, 0x80);
-        }
+        let space = PROCESS_TABLE
+            .address_space(pid)
+            .expect("user address space");
+        let first = read_user_byte(&space, program.entry).expect("read entry");
+        let second = read_user_byte(&space, program.entry.checked_add(1).unwrap()).expect("read");
+        assert_eq!(first, 0xCD);
+        assert_eq!(second, 0x80);
 
-        unsafe {
-            let bss_base = (0x401000 + 0x100) as *const u8;
-            for i in 0..0x80 {
-                assert_eq!(*bss_base.add(i), 0);
-            }
+        let bss_base = VirtAddr::new(0x401000 + 0x100);
+        for i in 0..0x80 {
+            let addr = bss_base.checked_add(i).unwrap();
+            let byte = read_user_byte(&space, addr).expect("read bss");
+            assert_eq!(byte, 0);
         }
 
         let stack_top = <Arch as ArchThread>::user_stack_top(&program.user_stack);
         assert!(program.stack_pointer.as_raw() < stack_top.as_raw());
+    }
+
+    fn read_user_byte(
+        space: &<Arch as ArchThread>::AddressSpace,
+        addr: VirtAddr,
+    ) -> Result<u8, LinuxLoadError> {
+        let mut out = Ok(0u8);
+        space
+            .with_page_table(|table, _| {
+                if out.is_ok() {
+                    let phys = table.translate(addr)?;
+                    let mapper = crate::mem::manager::phys_mapper();
+                    unsafe {
+                        let ptr = mapper.phys_to_virt(phys).into_ptr();
+                        out = Ok(core::ptr::read(ptr));
+                    }
+                }
+                Ok::<(), LinuxLoadError>(())
+            })
+            .map_err(|_| LinuxLoadError::Map(MapError::NotMapped))?;
+        out
     }
 
     fn test_elf_image() -> Vec<u8> {

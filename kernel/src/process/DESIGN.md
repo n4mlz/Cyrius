@@ -36,12 +36,12 @@
 - The scheduler reads the ABI directly from the thread's `Process` reference during context switches, avoiding global table locks in interrupt context.
 
 ## Address Space and ABI Considerations
-- For now every kernel process shares the same kernel address space.
+- Kernel processes share the same kernel address space.
 - `ArchThread::current_address_space()` seeds the stored address space. Future plans include:
   - cloning / isolating address spaces when we spawn userland processes;
   - letting the scheduler reactivate a process-specific address space on context switches.
-- User-process creation already allocates a distinct PID and thread list but continues to reference the shared kernel mappings until the paging layer exposes copy-on-write cloning.
-- When Linux compatibility arrives, each `Process` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
+- User processes allocate a dedicated address space seeded with the kernel mappings; fork clones the user portion by copying pages (no COW yet).
+- Each `Process` discriminates between host ABI and Linux ABI execution to drive syscall routing.
 - The linux-box launcher uses the per-process ABI to redirect traps from launched ELF binaries into the Linux syscall table.
 
 ## Error Model and Synchronization
