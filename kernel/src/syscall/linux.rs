@@ -9,7 +9,7 @@ use crate::fs::{FileType, VfsPath, with_vfs};
 use crate::io;
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
 use crate::mem::paging::{FrameAllocator, PageTableOps};
-use crate::mem::user::{copy_from_user, copy_to_user, with_user_slice};
+use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
 use crate::process::PROCESS_TABLE;
 use crate::process::fs as proc_fs;
 use crate::thread::SCHEDULER;
@@ -198,8 +198,14 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
     let path_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
     let stat_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
 
-    let path = read_cstring(path_ptr)?;
     let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, path_ptr)
+    })?;
     let cwd = proc_fs::cwd(pid).map_err(|_| SysError::InvalidArgument)?;
     let abs = VfsPath::resolve(&path, &cwd).map_err(|_| SysError::InvalidArgument)?;
     let node = with_vfs(|vfs| vfs.open_absolute(&abs)).map_err(|err| match err {
@@ -211,7 +217,12 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
     let mode = mode_from_meta(meta.file_type);
     let stat = LinuxStat::from_meta(mode, meta.size);
     let dst = VirtAddr::new(stat_ptr as usize);
-    copy_to_user(dst, stat.as_bytes()).map_err(|_| SysError::BadAddress)?;
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, stat.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
     Ok(0)
 }
 
@@ -376,30 +387,41 @@ fn handle_execve(
         Some(ptr) => ptr,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    let path = match read_cstring(path_ptr) {
-        Ok(path) => path,
-        Err(err) => return DispatchResult::Completed(Err(err)),
-    };
     let pid = match current_pid() {
         Ok(pid) => pid,
+        Err(err) => return DispatchResult::Completed(Err(err)),
+    };
+    let process = match PROCESS_TABLE.process_handle(pid) {
+        Ok(process) => process,
+        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+    };
+    let path = match process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, path_ptr)
+    }) {
+        Ok(path) => path,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
 
-    let argv = match read_cstring_array(argv_ptr, 128) {
+    let argv = match process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_array_with_user(&user, argv_ptr, 128)
+    }) {
         Ok(list) => list,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
-    let envp = match read_cstring_array(envp_ptr, 128) {
+    let envp = match process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_array_with_user(&user, envp_ptr, 128)
+    }) {
         Ok(list) => list,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
 
-    if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
-        if let Err(_) = <Arch as ArchThread>::clear_user_mappings(&process.address_space()) {
-            return DispatchResult::Completed(Err(SysError::InvalidArgument));
-        }
+    if let Err(_) = <Arch as ArchThread>::clear_user_mappings(&process.address_space()) {
+        return DispatchResult::Completed(Err(SysError::InvalidArgument));
     }
 
     let program = match crate::loader::linux::load_elf(pid, &path) {
@@ -541,7 +563,10 @@ fn errno_for(err: SysError) -> u16 {
     }
 }
 
-fn read_cstring(ptr: u64) -> Result<String, SysError> {
+fn read_cstring_with_user<T: PageTableOps>(
+    user: &UserMemoryAccess<'_, T>,
+    ptr: u64,
+) -> Result<String, SysError> {
     const MAX: usize = 4096;
     let mut buf = [0u8; MAX];
     let mut len = 0usize;
@@ -550,7 +575,8 @@ fn read_cstring(ptr: u64) -> Result<String, SysError> {
             .checked_add(len)
             .map(VirtAddr::new)
             .ok_or(SysError::InvalidArgument)?;
-        copy_from_user(&mut buf[len..len + 1], addr).map_err(|_| SysError::BadAddress)?;
+        user.read_bytes(addr, &mut buf[len..len + 1])
+            .map_err(|_| SysError::BadAddress)?;
         if buf[len] == 0 {
             break;
         }
@@ -564,14 +590,19 @@ fn read_cstring(ptr: u64) -> Result<String, SysError> {
     Ok(String::from(text))
 }
 
-fn read_u64(ptr: u64) -> Result<u64, SysError> {
-    let mut buf = [0u8; 8];
+fn read_u64_with_user<T: PageTableOps>(
+    user: &UserMemoryAccess<'_, T>,
+    ptr: u64,
+) -> Result<u64, SysError> {
     let addr = VirtAddr::new(ptr as usize);
-    copy_from_user(&mut buf, addr).map_err(|_| SysError::BadAddress)?;
-    Ok(u64::from_ne_bytes(buf))
+    user.read_u64(addr).map_err(|_| SysError::BadAddress)
 }
 
-fn read_cstring_array(ptr: u64, max: usize) -> Result<Vec<String>, SysError> {
+fn read_cstring_array_with_user<T: PageTableOps>(
+    user: &UserMemoryAccess<'_, T>,
+    ptr: u64,
+    max: usize,
+) -> Result<Vec<String>, SysError> {
     if ptr == 0 {
         return Ok(Vec::new());
     }
@@ -583,11 +614,11 @@ fn read_cstring_array(ptr: u64, max: usize) -> Result<Vec<String>, SysError> {
         let entry_ptr = ptr
             .checked_add(offset as u64)
             .ok_or(SysError::InvalidArgument)?;
-        let value = read_u64(entry_ptr)?;
+        let value = read_u64_with_user(user, entry_ptr)?;
         if value == 0 {
             break;
         }
-        out.push(read_cstring(value)?);
+        out.push(read_cstring_with_user(user, value)?);
     }
     Ok(out)
 }

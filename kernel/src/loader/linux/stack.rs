@@ -1,9 +1,9 @@
 use alloc::vec::Vec;
 use core::mem::size_of;
 
-use crate::mem::addr::{Addr, PageSize, VirtAddr, VirtIntoPtr, align_down};
-use crate::mem::manager;
-use crate::mem::paging::{PageTableOps, PhysMapper, TranslationError};
+use crate::mem::addr::{Addr, VirtAddr, align_down};
+use crate::mem::paging::PageTableOps;
+use crate::mem::user::{UserAccessError, UserMemoryAccess};
 
 #[derive(Clone, Copy)]
 pub struct AuxvEntry {
@@ -18,49 +18,31 @@ pub enum StackBuildError {
     UnsupportedPageSize,
 }
 
-pub fn initialise_minimal_stack(stack_top: VirtAddr) -> VirtAddr {
-    let mut sp = align_down(stack_top.as_raw(), 16);
-
-    // auxv terminator
-    sp -= size_of::<u64>();
-    unsafe { *(sp as *mut u64) = 0 };
-    sp -= size_of::<u64>();
-    unsafe { *(sp as *mut u64) = 0 };
-
-    // envp null
-    sp -= size_of::<u64>();
-    unsafe { *(sp as *mut u64) = 0 };
-
-    // argv null
-    sp -= size_of::<u64>();
-    unsafe { *(sp as *mut u64) = 0 };
-
-    // argc = 0
-    sp -= size_of::<u64>();
-    unsafe { *(sp as *mut u64) = 0 };
-
-    VirtAddr::new(sp)
-}
-
-pub fn initialise_minimal_stack_in_table<T: PageTableOps>(
+pub fn initialise_minimal_stack<T: PageTableOps>(
     table: &T,
     stack_top: VirtAddr,
 ) -> Result<VirtAddr, StackBuildError> {
     let mut sp = align_down(stack_top.as_raw(), 16);
+    let user = UserMemoryAccess::new(table);
 
     sp -= size_of::<u64>();
-    write_u64_in_table(table, VirtAddr::new(sp), 0)?;
+    user.write_u64(VirtAddr::new(sp), 0)
+        .map_err(StackBuildError::from)?;
     sp -= size_of::<u64>();
-    write_u64_in_table(table, VirtAddr::new(sp), 0)?;
+    user.write_u64(VirtAddr::new(sp), 0)
+        .map_err(StackBuildError::from)?;
 
     sp -= size_of::<u64>();
-    write_u64_in_table(table, VirtAddr::new(sp), 0)?;
+    user.write_u64(VirtAddr::new(sp), 0)
+        .map_err(StackBuildError::from)?;
 
     sp -= size_of::<u64>();
-    write_u64_in_table(table, VirtAddr::new(sp), 0)?;
+    user.write_u64(VirtAddr::new(sp), 0)
+        .map_err(StackBuildError::from)?;
 
     sp -= size_of::<u64>();
-    write_u64_in_table(table, VirtAddr::new(sp), 0)?;
+    user.write_u64(VirtAddr::new(sp), 0)
+        .map_err(StackBuildError::from)?;
 
     Ok(VirtAddr::new(sp))
 }
@@ -122,36 +104,37 @@ pub fn initialise_stack_with_args_in_table<T: PageTableOps>(
     let mut sp = align_down(stack_top.as_raw(), 16);
     let mut argv_ptrs = Vec::with_capacity(argv.len());
     let mut envp_ptrs = Vec::with_capacity(envp.len());
+    let user = UserMemoryAccess::new(table);
 
     for arg in argv.iter().rev() {
-        let ptr = push_cstring_in_table(table, &mut sp, arg.as_bytes())?;
+        let ptr = push_cstring_in_table(&user, &mut sp, arg.as_bytes())?;
         argv_ptrs.push(ptr as u64);
     }
     for env in envp.iter().rev() {
-        let ptr = push_cstring_in_table(table, &mut sp, env.as_bytes())?;
+        let ptr = push_cstring_in_table(&user, &mut sp, env.as_bytes())?;
         envp_ptrs.push(ptr as u64);
     }
 
     sp = align_down(sp, 16);
 
-    push_u64_in_table(table, &mut sp, 0)?;
-    push_u64_in_table(table, &mut sp, 0)?;
+    push_u64_in_table(&user, &mut sp, 0)?;
+    push_u64_in_table(&user, &mut sp, 0)?;
     for entry in auxv.iter().rev() {
-        push_u64_in_table(table, &mut sp, entry.value)?;
-        push_u64_in_table(table, &mut sp, entry.key)?;
+        push_u64_in_table(&user, &mut sp, entry.value)?;
+        push_u64_in_table(&user, &mut sp, entry.key)?;
     }
 
-    push_u64_in_table(table, &mut sp, 0)?;
+    push_u64_in_table(&user, &mut sp, 0)?;
     for ptr in envp_ptrs.iter() {
-        push_u64_in_table(table, &mut sp, *ptr)?;
+        push_u64_in_table(&user, &mut sp, *ptr)?;
     }
 
-    push_u64_in_table(table, &mut sp, 0)?;
+    push_u64_in_table(&user, &mut sp, 0)?;
     for ptr in argv_ptrs.iter() {
-        push_u64_in_table(table, &mut sp, *ptr)?;
+        push_u64_in_table(&user, &mut sp, *ptr)?;
     }
 
-    push_u64_in_table(table, &mut sp, argv.len() as u64)?;
+    push_u64_in_table(&user, &mut sp, argv.len() as u64)?;
 
     Ok(VirtAddr::new(sp))
 }
@@ -170,7 +153,7 @@ fn push_cstring(sp: &mut usize, bytes: &[u8]) -> Result<usize, StackBuildError> 
 }
 
 fn push_cstring_in_table<T: PageTableOps>(
-    table: &T,
+    user: &UserMemoryAccess<'_, T>,
     sp: &mut usize,
     bytes: &[u8],
 ) -> Result<usize, StackBuildError> {
@@ -180,13 +163,14 @@ fn push_cstring_in_table<T: PageTableOps>(
         .ok_or(StackBuildError::Overflow)?;
     *sp = sp.checked_sub(len).ok_or(StackBuildError::Overflow)?;
     let addr = VirtAddr::new(*sp);
-    write_bytes_in_table(table, addr, bytes)?;
-    write_bytes_in_table(
-        table,
+    user.write_bytes(addr, bytes)
+        .map_err(StackBuildError::from)?;
+    user.write_bytes(
         addr.checked_add(bytes.len())
             .ok_or(StackBuildError::Overflow)?,
         &[0],
-    )?;
+    )
+    .map_err(StackBuildError::from)?;
     Ok(*sp)
 }
 
@@ -201,55 +185,28 @@ fn push_u64(sp: &mut usize, value: u64) -> Result<(), StackBuildError> {
 }
 
 fn push_u64_in_table<T: PageTableOps>(
-    table: &T,
+    user: &UserMemoryAccess<'_, T>,
     sp: &mut usize,
     value: u64,
 ) -> Result<(), StackBuildError> {
     *sp = sp
         .checked_sub(size_of::<u64>())
         .ok_or(StackBuildError::Overflow)?;
-    write_u64_in_table(table, VirtAddr::new(*sp), value)
+    user.write_u64(VirtAddr::new(*sp), value)
+        .map_err(StackBuildError::from)
 }
 
-fn write_u64_in_table<T: PageTableOps>(
-    table: &T,
-    addr: VirtAddr,
-    value: u64,
-) -> Result<(), StackBuildError> {
-    write_bytes_in_table(table, addr, &value.to_le_bytes())
-}
-
-fn write_bytes_in_table<T: PageTableOps>(
-    table: &T,
-    addr: VirtAddr,
-    bytes: &[u8],
-) -> Result<(), StackBuildError> {
-    // User stacks are populated while running on the kernel page table.
-    let mapper = manager::phys_mapper();
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let raw = addr
-            .as_raw()
-            .checked_add(offset)
-            .ok_or(StackBuildError::Overflow)?;
-        let virt = VirtAddr::new(raw);
-        let phys = table.translate(virt).map_err(StackBuildError::from)?;
-        let page_offset = raw % PageSize::SIZE_4K.bytes();
-        let len = (PageSize::SIZE_4K.bytes() - page_offset).min(bytes.len() - offset);
-        unsafe {
-            let ptr = mapper.phys_to_virt(phys);
-            core::ptr::copy_nonoverlapping(bytes[offset..].as_ptr(), ptr.into_mut_ptr(), len);
-        }
-        offset += len;
-    }
-    Ok(())
-}
-
-impl From<TranslationError> for StackBuildError {
-    fn from(err: TranslationError) -> Self {
+impl From<UserAccessError> for StackBuildError {
+    fn from(err: UserAccessError) -> Self {
         match err {
-            TranslationError::NotMapped => StackBuildError::NotMapped,
-            TranslationError::HugePage => StackBuildError::UnsupportedPageSize,
+            UserAccessError::NotMapped => StackBuildError::NotMapped,
+            UserAccessError::UnsupportedPageSize => StackBuildError::UnsupportedPageSize,
+            UserAccessError::AddressOverflow => StackBuildError::Overflow,
+            UserAccessError::NullPointer
+            | UserAccessError::NonCanonical
+            | UserAccessError::OutOfRange
+            | UserAccessError::Misaligned { .. }
+            | UserAccessError::ZeroSizedType => StackBuildError::Overflow,
         }
     }
 }

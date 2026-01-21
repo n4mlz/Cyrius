@@ -6,7 +6,9 @@
 use core::mem::size_of;
 use core::ptr::copy_nonoverlapping;
 
-use crate::mem::addr::{Addr, VirtAddr, VirtIntoPtr};
+use crate::mem::addr::{Addr, PageSize, VirtAddr, VirtIntoPtr};
+use crate::mem::manager;
+use crate::mem::paging::{PageTableOps, PhysMapper, TranslationError};
 
 const USER_SPACE_LIMIT: usize = 0x0000_8000_0000_0000;
 
@@ -18,9 +20,12 @@ pub enum UserAccessError {
     OutOfRange,
     Misaligned { alignment: usize },
     ZeroSizedType,
+    NotMapped,
+    UnsupportedPageSize,
 }
 
 pub fn copy_to_user(user_dst: VirtAddr, src: &[u8]) -> Result<(), UserAccessError> {
+    // Assumes the caller is running on the target address space page table.
     if src.is_empty() {
         return Ok(());
     }
@@ -35,6 +40,7 @@ pub fn copy_to_user(user_dst: VirtAddr, src: &[u8]) -> Result<(), UserAccessErro
 }
 
 pub fn copy_from_user(dst: &mut [u8], user_src: VirtAddr) -> Result<(), UserAccessError> {
+    // Assumes the caller is running on the target address space page table.
     if dst.is_empty() {
         return Ok(());
     }
@@ -46,6 +52,79 @@ pub fn copy_from_user(dst: &mut [u8], user_src: VirtAddr) -> Result<(), UserAcce
         copy_nonoverlapping(user_src.into_ptr(), dst.as_mut_ptr(), len);
     }
     Ok(())
+}
+
+pub struct UserMemoryAccess<'a, T: PageTableOps> {
+    table: &'a T,
+}
+
+impl<'a, T: PageTableOps> UserMemoryAccess<'a, T> {
+    pub fn new(table: &'a T) -> Self {
+        Self { table }
+    }
+
+    pub fn read_bytes(&self, user_src: VirtAddr, dst: &mut [u8]) -> Result<(), UserAccessError> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+
+        validate_user_range(user_src, dst.len())?;
+        let mapper = manager::phys_mapper();
+        let mut offset = 0usize;
+        while offset < dst.len() {
+            let raw = user_src
+                .as_raw()
+                .checked_add(offset)
+                .ok_or(UserAccessError::AddressOverflow)?;
+            let virt = VirtAddr::new(raw);
+            let phys = self.table.translate(virt).map_err(UserAccessError::from)?;
+            let page_offset = raw % PageSize::SIZE_4K.bytes();
+            let len = (PageSize::SIZE_4K.bytes() - page_offset).min(dst.len() - offset);
+            unsafe {
+                let ptr = mapper.phys_to_virt(phys);
+                copy_nonoverlapping(ptr.into_ptr(), dst[offset..].as_mut_ptr(), len);
+            }
+            offset += len;
+        }
+        Ok(())
+    }
+
+    pub fn write_bytes(&self, user_dst: VirtAddr, src: &[u8]) -> Result<(), UserAccessError> {
+        if src.is_empty() {
+            return Ok(());
+        }
+
+        // User address space is not active while building execve/fork state; use the phys mapper.
+        validate_user_range(user_dst, src.len())?;
+        let mapper = manager::phys_mapper();
+        let mut offset = 0usize;
+        while offset < src.len() {
+            let raw = user_dst
+                .as_raw()
+                .checked_add(offset)
+                .ok_or(UserAccessError::AddressOverflow)?;
+            let virt = VirtAddr::new(raw);
+            let phys = self.table.translate(virt).map_err(UserAccessError::from)?;
+            let page_offset = raw % PageSize::SIZE_4K.bytes();
+            let len = (PageSize::SIZE_4K.bytes() - page_offset).min(src.len() - offset);
+            unsafe {
+                let ptr = mapper.phys_to_virt(phys);
+                copy_nonoverlapping(src[offset..].as_ptr(), ptr.into_mut_ptr(), len);
+            }
+            offset += len;
+        }
+        Ok(())
+    }
+
+    pub fn read_u64(&self, user_src: VirtAddr) -> Result<u64, UserAccessError> {
+        let mut buf = [0u8; 8];
+        self.read_bytes(user_src, &mut buf)?;
+        Ok(u64::from_ne_bytes(buf))
+    }
+
+    pub fn write_u64(&self, user_dst: VirtAddr, value: u64) -> Result<(), UserAccessError> {
+        self.write_bytes(user_dst, &value.to_ne_bytes())
+    }
 }
 
 pub fn with_user_slice<T, F, R>(ptr: VirtAddr, len: usize, f: F) -> Result<R, UserAccessError>
@@ -125,6 +204,15 @@ fn total_bytes<T>(len: usize) -> Result<usize, UserAccessError> {
 fn is_lower_canonical(addr: usize) -> bool {
     // Assumes 4-level paging (48-bit canonical addresses).
     (addr >> 47) == 0
+}
+
+impl From<TranslationError> for UserAccessError {
+    fn from(err: TranslationError) -> Self {
+        match err {
+            TranslationError::NotMapped => UserAccessError::NotMapped,
+            TranslationError::HugePage => UserAccessError::UnsupportedPageSize,
+        }
+    }
 }
 
 #[cfg(test)]

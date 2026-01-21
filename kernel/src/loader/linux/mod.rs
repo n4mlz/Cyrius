@@ -12,7 +12,7 @@ mod patch;
 mod stack;
 
 pub use stack::{
-    AuxvEntry, StackBuildError, initialise_minimal_stack_in_table, initialise_stack_with_args,
+    AuxvEntry, StackBuildError, initialise_minimal_stack, initialise_stack_with_args,
     initialise_stack_with_args_in_table,
 };
 
@@ -99,7 +99,7 @@ where
     let user_stack = P::allocate_user_stack(&space, 32 * 1024)?;
     let stack_top = P::user_stack_top(&user_stack);
     let stack_pointer = space
-        .with_page_table(|table, _| stack::initialise_minimal_stack_in_table(table, stack_top))
+        .with_page_table(|table, _| stack::initialise_minimal_stack(table, stack_top))
         .map_err(LinuxLoadError::from)?;
     let heap_base = compute_heap_base::<P>(&elf)?;
 
