@@ -10,8 +10,8 @@ use crate::io;
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
 use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
-use crate::process::PROCESS_TABLE;
 use crate::process::fs as proc_fs;
+use crate::process::{PROCESS_TABLE, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 
@@ -190,10 +190,10 @@ fn handle_close(invocation: &SyscallInvocation) -> SysResult {
 fn handle_writev(invocation: &SyscallInvocation) -> SysResult {
     const MAX_IOVCNT: usize = 1024;
 
+    let pid = SCHEDULER
+        .current_process_id()
+        .ok_or(SysError::InvalidArgument)?;
     let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
-    if fd != 1 && fd != 2 {
-        return Err(SysError::InvalidArgument);
-    }
     let iov_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let iov_cnt = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
     let iov_cnt = usize::try_from(iov_cnt).map_err(|_| SysError::InvalidArgument)?;
@@ -207,7 +207,7 @@ fn handle_writev(invocation: &SyscallInvocation) -> SysResult {
     let mut total = 0u64;
     let ptr = VirtAddr::new(iov_ptr as usize);
     with_user_slice::<LinuxIovec, _, _>(ptr, iov_cnt, |iovecs| {
-        writev_from_iovecs(iovecs, &mut total)
+        writev_from_iovecs(pid, fd as u32, iovecs, &mut total)
     })
     .map_err(|_| SysError::BadAddress)??;
 
@@ -460,6 +460,12 @@ fn handle_execve(
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
 
+    // Drop the previous user stack before clearing mappings so we do not unmap the
+    // freshly allocated stack on replacement.
+    if let Err(err) = SCHEDULER.clear_current_user_stack() {
+        return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
+    }
+
     if let Err(_) = <Arch as ArchThread>::clear_user_mappings(&process.address_space()) {
         return DispatchResult::Completed(Err(SysError::InvalidArgument));
     }
@@ -684,7 +690,12 @@ fn mode_from_meta(file_type: FileType) -> u32 {
     }
 }
 
-fn writev_from_iovecs(iovecs: &[LinuxIovec], total: &mut u64) -> Result<(), SysError> {
+fn writev_from_iovecs(
+    pid: ProcessId,
+    fd: u32,
+    iovecs: &[LinuxIovec],
+    total: &mut u64,
+) -> Result<(), SysError> {
     const MAX_WRITE: usize = 4096;
     let mut chunk = [0u8; MAX_WRITE];
     for iov in iovecs {
@@ -701,7 +712,8 @@ fn writev_from_iovecs(iovecs: &[LinuxIovec], total: &mut u64) -> Result<(), SysE
                 .map(VirtAddr::new)
                 .ok_or(SysError::InvalidArgument)?;
             copy_from_user(&mut chunk[..part], addr).map_err(|_| SysError::BadAddress)?;
-            let written = io::write_console(&chunk[..part]);
+            let written = proc_fs::write_fd(pid, fd, &chunk[..part])
+                .map_err(|_| SysError::InvalidArgument)?;
             *total = total.saturating_add(written as u64);
             if written < part {
                 return Ok(());
@@ -854,6 +866,8 @@ mod tests {
     fn writev_reports_length_written() {
         println!("[test] writev_reports_length_written");
 
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
         let a = b"hi";
         let b = b"there";
         let iov = [

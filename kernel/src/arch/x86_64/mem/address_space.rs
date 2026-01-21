@@ -69,6 +69,20 @@ impl AddressSpace {
         f(&mut table, &mut allocator)
     }
 
+    /// Execute `f` with exclusive access to the root page table without locking the allocator.
+    ///
+    /// # Implicit Contract
+    /// - Global memory services must be initialised via `mem::manager::init` before calling this.
+    pub fn with_table_ro<F, R>(&self, mut f: F) -> R
+    where
+        F: FnMut(&X86PageTable<OffsetMapper>) -> R,
+    {
+        let _guard = self.lock.lock();
+        let mapper = manager::phys_mapper();
+        let table = unsafe { X86PageTable::from_existing(self.root, mapper) };
+        f(&table)
+    }
+
     pub fn allocate_user_stack_region(
         &self,
         size: usize,
@@ -177,7 +191,7 @@ pub fn clone_user_space(
     let space = create_user_space()?;
     let mut result = Ok(());
     space.with_table(|dst_table, allocator| {
-        parent.with_table(|src_table, _| {
+        parent.with_table_ro(|src_table| {
             if result.is_ok() {
                 result = dst_table
                     .clone_user_mappings_from(src_table, allocator)

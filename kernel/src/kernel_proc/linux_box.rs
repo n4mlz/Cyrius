@@ -110,6 +110,14 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../target/xtask-assets/linux-syscall.elf"
     ));
+    const LINUX_SYSCALL_ADV_ELF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../target/xtask-assets/linux-syscall-adv.elf"
+    ));
+    const LINUX_SYSCALL_CHILD_ELF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../target/xtask-assets/linux-syscall-child.elf"
+    ));
 
     #[kernel_test_case]
     fn linux_binary_reads_stdin_and_file() {
@@ -141,6 +149,49 @@ mod tests {
 
         let output = tty.drain_output();
         assert_eq!(output, b"IN\nFILE\n");
+
+        if started {
+            SCHEDULER.shutdown();
+        }
+    }
+
+    #[kernel_test_case]
+    fn linux_binary_exercises_process_syscalls() {
+        println!("[test] linux_binary_exercises_process_syscalls");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+        let started = match SCHEDULER.start() {
+            Ok(()) => true,
+            Err(SchedulerError::AlreadyStarted) => false,
+            Err(err) => panic!("scheduler start failed: {:?}", err),
+        };
+
+        let root = MemDirectory::new();
+        force_replace_root(root.clone());
+
+        let stat_file = root.create_file("stat.txt").expect("create stat.txt");
+        let _ = stat_file.write_at(0, b"STATDATA").expect("write stat.txt");
+
+        let adv = root.create_file("adv").expect("create adv");
+        let _ = adv.write_at(0, LINUX_SYSCALL_ADV_ELF).expect("write adv");
+
+        let child = root.create_file("child").expect("create child");
+        let _ = child
+            .write_at(0, LINUX_SYSCALL_CHILD_ELF)
+            .expect("write child");
+
+        let tty = global_tty();
+        tty.clear_output();
+
+        let kernel_pid = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
+        run_and_wait(kernel_pid, "/adv").expect("run linux adv");
+
+        let output = tty.drain_output();
+        assert_eq!(
+            output,
+            b"WRITEV\nSTAT:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+        );
 
         if started {
             SCHEDULER.shutdown();

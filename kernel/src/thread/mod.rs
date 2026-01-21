@@ -7,7 +7,9 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, ArchThread, UserStackError},
 };
-use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
+use crate::interrupt::{
+    DEFAULT_SYSTEM_TIMER_TICKS, InterruptServiceRoutine, SYSTEM_TIMER, TimerError,
+};
 use crate::mem::addr::VirtAddr;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessHandle, ProcessId};
 use crate::syscall;
@@ -204,6 +206,24 @@ impl Scheduler {
         Ok(())
     }
 
+    pub fn clear_current_user_stack(&self) -> Result<(), SpawnError> {
+        let mut inner = self.inner.lock();
+        if !inner.initialised {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
+        let thread = inner
+            .thread_mut(current)
+            .ok_or(SpawnError::SchedulerNotReady)?;
+        if !thread.is_user() {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        thread.user_stack = None;
+        Ok(())
+    }
+
     fn spawn_thread_locked(
         &self,
         inner: &mut SchedulerInner,
@@ -245,6 +265,10 @@ impl Scheduler {
         SYSTEM_TIMER
             .install_handler(&SCHEDULER_DISPATCH)
             .map_err(SchedulerError::Timer)?;
+        match SYSTEM_TIMER.start_periodic(DEFAULT_SYSTEM_TIMER_TICKS) {
+            Ok(()) | Err(TimerError::AlreadyRunning) => {}
+            Err(err) => return Err(SchedulerError::Timer(err)),
+        }
 
         <Arch as ArchInterrupt>::enable_interrupts();
 
