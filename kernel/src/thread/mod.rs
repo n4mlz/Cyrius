@@ -304,7 +304,7 @@ impl Scheduler {
 
     fn switch_current(&self, frame: &mut CurrentTrapFrame, mode: SwitchMode) {
         let (
-            next_id,
+            _next_id,
             next_ctx,
             next_space,
             next_stack,

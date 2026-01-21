@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
 use crate::fs::{FileType, VfsPath, with_vfs};
-use crate::io;
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
 use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
@@ -223,11 +222,11 @@ fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
 
 fn handle_exit(invocation: &SyscallInvocation) -> DispatchResult {
     let code = invocation.arg(0).unwrap_or(0) as i32;
-    if let Ok(pid) = current_pid() {
-        if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
-            // Store the exit code for wait4; the last exiting thread wins.
-            process.set_exit_code(code);
-        }
+    if let Ok(pid) = current_pid()
+        && let Ok(process) = PROCESS_TABLE.process_handle(pid)
+    {
+        // Store the exit code for wait4; the last exiting thread wins.
+        process.set_exit_code(code);
     }
     DispatchResult::Terminate(code)
 }
@@ -301,7 +300,7 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                 let frame = allocator
                     .allocate(PageSize::SIZE_4K)
                     .ok_or(SysError::InvalidArgument)?;
-                if let Err(_) = table.map(page, frame, MemPerm::USER_RW, allocator) {
+                if table.map(page, frame, MemPerm::USER_RW, allocator).is_err() {
                     allocator.deallocate(frame);
                     return Err(SysError::InvalidArgument);
                 }
@@ -377,11 +376,11 @@ fn handle_fork(
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
-    if let Ok(parent_proc) = PROCESS_TABLE.process_handle(pid) {
-        if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
-            child_proc.set_brk_state(parent_proc.brk_state());
-            child_proc.set_parent(pid);
-        }
+    if let Ok(parent_proc) = PROCESS_TABLE.process_handle(pid)
+        && let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid)
+    {
+        child_proc.set_brk_state(parent_proc.brk_state());
+        child_proc.set_parent(pid);
     }
 
     let stack_size = parent_stack.size;
@@ -466,7 +465,7 @@ fn handle_execve(
         return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
     }
 
-    if let Err(_) = <Arch as ArchThread>::clear_user_mappings(&process.address_space()) {
+    if <Arch as ArchThread>::clear_user_mappings(&process.address_space()).is_err() {
         return DispatchResult::Completed(Err(SysError::InvalidArgument));
     }
 
@@ -504,7 +503,7 @@ fn handle_execve(
         return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
     }
 
-    if let Some(process) = PROCESS_TABLE.process_handle(pid).ok() {
+    if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
         process.set_brk_base(program.heap_base);
     }
 

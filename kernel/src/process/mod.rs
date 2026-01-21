@@ -265,7 +265,7 @@ impl ProcessTableInner {
 impl ProcessTable {
     fn processes_snapshot(&self) -> Vec<ProcessHandle> {
         let inner = self.inner.lock();
-        inner.processes.iter().cloned().collect()
+        inner.processes.to_vec()
     }
 }
 
