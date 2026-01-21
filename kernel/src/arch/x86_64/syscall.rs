@@ -27,7 +27,7 @@ impl InterruptServiceRoutine for SyscallHandler {
                 frame.regs.r9,
             ],
         );
-        match syscall::dispatch(abi, &invocation) {
+        match syscall::dispatch_with_frame(abi, &invocation, Some(frame)) {
             syscall::DispatchResult::Completed(result) => {
                 frame.regs.rax = syscall::encode_result(abi, result);
             }

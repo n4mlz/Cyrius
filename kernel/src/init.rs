@@ -9,12 +9,10 @@ use crate::arch::{
 use crate::device::char::uart::Uart;
 use crate::device::probe;
 use crate::fs::init::init_filesystems;
-use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
+use crate::interrupt::{DEFAULT_SYSTEM_TIMER_TICKS, INTERRUPTS, SYSTEM_TIMER};
 use crate::mem::addr::{AddrRange, PhysAddr};
 use crate::mem::{allocator, manager};
 use crate::thread::SCHEDULER;
-
-const SYSTEM_TIMER_TICKS: TimerTicks = TimerTicks::new(10_000_000);
 
 pub fn init_runtime(boot_info: &'static mut BootInfo) {
     Arch::console()
@@ -73,7 +71,7 @@ pub fn init_runtime(boot_info: &'static mut BootInfo) {
         .unwrap_or_else(|err| panic!("failed to initialise syscalls: {err:?}"));
 
     SYSTEM_TIMER
-        .start_periodic(SYSTEM_TIMER_TICKS)
+        .start_periodic(DEFAULT_SYSTEM_TIMER_TICKS)
         .unwrap_or_else(|err| panic!("failed to initialise system timer: {err:?}"));
 
     INTERRUPTS.enable();

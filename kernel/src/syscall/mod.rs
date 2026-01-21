@@ -25,6 +25,8 @@ impl Abi {
 pub enum SysError {
     NotImplemented,
     InvalidArgument,
+    NotFound,
+    BadAddress,
 }
 
 pub type SysResult = Result<u64, SysError>;
@@ -51,9 +53,17 @@ pub fn current_abi() -> Abi {
 
 /// Dispatch a syscall for the given ABI.
 pub fn dispatch(abi: Abi, invocation: &SyscallInvocation) -> DispatchResult {
+    dispatch_with_frame(abi, invocation, None)
+}
+
+pub fn dispatch_with_frame(
+    abi: Abi,
+    invocation: &SyscallInvocation,
+    frame: Option<&mut crate::trap::CurrentTrapFrame>,
+) -> DispatchResult {
     match abi {
         Abi::Host => DispatchResult::Completed(host::dispatch(invocation)),
-        Abi::Linux => linux::dispatch(invocation),
+        Abi::Linux => linux::dispatch(invocation, frame),
     }
 }
 

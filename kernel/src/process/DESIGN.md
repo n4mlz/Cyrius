@@ -14,10 +14,12 @@
 
 ### Process
 - Stored as `Arc<Process>` so threads can hold a direct reference to their owning process without touching the global table.
-- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, and `abi`.
+- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, `parent`, `exit_code`, `reaped`, `brk`, and `abi`.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` now spans `Created`, `Ready`, `Running`, `Waiting`, `Terminated`; transitions are simple and primarily driven by thread attach/detach and scheduler ticks.
 - `abi` is fixed at process creation; callers choose host or Linux ABI up front (linux-box creates a Linux ABI process).
+- `brk` tracks the user-mode heap break (base/current), seeded by Linux ELF loading and advanced by the `brk` syscall.
+- `parent`/`exit_code`/`reaped` provide minimal wait4 support: fork assigns a parent, exit writes a code, and wait4 marks the child as reaped.
 
 ## Initialization and Invariants
 - During boot the scheduler init sequence calls `init_kernel`.
@@ -34,12 +36,12 @@
 - The scheduler reads the ABI directly from the thread's `Process` reference during context switches, avoiding global table locks in interrupt context.
 
 ## Address Space and ABI Considerations
-- For now every kernel process shares the same kernel address space.
+- Kernel processes share the same kernel address space.
 - `ArchThread::current_address_space()` seeds the stored address space. Future plans include:
   - cloning / isolating address spaces when we spawn userland processes;
   - letting the scheduler reactivate a process-specific address space on context switches.
-- User-process creation already allocates a distinct PID and thread list but continues to reference the shared kernel mappings until the paging layer exposes copy-on-write cloning.
-- When Linux compatibility arrives, each `Process` will also discriminate between host ABI and Linux ABI execution to drive syscall routing.
+- User processes allocate a dedicated address space seeded with the kernel mappings; fork clones the user portion by copying pages (no COW yet).
+- Each `Process` discriminates between host ABI and Linux ABI execution to drive syscall routing.
 - The linux-box launcher uses the per-process ABI to redirect traps from launched ELF binaries into the Linux syscall table.
 
 ## Error Model and Synchronization

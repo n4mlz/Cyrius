@@ -1,10 +1,12 @@
 use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
 use crate::mem::addr::{MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up};
+use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, PageTableOps};
+use crate::mem::paging::{MapError, PhysMapper, TranslationError};
 
 use super::LinuxLoadError;
 use super::elf::{ElfFile, ProgramSegment};
-use super::patch::rewrite_syscalls;
+use super::patch::rewrite_syscalls_in_table;
 
 pub fn map_segments<P: ArchLinuxElfPlatform>(
     space: &P::AddressSpace,
@@ -62,30 +64,21 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     let file_slice = image
         .get(seg.offset..file_range)
         .ok_or(LinuxLoadError::InvalidElf("segment out of file bounds"))?;
-    let dst = seg
-        .vaddr
-        .as_raw()
-        .checked_add(seg.file_size)
-        .ok_or(LinuxLoadError::SizeOverflow)?;
+    copy_into_mapped(table, seg.vaddr, file_slice)?;
 
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            file_slice.as_ptr(),
-            seg.vaddr.into_mut_ptr(),
-            seg.file_size,
-        );
-        // Zero BSS.
-        if seg.mem_size > seg.file_size {
-            core::ptr::write_bytes(
-                VirtAddr::new(dst).into_mut_ptr(),
-                0,
-                seg.mem_size - seg.file_size,
-            );
-        }
+    // Zero BSS.
+    if seg.mem_size > seg.file_size {
+        let bss_start = seg
+            .vaddr
+            .as_raw()
+            .checked_add(seg.file_size)
+            .ok_or(LinuxLoadError::SizeOverflow)?;
+        let bss_len = seg.mem_size - seg.file_size;
+        zero_mapped(table, VirtAddr::new(bss_start), bss_len)?;
     }
 
     if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
-        rewrite_syscalls(seg);
+        rewrite_syscalls_in_table(seg, table).map_err(LinuxLoadError::from)?;
     }
 
     if !target_perms.contains(MemPerm::WRITE) {
@@ -96,6 +89,66 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     }
 
     Ok(())
+}
+
+fn copy_into_mapped<T: PageTableOps>(
+    table: &T,
+    dst: VirtAddr,
+    src: &[u8],
+) -> Result<(), LinuxLoadError> {
+    let mapper = manager::phys_mapper();
+    let mut offset = 0usize;
+    while offset < src.len() {
+        let addr = dst
+            .as_raw()
+            .checked_add(offset)
+            .ok_or(LinuxLoadError::SizeOverflow)?;
+        let virt = VirtAddr::new(addr);
+        let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
+        let page_offset = addr % PageSize::SIZE_4K.bytes();
+        let len = (PageSize::SIZE_4K.bytes() - page_offset).min(src.len() - offset);
+        unsafe {
+            let ptr = mapper.phys_to_virt(phys);
+            core::ptr::copy_nonoverlapping(src[offset..].as_ptr(), ptr.into_mut_ptr(), len);
+        }
+        offset += len;
+    }
+    Ok(())
+}
+
+fn zero_mapped<T: PageTableOps>(
+    table: &T,
+    dst: VirtAddr,
+    len: usize,
+) -> Result<(), LinuxLoadError> {
+    let mapper = manager::phys_mapper();
+    let mut offset = 0usize;
+    while offset < len {
+        let addr = dst
+            .as_raw()
+            .checked_add(offset)
+            .ok_or(LinuxLoadError::SizeOverflow)?;
+        let virt = VirtAddr::new(addr);
+        let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
+        let page_offset = addr % PageSize::SIZE_4K.bytes();
+        let chunk = (PageSize::SIZE_4K.bytes() - page_offset).min(len - offset);
+        unsafe {
+            let ptr = mapper.phys_to_virt(phys);
+            core::ptr::write_bytes(ptr.into_mut_ptr(), 0, chunk);
+        }
+        offset += chunk;
+    }
+    Ok(())
+}
+
+impl From<TranslationError> for LinuxLoadError {
+    fn from(err: TranslationError) -> Self {
+        let map_err = match err {
+            TranslationError::NotMapped => MapError::NotMapped,
+            TranslationError::HugePage => MapError::UnsupportedPageSize(PageSize::SIZE_4K),
+        };
+        LinuxLoadError::Map(map_err)
+    }
 }
 
 fn perms_from_flags(flags: u32) -> MemPerm {

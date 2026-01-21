@@ -1,0 +1,94 @@
+#include "libsyscall.h"
+
+static const char stat_path[] = "stat.txt";
+static const char child_path[] = "/child";
+
+static usize str_len(const char *s) {
+    usize n = 0;
+    while (s[n]) {
+        n++;
+    }
+    return n;
+}
+
+static void write_str(const char *s) {
+    sys_write(1, s, str_len(s));
+}
+
+static void write_u32(u32 value) {
+    char buf[16];
+    int i = 0;
+    if (value == 0) {
+        char zero = '0';
+        sys_write(1, &zero, 1);
+        return;
+    }
+    while (value > 0) {
+        buf[i++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    while (i > 0) {
+        char ch = buf[--i];
+        sys_write(1, &ch, 1);
+    }
+}
+
+void _start(void) {
+    struct iovec iov[2];
+    iov[0].iov_base = (void *)"WRITE";
+    iov[0].iov_len = 5;
+    iov[1].iov_base = (void *)"V\n";
+    iov[1].iov_len = 2;
+    if (sys_writev(1, iov, 2) != 7) {
+        write_str("WRITEV:BAD\n");
+    }
+
+    struct linux_stat st;
+    if (sys_stat(stat_path, &st) == 0 && st.st_size == 8 && st.st_mode != 0) {
+        write_str("STAT:OK\n");
+    } else {
+        write_str("STAT:BAD\n");
+    }
+
+    void *cur = (void *)sys_brk(0);
+    void *target = (void *)((usize)cur + 0x2000);
+    void *res = (void *)sys_brk(target);
+    if (res == target) {
+        write_str("BRK:OK\n");
+    } else {
+        write_str("BRK:BAD\n");
+    }
+
+    if (sys_arch_prctl(ARCH_SET_FS, 0) == 0) {
+        write_str("ARCH:OK\n");
+    } else {
+        write_str("ARCH:BAD\n");
+    }
+
+    isize pid = sys_fork();
+    if (pid == 0) {
+        write_str("FORK:CHILD\n");
+        const char *argv[] = {"child", 0};
+        sys_execve(child_path, argv, 0);
+        write_str("EXEC:FAIL\n");
+        sys_exit(1);
+    }
+
+    if (pid < 0) {
+        write_str("FORK:FAIL\n");
+        sys_exit(1);
+    }
+
+    int status = 0;
+    for (;;) {
+        isize waited = sys_wait4(pid, &status, 1, 0);
+        if (waited == pid) {
+            break;
+        }
+    }
+    write_str("WAIT:");
+    write_u32((u32)((status >> 8) & 0xff));
+    write_str("\n");
+
+    sys_exit(0);
+}

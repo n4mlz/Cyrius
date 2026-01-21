@@ -12,6 +12,8 @@
   process-aware path handling stays in `process::fs`.
 - A global tty implements the `File` trait so processes can install stdin/stdout/stderr in their
   `FdTable` without exposing UART details.
+- TTY reads drain the buffered input first; only when no buffered bytes are available does the
+  implementation consult the hardware console to avoid blocking after partial reads.
 
 ## VFS Behaviour
 - `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths

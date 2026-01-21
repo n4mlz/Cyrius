@@ -108,8 +108,38 @@ pub trait ArchThread {
     /// Return the canonical top-of-stack for the provided user stack handle.
     fn user_stack_top(stack: &Self::UserStack) -> VirtAddr;
 
+    /// Return the base (lowest address) of the provided user stack handle.
+    fn user_stack_base(stack: &Self::UserStack) -> VirtAddr;
+
+    /// Return the size in bytes of the provided user stack handle.
+    fn user_stack_size(stack: &Self::UserStack) -> usize;
+
+    /// Construct a stack handle for an already-mapped user stack region.
+    fn user_stack_from_existing(
+        space: &Self::AddressSpace,
+        base: VirtAddr,
+        size: usize,
+    ) -> Result<Self::UserStack, UserStackError>;
+
+    /// Update the return value register for a syscall resumption.
+    fn set_syscall_return(ctx: &mut Self::Context, value: u64);
+
+    /// Update the user-mode stack pointer within the saved context.
+    fn set_stack_pointer(ctx: &mut Self::Context, stack_pointer: VirtAddr);
+
     /// Update the privilege-stack pointer used during user→kernel transitions.
     fn update_privilege_stack(stack_top: VirtAddr);
+
+    /// Create a fresh user address space with kernel mappings wired in.
+    fn create_user_address_space() -> Result<Self::AddressSpace, UserAddressSpaceError>;
+
+    /// Clone an existing user address space for fork-style semantics.
+    fn clone_user_address_space(
+        source: &Self::AddressSpace,
+    ) -> Result<Self::AddressSpace, UserAddressSpaceError>;
+
+    /// Clear user-space mappings from the provided address space.
+    fn clear_user_mappings(space: &Self::AddressSpace) -> Result<(), UserAddressSpaceError>;
 }
 
 /// Page table access helper used by architecture-agnostic loaders.
@@ -161,6 +191,13 @@ pub enum UserStackError {
     AddressSpaceExhausted,
     OutOfMemory,
     MapFailed(MapError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAddressSpaceError {
+    FrameAllocationFailed,
+    MapFailed(MapError),
+    UnsupportedMapping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

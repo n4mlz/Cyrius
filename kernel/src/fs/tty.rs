@@ -81,7 +81,7 @@ impl File for Tty {
 
     fn read_at(&self, _offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
         let mut total = self.read_from_input(buf);
-        if total < buf.len() {
+        if total == 0 {
             let console = Arch::console();
             let read = console
                 .read(&mut buf[total..])

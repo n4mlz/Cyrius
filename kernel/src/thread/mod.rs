@@ -7,7 +7,9 @@ use crate::arch::{
     Arch,
     api::{ArchInterrupt, ArchThread, UserStackError},
 };
-use crate::interrupt::{InterruptServiceRoutine, SYSTEM_TIMER, TimerError};
+use crate::interrupt::{
+    DEFAULT_SYSTEM_TIMER_TICKS, InterruptServiceRoutine, SYSTEM_TIMER, TimerError,
+};
 use crate::mem::addr::VirtAddr;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessHandle, ProcessId};
 use crate::syscall;
@@ -16,6 +18,12 @@ use crate::util::spinlock::SpinLock;
 
 pub type ThreadId = u64;
 pub type KernelThreadEntry = fn() -> !;
+
+#[derive(Clone, Copy)]
+pub struct UserStackInfo {
+    pub base: VirtAddr,
+    pub size: usize,
+}
 
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const KERNEL_STACK_ALIGN: usize = 16;
@@ -92,6 +100,14 @@ impl Scheduler {
         inner.thread(current).map(|thread| thread.process_id())
     }
 
+    pub fn current_user_stack_info(&self) -> Option<UserStackInfo> {
+        let inner = self.inner.lock();
+        let current = inner.current?;
+        inner
+            .thread(current)
+            .and_then(|thread| thread.user_stack_info())
+    }
+
     pub fn spawn_kernel_thread(
         &self,
         name: &'static str,
@@ -155,6 +171,59 @@ impl Scheduler {
         inner.spawn_user_thread_with_stack(process, name, entry, user_stack, stack_pointer)
     }
 
+    pub fn spawn_user_thread_with_context(
+        &self,
+        process: ProcessId,
+        name: &'static str,
+        context: <Arch as ArchThread>::Context,
+        user_stack: <Arch as ArchThread>::UserStack,
+    ) -> Result<ThreadId, SpawnError> {
+        let mut inner = self.inner.lock();
+        if !inner.initialised {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        inner.spawn_user_thread_with_context(process, name, context, user_stack)
+    }
+
+    pub fn replace_current_user_stack(
+        &self,
+        user_stack: <Arch as ArchThread>::UserStack,
+    ) -> Result<(), SpawnError> {
+        let mut inner = self.inner.lock();
+        if !inner.initialised {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
+        let thread = inner
+            .thread_mut(current)
+            .ok_or(SpawnError::SchedulerNotReady)?;
+        if !thread.is_user() {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+        thread.user_stack = Some(user_stack);
+        Ok(())
+    }
+
+    pub fn clear_current_user_stack(&self) -> Result<(), SpawnError> {
+        let mut inner = self.inner.lock();
+        if !inner.initialised {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
+        let thread = inner
+            .thread_mut(current)
+            .ok_or(SpawnError::SchedulerNotReady)?;
+        if !thread.is_user() {
+            return Err(SpawnError::SchedulerNotReady);
+        }
+
+        thread.user_stack = None;
+        Ok(())
+    }
+
     fn spawn_thread_locked(
         &self,
         inner: &mut SchedulerInner,
@@ -196,6 +265,10 @@ impl Scheduler {
         SYSTEM_TIMER
             .install_handler(&SCHEDULER_DISPATCH)
             .map_err(SchedulerError::Timer)?;
+        match SYSTEM_TIMER.start_periodic(DEFAULT_SYSTEM_TIMER_TICKS) {
+            Ok(()) | Err(TimerError::AlreadyRunning) => {}
+            Err(err) => return Err(SchedulerError::Timer(err)),
+        }
 
         <Arch as ArchInterrupt>::enable_interrupts();
 
@@ -230,7 +303,16 @@ impl Scheduler {
     }
 
     fn switch_current(&self, frame: &mut CurrentTrapFrame, mode: SwitchMode) {
-        let (next_ctx, next_space, next_stack, next_is_user, next_abi, next_process, detach_target) = {
+        let (
+            _next_id,
+            next_ctx,
+            next_space,
+            next_stack,
+            next_is_user,
+            next_abi,
+            next_process,
+            detach_target,
+        ) = {
             let mut inner = self.inner.lock();
             let current_id = match inner.current {
                 Some(id) => id,
@@ -283,7 +365,16 @@ impl Scheduler {
                 })
                 .expect("next thread must exist");
 
-            (ctx, space, stack_top, is_user, abi, process, detach_target)
+            (
+                next_id,
+                ctx,
+                space,
+                stack_top,
+                is_user,
+                abi,
+                process,
+                detach_target,
+            )
         };
 
         if let Some((process, tid)) = detach_target {
@@ -432,6 +523,35 @@ impl SchedulerInner {
         self.threads.push(thread);
         Ok(id)
     }
+
+    fn spawn_user_thread_with_context(
+        &mut self,
+        process: ProcessId,
+        name: &'static str,
+        context: <Arch as ArchThread>::Context,
+        user_stack: <Arch as ArchThread>::UserStack,
+    ) -> Result<ThreadId, SpawnError> {
+        let id = self.next_tid;
+        let process_handle = PROCESS_TABLE
+            .process_handle(process)
+            .map_err(SpawnError::Process)?;
+        let address_space = process_handle.address_space();
+        let thread = ThreadControl::user_from_context(
+            id,
+            process_handle,
+            name,
+            context,
+            address_space,
+            user_stack,
+        )?;
+        PROCESS_TABLE
+            .attach_thread(process, id)
+            .map_err(SpawnError::Process)?;
+        self.next_tid = id.checked_add(1).expect("thread id overflow");
+        self.ready.push_back(id);
+        self.threads.push(thread);
+        Ok(id)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -455,7 +575,6 @@ struct ThreadControl {
     context: <Arch as ArchThread>::Context,
     address_space: <Arch as ArchThread>::AddressSpace,
     kernel_stack: Option<KernelStack>,
-    #[allow(dead_code)]
     user_stack: Option<<Arch as ArchThread>::UserStack>,
     kind: ThreadKind,
     state: ThreadState,
@@ -547,12 +666,43 @@ impl ThreadControl {
         })
     }
 
+    fn user_from_context(
+        id: ThreadId,
+        process: ProcessHandle,
+        name: &'static str,
+        context: <Arch as ArchThread>::Context,
+        address_space: <Arch as ArchThread>::AddressSpace,
+        user_stack: <Arch as ArchThread>::UserStack,
+    ) -> Result<Self, SpawnError> {
+        let kernel_stack = KernelStack::allocate(KERNEL_STACK_SIZE)?;
+
+        Ok(Self {
+            id,
+            _name: name,
+            process,
+            context,
+            address_space,
+            kernel_stack: Some(kernel_stack),
+            user_stack: Some(user_stack),
+            kind: ThreadKind::User,
+            state: ThreadState::Ready,
+        })
+    }
+
     fn kernel_stack_top(&self) -> Option<VirtAddr> {
         self.kernel_stack.as_ref().map(|stack| stack.top())
     }
 
     fn is_user(&self) -> bool {
         matches!(self.kind, ThreadKind::User)
+    }
+
+    fn user_stack_info(&self) -> Option<UserStackInfo> {
+        let stack = self.user_stack.as_ref()?;
+        Some(UserStackInfo {
+            base: <Arch as ArchThread>::user_stack_base(stack),
+            size: <Arch as ArchThread>::user_stack_size(stack),
+        })
     }
 
     fn process_id(&self) -> ProcessId {

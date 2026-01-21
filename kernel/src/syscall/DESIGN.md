@@ -17,7 +17,9 @@
 - Host dispatch implements `container_create`, which reads bundle metadata from the global VFS and
   registers a new container entry. Host pointers are treated as kernel-mapped addresses until
   userland separation exists.
-- Linux dispatch implements `open`/`read`/`write`/`close` (wired to per-process `FdTable` and the global tty for standard fds), `getpid` (threads read the scheduler’s current process id), and `exit` (requests thread termination). All other numbers map to `ENOSYS`.
+- Linux dispatch implements a minimal set of process/syscall plumbing needed by static busybox:
+  `read`, `write`, `open`, `close`, `writev`, `stat`, `brk`, `fork`, `execve`, `wait4`, `arch_prctl`,
+  plus stubbed signal/ioctl calls. Unsupported numbers map to `ENOSYS`.
 
 ## Extension Points / TODO
 - Add architecture-specific fast paths (`syscall`/`sysret`) once MSR programming is available.

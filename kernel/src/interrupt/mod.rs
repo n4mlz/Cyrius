@@ -17,6 +17,8 @@ use logging::TrapLogger;
 pub use crate::arch::api::{TimerError, TimerMode, TimerTicks};
 pub use timer::{SYSTEM_TIMER, SystemTimer};
 
+pub const DEFAULT_SYSTEM_TIMER_TICKS: TimerTicks = TimerTicks::new(10_000_000);
+
 pub const DEVICE_VECTOR_BASE: u8 = 0x60;
 pub const DEVICE_VECTOR_COUNT: usize = 16;
 

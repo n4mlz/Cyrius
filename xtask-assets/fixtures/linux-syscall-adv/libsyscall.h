@@ -1,0 +1,71 @@
+#ifndef CYRIUS_LIBSYSCALL_ADV_H
+#define CYRIUS_LIBSYSCALL_ADV_H
+
+typedef unsigned long usize;
+typedef long isize;
+typedef unsigned int u32;
+typedef unsigned long long u64;
+typedef long long i64;
+
+enum {
+    SYS_read = 0,
+    SYS_write = 1,
+    SYS_open = 2,
+    SYS_close = 3,
+    SYS_stat = 4,
+    SYS_brk = 12,
+    SYS_writev = 20,
+    SYS_fork = 57,
+    SYS_execve = 59,
+    SYS_exit = 60,
+    SYS_wait4 = 61,
+    SYS_arch_prctl = 158,
+};
+
+enum {
+    ARCH_SET_FS = 0x1002,
+};
+
+struct iovec {
+    void *iov_base;
+    usize iov_len;
+};
+
+struct linux_stat {
+    u64 st_dev;
+    u64 st_ino;
+    u64 st_nlink;
+    u32 st_mode;
+    u32 st_uid;
+    u32 st_gid;
+    u32 __pad0;
+    u64 st_rdev;
+    i64 st_size;
+    i64 st_blksize;
+    i64 st_blocks;
+    i64 st_atime;
+    i64 st_atime_nsec;
+    i64 st_mtime;
+    i64 st_mtime_nsec;
+    i64 st_ctime;
+    i64 st_ctime_nsec;
+    i64 __reserved[3];
+};
+
+isize sys_call0(isize num);
+isize sys_call1(isize num, isize arg1);
+isize sys_call2(isize num, isize arg1, isize arg2);
+isize sys_call3(isize num, isize arg1, isize arg2, isize arg3);
+isize sys_call4(isize num, isize arg1, isize arg2, isize arg3, isize arg4);
+
+isize sys_write(int fd, const void *buf, usize len);
+isize sys_writev(int fd, const struct iovec *iov, int iovcnt);
+isize sys_stat(const char *path, struct linux_stat *statbuf);
+isize sys_brk(void *addr);
+isize sys_arch_prctl(isize code, isize addr);
+isize sys_fork(void);
+isize sys_execve(const char *path, const char *const *argv, const char *const *envp);
+isize sys_wait4(isize pid, int *status, int options, void *rusage);
+__attribute__((noreturn)) void sys_exit(int code);
+
+#endif

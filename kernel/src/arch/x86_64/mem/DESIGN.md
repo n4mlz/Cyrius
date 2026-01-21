@@ -19,6 +19,7 @@
 - `address_space.rs` wraps the active CR3 frame in an `Arc<AddressSpace>` so processes and threads share concrete address-space state instead of raw `PhysFrame` snapshots.
 - `kernel_address_space()` lazily snapshots the boot CR3 after `mem::manager::init` succeeds, guaranteeing the physical-mapper offset is available.
 - `AddressSpace::with_table` serialises page-table mutation behind a spin lock and grants temporary access to the global frame allocator; owned address spaces return their root frames on drop.
+- User address spaces are created with kernel PML4 entries copied in and user entries cloned by physically copying 4 KiB pages; huge pages are treated as unsupported for now.
 
 ## Safety Contracts
 - Constructors are `unsafe`: callers must ensure exclusive ownership of the root frame and provide a mapper that yields non-aliased access to page tables.
