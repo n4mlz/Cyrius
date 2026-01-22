@@ -12,10 +12,10 @@
 - `PageSize`, `Page`, and `MemPerm` model common paging concepts; size constants cover 4K/2M/1G pages, and permissions reflect kernel/user read/write/execute flags.
 
 ## Kernel Heap (`allocator.rs`)
-- Wraps `linked_list_allocator::Heap` inside a `SpinLock`, exposed through the `LockedHeap` type.
+- Wraps `buddy_system_allocator::LockedHeap<32>` to provide a buddy-system heap behind the `LockedHeap` façade.
 - Initialised exactly once via `init_heap`, which requires a pre-mapped, exclusive virtual address range; attempts to reinitialise return `HeapInitError::AlreadyInitialized`.
 - Registered as the global allocator (`#[global_allocator]`) so all `alloc` crate usage routes through it.
-- Allocation uses first-fit strategy; failures return null pointers, which upstream callers must handle (currently panics via the global alloc error handler).
+- Allocation is handled by the buddy allocator; failures surface as null pointers and trigger the global alloc error handler.
 - Includes kernel tests that fake an aligned heap region to validate initialisation and the double-initialisation guard.
 
 ## Paging Interfaces (`paging.rs`)

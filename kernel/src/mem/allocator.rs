@@ -1,11 +1,9 @@
 use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use linked_list_allocator::Heap;
+use buddy_system_allocator::LockedHeap as BuddyLockedHeap;
 
-use crate::mem::addr::{AddrRange, VirtAddr, VirtIntoPtr};
-use crate::util::spinlock::SpinLock;
+use crate::mem::addr::{AddrRange, VirtAddr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeapInitError {
@@ -15,14 +13,14 @@ pub enum HeapInitError {
 }
 
 pub struct LockedHeap {
-    heap: SpinLock<Heap>,
+    heap: BuddyLockedHeap<32>,
     initialised: AtomicBool,
 }
 
 impl LockedHeap {
     pub const fn new() -> Self {
         Self {
-            heap: SpinLock::new(Heap::empty()),
+            heap: BuddyLockedHeap::empty(),
             initialised: AtomicBool::new(false),
         }
     }
@@ -42,10 +40,7 @@ impl LockedHeap {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| HeapInitError::AlreadyInitialized)?;
 
-        unsafe {
-            let mut heap = self.heap.lock();
-            heap.init(start.into_mut_ptr(), len);
-        }
+        unsafe { self.heap.lock().init(start.as_raw(), len) };
 
         Ok(())
     }
@@ -63,22 +58,11 @@ impl Default for LockedHeap {
 
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let mut heap = self.heap.lock();
-        match heap.allocate_first_fit(layout) {
-            Ok(ptr) => ptr.as_ptr(),
-            Err(_) => ptr::null_mut(),
-        }
+        GlobalAlloc::alloc(&self.heap, layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ptr.is_null() {
-            return;
-        }
-
-        let mut heap = self.heap.lock();
-        unsafe {
-            heap.deallocate(NonNull::new_unchecked(ptr), layout);
-        }
+        GlobalAlloc::dealloc(&self.heap, ptr, layout);
     }
 }
 
