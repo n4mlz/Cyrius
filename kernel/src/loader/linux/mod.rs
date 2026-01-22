@@ -1,4 +1,4 @@
-use crate::arch::api::ArchLinuxElfPlatform;
+use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
 use crate::fs::{VfsError, VfsPath};
 use crate::loader::DefaultLinuxElfPlatform;
 use crate::mem::addr::{VirtAddr, align_up};

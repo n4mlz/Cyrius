@@ -1,4 +1,4 @@
-use super::{Abi, DispatchResult, SysError, SysResult, SyscallInvocation};
+use super::{DispatchResult, SysError, SysResult, SyscallInvocation};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -7,7 +7,7 @@ use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
 use crate::fs::{FileType, VfsPath, with_vfs};
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
-use crate::mem::paging::{FrameAllocator, PageTableOps};
+use crate::mem::paging::{FrameAllocator, MapError, PageTableOps};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessDomain, ProcessId};
@@ -300,9 +300,21 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                 let frame = allocator
                     .allocate(PageSize::SIZE_4K)
                     .ok_or(SysError::InvalidArgument)?;
-                if table.map(page, frame, MemPerm::USER_RW, allocator).is_err() {
-                    allocator.deallocate(frame);
-                    return Err(SysError::InvalidArgument);
+                // Allow already-mapped pages when the brk range overlaps a page that
+                // was mapped earlier (e.g. previous brk growth or non-page-aligned
+                // segment tail). This assumes brk_base is placed after loadable
+                // segments; if that invariant is broken, overlaps with non-heap
+                // mappings could be masked.
+                match table.map(page, frame, MemPerm::USER_RW, allocator) {
+                    Ok(()) => {}
+                    Err(MapError::AlreadyMapped) => {
+                        allocator.deallocate(frame);
+                        continue;
+                    }
+                    Err(_) => {
+                        allocator.deallocate(frame);
+                        return Err(SysError::InvalidArgument);
+                    }
                 }
                 unsafe {
                     core::ptr::write_bytes(
