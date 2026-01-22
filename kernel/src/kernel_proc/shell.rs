@@ -83,7 +83,7 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "oci-runtime",
-        usage: "oci-runtime create <id> <bundle>",
+        usage: "oci-runtime create <id> <bundle> | start <id> | state <id>",
         handler: cmd_oci_runtime,
     },
     CommandSpec {
@@ -297,6 +297,14 @@ fn cmd_oci_runtime(pid: ProcessId, args: &str) -> Result<Option<String>, ShellEr
         (Some("create"), Some(id), Some(bundle), None) => {
             let output =
                 oci_runtime::create_container(pid, id, bundle).map_err(ShellError::OciRuntime)?;
+            Ok(Some(output))
+        }
+        (Some("start"), Some(id), None, None) => {
+            let output = oci_runtime::start_container(id).map_err(ShellError::OciRuntime)?;
+            Ok(Some(output))
+        }
+        (Some("state"), Some(id), None, None) => {
+            let output = oci_runtime::state_container(id).map_err(ShellError::OciRuntime)?;
             Ok(Some(output))
         }
         _ => Err(ShellError::UnknownCommand),

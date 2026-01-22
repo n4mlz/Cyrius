@@ -1,12 +1,15 @@
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
+use crate::process::ProcessId;
 use crate::util::spinlock::SpinLock;
 use oci_spec::runtime::Spec;
 
 pub mod context;
 mod error;
 mod repository;
+pub mod runtime;
 mod spec;
 pub mod state;
 mod table;
@@ -28,6 +31,7 @@ pub const CONTAINER_VFS_BACKING: ContainerVfsBacking = ContainerVfsBacking::Ramf
 struct ContainerMutable {
     state: ContainerState,
     context: ContainerContext,
+    processes: Vec<ProcessId>,
 }
 
 pub struct Container {
@@ -38,7 +42,11 @@ pub struct Container {
 impl Container {
     pub fn new(state: ContainerState, spec: Spec, context: ContainerContext) -> Self {
         Self {
-            mutable: SpinLock::new(ContainerMutable { state, context }),
+            mutable: SpinLock::new(ContainerMutable {
+                state,
+                context,
+                processes: Vec::new(),
+            }),
             spec: Arc::new(spec),
         }
     }
@@ -65,5 +73,25 @@ impl Container {
 
     pub fn rootfs(&self) -> Arc<dyn crate::fs::Directory> {
         self.mutable.lock().context.rootfs()
+    }
+
+    pub fn mark_running(&self, pid: ProcessId) -> Result<(), ContainerError> {
+        let mut guard = self.mutable.lock();
+        if guard.state.status != ContainerStatus::Created {
+            return Err(ContainerError::InvalidState);
+        }
+        guard.state.status = ContainerStatus::Running;
+        guard.state.pid = Some(pid);
+        if !guard.processes.contains(&pid) {
+            guard.processes.push(pid);
+        }
+        Ok(())
+    }
+
+    pub fn record_process(&self, pid: ProcessId) {
+        let mut guard = self.mutable.lock();
+        if !guard.processes.contains(&pid) {
+            guard.processes.push(pid);
+        }
     }
 }

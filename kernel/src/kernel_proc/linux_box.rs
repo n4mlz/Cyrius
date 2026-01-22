@@ -6,7 +6,6 @@ use crate::fs::{VfsError, VfsPath};
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
-use crate::syscall::Abi;
 use crate::thread::{SCHEDULER, SpawnError};
 
 /// Errors surfaced while launching or supervising a Linux guest process.
@@ -58,7 +57,8 @@ pub fn run_and_wait(origin_pid: ProcessId, raw_path: &str) -> Result<(), RunErro
 }
 
 fn launch_process(path: &str) -> Result<ProcessId, RunError> {
-    let pid = PROCESS_TABLE.create_user_process_with_abi("linux-proc", Abi::Linux)?;
+    let pid = PROCESS_TABLE
+        .create_user_process("linux-proc", crate::process::ProcessDomain::HostLinux)?;
 
     let program = linux::load_elf(pid, path)?;
     if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
@@ -101,6 +101,7 @@ mod tests {
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::fs::tty::global_tty;
+    use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
     use crate::println;
     use crate::process::PROCESS_TABLE;
     use crate::test::kernel_test_case;
@@ -152,6 +153,10 @@ mod tests {
 
         if started {
             SCHEDULER.shutdown();
+            SYSTEM_TIMER
+                .start_periodic(TimerTicks::new(10_000_000))
+                .expect("failed to restart system timer after linux-box test");
+            INTERRUPTS.enable();
         }
     }
 

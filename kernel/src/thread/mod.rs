@@ -805,7 +805,7 @@ mod tests {
 
         let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
-            .create_user_process("user-test")
+            .create_user_process("user-test", crate::process::ProcessDomain::Host)
             .expect("create user process");
         let space = PROCESS_TABLE
             .address_space(pid)

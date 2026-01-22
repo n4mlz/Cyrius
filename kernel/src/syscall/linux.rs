@@ -1,4 +1,4 @@
-use super::{Abi, DispatchResult, SysError, SysResult, SyscallInvocation};
+use super::{DispatchResult, SysError, SysResult, SyscallInvocation};
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -7,7 +7,7 @@ use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
 use crate::fs::{FileType, VfsPath, with_vfs};
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
-use crate::mem::paging::{FrameAllocator, PageTableOps};
+use crate::mem::paging::{FrameAllocator, MapError, PageTableOps};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessId};
@@ -300,9 +300,21 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                 let frame = allocator
                     .allocate(PageSize::SIZE_4K)
                     .ok_or(SysError::InvalidArgument)?;
-                if table.map(page, frame, MemPerm::USER_RW, allocator).is_err() {
-                    allocator.deallocate(frame);
-                    return Err(SysError::InvalidArgument);
+                // Allow already-mapped pages when the brk range overlaps a page that
+                // was mapped earlier (e.g. previous brk growth or non-page-aligned
+                // segment tail). This assumes brk_base is placed after loadable
+                // segments; if that invariant is broken, overlaps with non-heap
+                // mappings could be masked.
+                match table.map(page, frame, MemPerm::USER_RW, allocator) {
+                    Ok(()) => {}
+                    Err(MapError::AlreadyMapped) => {
+                        allocator.deallocate(frame);
+                        continue;
+                    }
+                    Err(_) => {
+                        allocator.deallocate(frame);
+                        return Err(SysError::InvalidArgument);
+                    }
                 }
                 unsafe {
                     core::ptr::write_bytes(
@@ -367,18 +379,20 @@ fn handle_fork(
         Ok(space) => space,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    let child_pid = match PROCESS_TABLE.create_user_process_with_abi_and_space(
+    let parent_proc = match PROCESS_TABLE.process_handle(pid) {
+        Ok(proc) => proc,
+        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+    };
+    let child_pid = match PROCESS_TABLE.create_user_process_with_domain_and_space(
         "linux-child",
-        Abi::Linux,
+        parent_proc.domain().clone(),
         child_space.clone(),
     ) {
         Ok(pid) => pid,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
-    if let Ok(parent_proc) = PROCESS_TABLE.process_handle(pid)
-        && let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid)
-    {
+    if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
         child_proc.set_brk_state(parent_proc.brk_state());
         child_proc.set_parent(pid);
     }
@@ -815,6 +829,7 @@ mod tests {
     use crate::mem::addr::VirtAddr;
     use crate::println;
     use crate::process::PROCESS_TABLE;
+    use crate::process::ProcessDomain;
     use crate::test::kernel_test_case;
     use crate::thread::SCHEDULER;
 
@@ -975,7 +990,7 @@ mod tests {
         SCHEDULER.init().expect("scheduler init");
         let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let pid = PROCESS_TABLE
-            .create_user_process_with_abi("wait4-test", Abi::Linux)
+            .create_user_process("wait4-test", ProcessDomain::HostLinux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
         proc.set_parent(parent);
@@ -1002,7 +1017,7 @@ mod tests {
         SCHEDULER.init().expect("scheduler init");
         let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let child = PROCESS_TABLE
-            .create_user_process_with_abi("wait4-any", Abi::Linux)
+            .create_user_process("wait4-any", ProcessDomain::HostLinux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
         proc.set_parent(parent);
@@ -1029,7 +1044,7 @@ mod tests {
         SCHEDULER.init().expect("scheduler init");
         let parent = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
         let child = PROCESS_TABLE
-            .create_user_process_with_abi("wait4-running", Abi::Linux)
+            .create_user_process("wait4-running", ProcessDomain::HostLinux)
             .expect("create process");
         let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
         proc.set_parent(parent);

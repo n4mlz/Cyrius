@@ -108,7 +108,12 @@ pub fn build_kernel_tests(opts: &TestBuildOptions) -> Result<PathBuf> {
 
     if !output.status.success() {
         let stderr = str::from_utf8(&output.stderr).unwrap_or("<invalid utf-8>");
-        bail!("cargo test --no-run failed: {stderr}");
+        let stdout = str::from_utf8(&output.stdout).unwrap_or("");
+        let rendered = extract_cargo_rendered_messages(stdout);
+        if rendered.is_empty() {
+            bail!("cargo test --no-run failed: {stderr}");
+        }
+        bail!("cargo test --no-run failed:\n{rendered}\n{stderr}");
     }
 
     let stdout = str::from_utf8(&output.stdout).unwrap_or("");
@@ -177,6 +182,27 @@ fn kill_existing_qemu_processes(image: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn extract_cargo_rendered_messages(stdout: &str) -> String {
+    let mut rendered = String::new();
+
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if let Some(text) = message.get("rendered").and_then(|value| value.as_str()) {
+            rendered.push_str(text);
+            if !text.ends_with('\n') {
+                rendered.push('\n');
+            }
+        }
+    }
+
+    rendered.trim().to_string()
 }
 
 pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<ExitStatus> {

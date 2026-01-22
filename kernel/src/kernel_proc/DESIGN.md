@@ -6,7 +6,7 @@
 
 ## Shell
 - Provides a minimal REPL for filesystem operations, a front-end to launch Linux ELF binaries via
-  `linux-box run <path>`, and host container management via `oci-runtime create <id> <bundle>`.
+  `linux-box run <path>`, and host container management via `oci-runtime create/start/state`.
 - `oci_runtime` houses the host ABI bridge for OCI-style commands to keep shell parsing focused on
   REPL concerns.
 - Tokenisation is whitespace-based; quoted strings are not supported.

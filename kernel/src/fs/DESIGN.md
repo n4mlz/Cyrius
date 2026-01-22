@@ -7,7 +7,8 @@
   offset-based), wrapped in `NodeRef` so callers can resolve paths without leaking concrete
   filesystem types.
 - Each process owns its own `FdTable` and current working directory; `open` binds a file descriptor
-  to that process at allocation time.
+  to that process at allocation time. Container-backed processes route path resolution through the
+  container VFS instead of the global VFS.
 - Common filesystem helpers that operate directly on `Directory`/`File` live in `fs::ops`; any
   process-aware path handling stays in `process::fs`.
 - A global tty implements the `File` trait so processes can install stdin/stdout/stderr in their
