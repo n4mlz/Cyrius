@@ -829,6 +829,7 @@ mod tests {
     use crate::mem::addr::VirtAddr;
     use crate::println;
     use crate::process::PROCESS_TABLE;
+    use crate::process::ProcessDomain;
     use crate::test::kernel_test_case;
     use crate::thread::SCHEDULER;
 
