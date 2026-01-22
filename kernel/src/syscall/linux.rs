@@ -10,7 +10,7 @@ use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, ali
 use crate::mem::paging::{FrameAllocator, MapError, PageTableOps};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
 use crate::process::fs as proc_fs;
-use crate::process::{PROCESS_TABLE, ProcessDomain, ProcessId};
+use crate::process::{PROCESS_TABLE, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 
