@@ -80,9 +80,7 @@ fn handle_container_start(invocation: &SyscallInvocation) -> SysResult {
     let id_len = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let id = read_str(id_ptr, id_len)?;
 
-    start_container_by_id(id.as_str())
-        .map(|pid| pid as u64)
-        .map_err(|_| SysError::InvalidArgument)
+    start_container_by_id(id.as_str()).map_err(|_| SysError::InvalidArgument)
 }
 
 fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {

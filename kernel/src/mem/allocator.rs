@@ -58,11 +58,11 @@ impl Default for LockedHeap {
 
 unsafe impl GlobalAlloc for LockedHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        GlobalAlloc::alloc(&self.heap, layout)
+        unsafe { GlobalAlloc::alloc(&self.heap, layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        GlobalAlloc::dealloc(&self.heap, ptr, layout);
+        unsafe { GlobalAlloc::dealloc(&self.heap, ptr, layout) };
     }
 }
 
