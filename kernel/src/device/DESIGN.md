@@ -3,7 +3,7 @@
 ## Role and Scope
 - Provide lightweight abstractions around hardware devices so higher layers can operate on capability traits rather than concrete drivers.
 - Categorise devices via `DeviceType` and a common `Device` trait (`name`, `device_type`).
-- Houses submodules for register buses and character devices; block/network placeholders highlight expected future expansion.
+- Houses submodules for register buses, block devices, and network devices so higher layers can bind to capability traits.
 
 ## Design Principles
 - Keep traits minimal and composable so drivers can be reused across architectures (e.g. UARTs over either port I/O or MMIO register buses).
@@ -18,9 +18,13 @@
 - The driver keeps virtqueue plumbing and DMA buffer management self-contained, reusing the generic `QueueMemory` + `DmaRegionProvider` so other transports can follow the same pattern.
 - Modern VirtIO devices expose MSI-X vectors; the driver now programs a per-queue vector via the shared interrupt allocator so completions arrive asynchronously instead of pure polling.
 
+## Network Devices (`device::net`)
+- Defines the `NetworkDevice` trait for raw Ethernet frame I/O (MAC/MTU/link state + transmit/receive).
+- Mirrors the block provider pattern so network devices can be discovered during boot without binding to a transport.
+- The trait remains synchronous for deterministic bring-up; async adapters will be layered later with the TCP/IP stack.
+
 ## Future Work
 - Introduce registry infrastructure to enumerate devices discovered during boot.
-- Extend to block devices (storage) and network adapters, aligning with the project goal of container-native workloads.
 - Provide mock implementations for unit tests and simulation environments.
 
 ## VirtIO Block Baseline
@@ -38,3 +42,7 @@
 - `device::block` module hosts the upcoming `BlockDevice` trait with read/write/flush primitives that are synchronous-by-default for ease of bring-up.
 - VirtIO-blk will be the initial concrete driver; the trait is intentionally transport-agnostic so SCSI/NVMe shims can coexist later.
 - Capability discovery results will later be registered in a lightweight global table so subsystems (VFS, swap) can request handles without scanning PCI each time.
+
+## Network Device Baseline
+- VirtIO-net is the first concrete network driver; it exposes raw Ethernet frames and relies on virtqueue-backed DMA buffers for RX/TX paths.
+- Discovery is wired through `device::probe::probe_network_devices`, mirroring the block-device probe flow.

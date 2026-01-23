@@ -81,6 +81,11 @@ pub fn init_runtime(boot_info: &'static mut BootInfo) {
         crate::println!("[blk] discovered {discovered_blocks} virtio block device(s)",);
     }
 
+    let discovered_nets = probe::probe_network_devices();
+    if discovered_nets > 0 {
+        crate::println!("[net] discovered {discovered_nets} virtio network device(s)");
+    }
+
     init_filesystems();
 }
 

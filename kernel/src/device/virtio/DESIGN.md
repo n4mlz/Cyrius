@@ -26,8 +26,17 @@
 - Discovery (`probe_pci_devices`) scans the PCI transport helper, instantiates `VirtioBlkDevice` objects with human-readable names, and logs failures without panicking so other devices can continue initialising.
 - Unit tests rely on a mock transport plus a test-only completion hook that simulates device acknowledgements by directly mutating the used ring, enabling deterministic verification of descriptor layout and data copying without QEMU.
 
+## VirtIO Network Driver (`net.rs`)
+- Implements a minimal virtio-net data path (one RX queue + one TX queue) with a single-descriptor buffer layout to keep early bring-up simple.
+- Negotiates only MAC address and link-status features, leaving offloads disabled until the TCP/IP stack is integrated.
+- RX buffers are pre-posted during initialisation; completed descriptors are recycled immediately after copying the payload.
+- TX submits a single in-flight frame and waits for completion, matching the synchronous `NetworkDevice` contract.
+- Integration tests rely on QEMU attaching a `virtio-net-pci` device during `cargo xtask test`, while unit tests use a mock transport and manual used-ring updates.
+
 ## Testing Strategy
 - Unit tests cover descriptor layout calculations and DMA region accounting.
 - Integration tests (driven via `cargo xtask test`) attach `target/virtio-blk-test.img` as a
   VirtIO block device and assert that the driver can read the seeded pattern and persist writes,
   exercising the full DMA + queue path under QEMU.
+ - VirtIO-net tests verify queue submission with a mock transport and assert that a QEMU-provided
+   virtio-net device is present during integration runs.

@@ -232,6 +232,12 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
         "-drive",
         &format!("format=raw,file={}", image.display()),
     ]);
+    qemu.args([
+        "-netdev",
+        "user,id=net0",
+        "-device",
+        "virtio-net-pci,netdev=net0,disable-legacy=on",
+    ]);
 
     for (index, extra) in block_images.iter().enumerate() {
         let id = format!("virtio_blk_test{index}");
