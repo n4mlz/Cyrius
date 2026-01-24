@@ -88,14 +88,19 @@ pub fn start_container(container: Arc<Container>) -> Result<ProcessId, Container
 
     let program = linux::load_elf(pid, entry)?;
     let auxv = linux::build_auxv(&program, crate::mem::addr::PageSize::SIZE_4K.bytes());
-    let stack_top =
-        <crate::arch::Arch as crate::arch::api::ArchThread>::user_stack_top(&program.user_stack);
+    let stack_top = <crate::arch::Arch as crate::arch::api::ArchThread>::user_stack_top(
+        &program.user_stack,
+    );
     let stack_pointer = PROCESS_TABLE
         .address_space(pid)
         .ok_or(ContainerStartError::Process(ProcessError::NotFound))?
         .with_page_table(|table, _| {
             linux::initialise_stack_with_args_in_table(
-                table, stack_top, &argv_refs, &envp_refs, &auxv,
+                table,
+                stack_top,
+                &argv_refs,
+                &envp_refs,
+                &auxv,
             )
         })
         .map_err(|err| ContainerStartError::Loader(LinuxLoadError::from(err)))?;

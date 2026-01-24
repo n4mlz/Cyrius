@@ -32,7 +32,7 @@ pub fn read_dynamic_info<T: PageTableOps>(
     let mut info = DynamicInfo::default();
     let mut offset = 0usize;
     let entry_size = core::mem::size_of::<Elf64Dyn>();
-    if segment.mem_size % entry_size != 0 {
+    if !segment.mem_size.is_multiple_of(entry_size) {
         return Err(LinuxLoadError::InvalidElf(
             "dynamic section size misaligned",
         ));
@@ -96,7 +96,7 @@ pub fn apply_relocations<T: PageTableOps>(
     if info.rela_ent != entry_size {
         return Err(LinuxLoadError::InvalidElf("unexpected Rela entry size"));
     }
-    if info.rela_size % entry_size != 0 {
+    if !info.rela_size.is_multiple_of(entry_size) {
         return Err(LinuxLoadError::InvalidElf("Rela size not aligned"));
     }
 

@@ -26,8 +26,7 @@ pub fn map_segments<P: ArchLinuxElfPlatform>(
     space.with_page_table(|table, allocator| {
         let mut mapped = alloc::vec::Vec::new();
         for seg in &elf.segments {
-            if let Some(segment) =
-                map_single_segment::<_, _, P>(table, allocator, seg, image, base)?
+            if let Some(segment) = map_single_segment::<_, _, P>(table, allocator, seg, image, base)?
             {
                 mapped.push(segment);
             }

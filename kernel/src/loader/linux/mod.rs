@@ -121,12 +121,8 @@ where
     }
     space.with_page_table(|table, _| {
         map::apply_segment_permissions(table, &mapped)?;
-        if elf.interp.is_some() {
-            if let Some(relro) = elf.relro.as_ref() {
-                reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
-            }
-        } else if elf.relro.is_some() {
-            crate::println!("[loader] GNU_RELRO skipped (no PT_INTERP)");
+        if let Some(relro) = elf.relro.as_ref() {
+            reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
         }
         Ok::<(), LinuxLoadError>(())
     })?;
@@ -223,28 +219,28 @@ fn compute_phdr_address(
 }
 
 pub fn build_auxv<S>(program: &LinuxProgram<S>, page_size: usize) -> Vec<AuxvEntry> {
-    let mut auxv = Vec::with_capacity(5);
-    auxv.push(AuxvEntry {
-        key: AT_PAGESZ,
-        value: page_size as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_PHDR,
-        value: program.phdr.as_raw() as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_PHENT,
-        value: program.phent as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_PHNUM,
-        value: program.phnum as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_ENTRY,
-        value: program.entry.as_raw() as u64,
-    });
-    auxv
+    alloc::vec![
+        AuxvEntry {
+            key: AT_PAGESZ,
+            value: page_size as u64,
+        },
+        AuxvEntry {
+            key: AT_PHDR,
+            value: program.phdr.as_raw() as u64,
+        },
+        AuxvEntry {
+            key: AT_PHENT,
+            value: program.phent as u64,
+        },
+        AuxvEntry {
+            key: AT_PHNUM,
+            value: program.phnum as u64,
+        },
+        AuxvEntry {
+            key: AT_ENTRY,
+            value: program.entry.as_raw() as u64,
+        },
+    ]
 }
 
 pub(crate) fn add_base(base: VirtAddr, addr: VirtAddr) -> Result<VirtAddr, LinuxLoadError> {
@@ -383,7 +379,8 @@ mod tests {
         let space = PROCESS_TABLE
             .address_space(pid)
             .expect("user address space");
-        let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400)).expect("read reloc");
+        let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400))
+            .expect("read reloc");
         assert_eq!(relocated, 0x400000 + 0x1234);
     }
 
