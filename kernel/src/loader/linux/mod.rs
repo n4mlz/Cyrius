@@ -121,8 +121,12 @@ where
     }
     space.with_page_table(|table, _| {
         map::apply_segment_permissions(table, &mapped)?;
-        if let Some(relro) = elf.relro.as_ref() {
-            reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
+        if elf.interp.is_some() {
+            if let Some(relro) = elf.relro.as_ref() {
+                reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
+            }
+        } else if elf.relro.is_some() {
+            crate::println!("[loader] GNU_RELRO skipped (no PT_INTERP)");
         }
         Ok::<(), LinuxLoadError>(())
     })?;
@@ -171,7 +175,9 @@ fn compute_heap_base<P: ArchLinuxElfPlatform>(
     add_base(base, VirtAddr::new(aligned))
 }
 
-fn choose_load_bias<P: ArchLinuxElfPlatform>(elf: &elf::ElfFile) -> Result<VirtAddr, LinuxLoadError> {
+fn choose_load_bias<P: ArchLinuxElfPlatform>(
+    elf: &elf::ElfFile,
+) -> Result<VirtAddr, LinuxLoadError> {
     match elf.elf_type {
         elf::ElfType::Exec => Ok(VirtAddr::new(0)),
         elf::ElfType::Dyn => Ok(VirtAddr::new(default_pie_base::<P>())),
@@ -377,8 +383,7 @@ mod tests {
         let space = PROCESS_TABLE
             .address_space(pid)
             .expect("user address space");
-        let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400))
-            .expect("read reloc");
+        let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400)).expect("read reloc");
         assert_eq!(relocated, 0x400000 + 0x1234);
     }
 

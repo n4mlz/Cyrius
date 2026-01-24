@@ -5,9 +5,9 @@ use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::paging::{MapError, PhysMapper, TranslationError};
 
 use super::LinuxLoadError;
+use super::add_base;
 use super::elf::{ElfFile, ProgramSegment};
 use super::patch::rewrite_syscalls_in_table;
-use super::add_base;
 use alloc::vec::Vec;
 
 pub struct MappedSegment {
@@ -26,7 +26,8 @@ pub fn map_segments<P: ArchLinuxElfPlatform>(
     space.with_page_table(|table, allocator| {
         let mut mapped = alloc::vec::Vec::new();
         for seg in &elf.segments {
-            if let Some(segment) = map_single_segment::<_, _, P>(table, allocator, seg, image, base)?
+            if let Some(segment) =
+                map_single_segment::<_, _, P>(table, allocator, seg, image, base)?
             {
                 mapped.push(segment);
             }
@@ -106,8 +107,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     }
 
     if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
-        rewrite_syscalls_in_table(seg_vaddr, seg.file_size, table)
-            .map_err(LinuxLoadError::from)?;
+        rewrite_syscalls_in_table(seg_vaddr, seg.file_size, table).map_err(LinuxLoadError::from)?;
     }
 
     Ok(Some(MappedSegment {

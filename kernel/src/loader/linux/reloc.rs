@@ -1,11 +1,12 @@
 use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, align_down, align_up};
 use crate::mem::paging::PageTableOps;
 use crate::mem::user::{UserAccessError, UserMemoryAccess};
+use crate::println;
 
 use super::LinuxLoadError;
+use super::add_base;
 use super::elf::{DynamicSegment, RelroSegment};
 use super::map::MappedSegment;
-use super::add_base;
 
 const DT_NULL: i64 = 0;
 const DT_RELA: i64 = 7;
@@ -32,7 +33,9 @@ pub fn read_dynamic_info<T: PageTableOps>(
     let mut offset = 0usize;
     let entry_size = core::mem::size_of::<Elf64Dyn>();
     if segment.mem_size % entry_size != 0 {
-        return Err(LinuxLoadError::InvalidElf("dynamic section size misaligned"));
+        return Err(LinuxLoadError::InvalidElf(
+            "dynamic section size misaligned",
+        ));
     }
 
     while offset < segment.mem_size {
@@ -40,8 +43,11 @@ pub fn read_dynamic_info<T: PageTableOps>(
             .checked_add(offset)
             .ok_or(LinuxLoadError::SizeOverflow)?;
         let tag = user.read_u64(entry_addr)? as i64;
-        let val = user
-            .read_u64(entry_addr.checked_add(8).ok_or(LinuxLoadError::SizeOverflow)?)?;
+        let val = user.read_u64(
+            entry_addr
+                .checked_add(8)
+                .ok_or(LinuxLoadError::SizeOverflow)?,
+        )?;
         if tag == DT_NULL {
             break;
         }
@@ -52,16 +58,16 @@ pub fn read_dynamic_info<T: PageTableOps>(
                 ));
             }
             DT_RELASZ => {
-                info.rela_size =
-                    usize::try_from(val).map_err(|_| LinuxLoadError::SizeOverflow)?;
+                info.rela_size = usize::try_from(val).map_err(|_| LinuxLoadError::SizeOverflow)?;
             }
             DT_RELAENT => {
-                info.rela_ent =
-                    usize::try_from(val).map_err(|_| LinuxLoadError::SizeOverflow)?;
+                info.rela_ent = usize::try_from(val).map_err(|_| LinuxLoadError::SizeOverflow)?;
             }
             _ => {}
         }
-        offset = offset.checked_add(entry_size).ok_or(LinuxLoadError::SizeOverflow)?;
+        offset = offset
+            .checked_add(entry_size)
+            .ok_or(LinuxLoadError::SizeOverflow)?;
     }
 
     if info.rela_size > 0 && info.rela_ent == 0 {
@@ -101,11 +107,16 @@ pub fn apply_relocations<T: PageTableOps>(
             .checked_add(idx * entry_size)
             .ok_or(LinuxLoadError::SizeOverflow)?;
         let r_offset = user.read_u64(entry_addr)?;
-        let r_info = user
-            .read_u64(entry_addr.checked_add(8).ok_or(LinuxLoadError::SizeOverflow)?)?;
-        let r_addend = user
-            .read_u64(entry_addr.checked_add(16).ok_or(LinuxLoadError::SizeOverflow)?)?
-            as i64;
+        let r_info = user.read_u64(
+            entry_addr
+                .checked_add(8)
+                .ok_or(LinuxLoadError::SizeOverflow)?,
+        )?;
+        let r_addend = user.read_u64(
+            entry_addr
+                .checked_add(16)
+                .ok_or(LinuxLoadError::SizeOverflow)?,
+        )? as i64;
 
         let reloc_type = (r_info & 0xffff_ffff) as u32;
         if reloc_type != R_X86_64_RELATIVE {
@@ -143,17 +154,31 @@ pub fn apply_gnu_relro<T: PageTableOps>(
     }
 
     let relro_start = add_base(base, relro.vaddr)?;
+    let relro_end = relro_start
+        .checked_add(relro.mem_size)
+        .ok_or(LinuxLoadError::SizeOverflow)?;
     let page_size = PageSize::SIZE_4K.bytes();
     let start = align_down(relro_start.as_raw(), page_size);
-    let end = align_up(
-        relro_start
-            .as_raw()
-            .checked_add(relro.mem_size)
-            .ok_or(LinuxLoadError::SizeOverflow)?,
-        page_size,
+    let end = align_up(relro_end.as_raw(), page_size);
+
+    println!(
+        "[loader] GNU_RELRO {:#x}-{:#x}",
+        relro_start.as_raw(),
+        relro_end.as_raw()
     );
 
     for addr in (start..end).step_by(page_size) {
+        let page_start = addr;
+        let page_end = addr
+            .checked_add(page_size)
+            .ok_or(LinuxLoadError::SizeOverflow)?;
+        if relro_start.as_raw() > page_start || relro_end.as_raw() < page_end {
+            println!(
+                "[loader] relro page {:#x}-{:#x} skipped (partial coverage)",
+                page_start, page_end
+            );
+            continue;
+        }
         let page = Page::new(VirtAddr::new(addr), PageSize(page_size));
         let perms = segment_perms_for(VirtAddr::new(addr), segments)
             .ok_or(LinuxLoadError::RelocationTargetOutOfRange)?;

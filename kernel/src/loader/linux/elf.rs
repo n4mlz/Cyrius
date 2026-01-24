@@ -1,3 +1,4 @@
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::mem::size_of;
@@ -15,6 +16,7 @@ pub(crate) const ELF_TYPE_EXEC: u16 = 2;
 pub(crate) const ELF_TYPE_DYN: u16 = 3;
 pub(crate) const PT_LOAD: u32 = 1;
 pub(crate) const PT_DYNAMIC: u32 = 2;
+pub(crate) const PT_INTERP: u32 = 3;
 pub(crate) const PT_PHDR: u32 = 6;
 pub(crate) const PT_GNU_RELRO: u32 = 0x6474_e552;
 
@@ -34,6 +36,7 @@ pub struct ElfFile {
     pub dynamic: Option<DynamicSegment>,
     pub relro: Option<RelroSegment>,
     pub phdr_vaddr: Option<VirtAddr>,
+    pub interp: Option<String>,
 }
 
 pub struct ProgramSegment {
@@ -61,6 +64,7 @@ impl ElfFile {
         let mut dynamic = None;
         let mut relro = None;
         let mut phdr_vaddr = None;
+        let mut interp = None;
         let phoff = usize::try_from(header.ph_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
         let ent_size = usize::from(header.ph_entry_size);
         let count = usize::from(header.ph_count);
@@ -104,6 +108,23 @@ impl ElfFile {
                     mem_size: usize::try_from(ph.mem_size)
                         .map_err(|_| LinuxLoadError::SizeOverflow)?,
                 });
+            } else if ph.typ == PT_INTERP {
+                let offset =
+                    usize::try_from(ph.offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
+                let size =
+                    usize::try_from(ph.file_size).map_err(|_| LinuxLoadError::SizeOverflow)?;
+                let end = offset
+                    .checked_add(size)
+                    .ok_or(LinuxLoadError::SizeOverflow)?;
+                let slice = bytes
+                    .get(offset..end)
+                    .ok_or(LinuxLoadError::InvalidElf("interp segment out of range"))?;
+                let len = slice.iter().position(|b| *b == 0).unwrap_or(slice.len());
+                interp = Some(
+                    core::str::from_utf8(&slice[..len])
+                        .map_err(|_| LinuxLoadError::InvalidElf("interp not utf-8"))?
+                        .to_string(),
+                );
             } else if ph.typ == PT_PHDR {
                 phdr_vaddr = Some(VirtAddr::new(
                     usize::try_from(ph.vaddr).map_err(|_| LinuxLoadError::SizeOverflow)?,
@@ -123,6 +144,7 @@ impl ElfFile {
             dynamic,
             relro,
             phdr_vaddr,
+            interp,
         })
     }
 }
