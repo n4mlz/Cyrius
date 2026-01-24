@@ -72,6 +72,7 @@ pub enum QueueError {
     ZeroSize,
     ExceedsMax,
     NotPowerOfTwo,
+    QueueFull,
     RegionTooSmall { required: usize, actual: usize },
     Dma(DmaError),
 }

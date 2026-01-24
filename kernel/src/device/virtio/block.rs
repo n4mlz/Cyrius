@@ -15,6 +15,7 @@ use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
+use core::sync::atomic::fence;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const VIRTIO_BLOCK_QUEUE_INDEX: u16 = 0;
@@ -305,7 +306,7 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
-        self.queue.push(0);
+        self.queue.push(0)?;
         self.transport
             .notify_queue(VIRTIO_BLOCK_QUEUE_INDEX)
             .map_err(VirtioBlkError::Transport)?;
@@ -313,7 +314,7 @@ impl<T: VirtioBlkTransport + VirtioIrqTransport> VirtioBlkDevice<T> {
         if let Some(hook) = self.completion_hook {
             hook(&mut self.queue, buffers);
         }
-        // Poll for completions to sidestep lost-interrupt issues seen under heavy load.
+        // Poll for completions; we intentionally do not block on IRQs yet.
         let _completion = self.queue.wait_for_used();
         Ok(buffers.status())
     }
@@ -506,6 +507,7 @@ struct QueueState {
     memory: QueueMemory,
     avail_idx: u16,
     used_idx: u16,
+    in_flight: u16,
 }
 
 impl QueueState {
@@ -515,18 +517,27 @@ impl QueueState {
             memory,
             avail_idx: 0,
             used_idx: 0,
+            in_flight: 0,
         }
     }
 
-    fn push(&mut self, head: u16) {
+    fn push(&mut self, head: u16) -> Result<(), QueueError> {
+        if self.in_flight >= self.size {
+            return Err(QueueError::QueueFull);
+        }
         let mut slices = self.memory.slices();
         let slot = (self.avail_idx % self.size) as usize;
         slices.avail.ring()[slot] = head;
+        // Ensure descriptor writes are visible before updating avail.idx.
+        fence(Ordering::Release);
         self.avail_idx = self.avail_idx.wrapping_add(1);
         slices.avail.set_idx(self.avail_idx);
+        self.in_flight = self.in_flight.wrapping_add(1);
+        Ok(())
     }
 
     fn wait_for_used(&mut self) -> UsedElem {
+        // Polling-only completion for now; IRQs are not wired into the wait path.
         loop {
             if let Some(entry) = self.pop_used() {
                 return entry;
@@ -542,10 +553,13 @@ impl QueueState {
             return None;
         }
 
+        // Ensure we observe the used ring entry after reading used.idx.
+        fence(Ordering::Acquire);
         let slot = (self.used_idx % self.size) as usize;
         let ring = slices.used.ring();
         let entry = unsafe { core::ptr::read_volatile(&ring[slot]) };
         self.used_idx = self.used_idx.wrapping_add(1);
+        self.in_flight = self.in_flight.saturating_sub(1);
         Some(entry)
     }
 }
@@ -796,7 +810,7 @@ mod tests {
         let mut provider = DmaRegionProvider::new();
         let queue_mem = QueueMemory::allocate(0, 8, &mut provider).expect("queue allocation");
         let mut queue = QueueState::new(8, queue_mem);
-        queue.push(0);
+        queue.push(0).expect("push");
         queue.test_complete(0);
         let _ = queue.wait_for_used();
     }

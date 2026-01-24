@@ -19,6 +19,7 @@ use crate::util::spinlock::SpinLock;
 const PCI_CAP_ID_VENDOR: u8 = 0x09;
 const PCI_CAP_ID_MSIX: u8 = 0x11;
 const VIRTIO_VENDOR_ID: u16 = 0x1AF4;
+const VIRTIO_NET_DEVICE_ID: u16 = 0x1041;
 const VIRTIO_BLOCK_DEVICE_ID: u16 = 0x1042;
 const MSIX_ENABLE: u16 = 1 << 15;
 const MSIX_FUNCTION_MASK: u16 = 1 << 14;
@@ -26,6 +27,7 @@ const MSIX_VECTOR_MASK: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioDeviceKind {
+    Network,
     Block,
     Other(u16),
 }
@@ -33,6 +35,7 @@ pub enum VirtioDeviceKind {
 impl VirtioDeviceKind {
     pub fn from_device_id(id: u16) -> Self {
         match id {
+            VIRTIO_NET_DEVICE_ID => Self::Network,
             VIRTIO_BLOCK_DEVICE_ID => Self::Block,
             other => Self::Other(other),
         }
@@ -686,6 +689,22 @@ pub fn enumerate_block_transports() -> Vec<VirtioPciTransport> {
             return;
         }
         if pci::device_id(addr) != VIRTIO_BLOCK_DEVICE_ID {
+            return;
+        }
+        if let Ok(tx) = VirtioPciTransport::probe(addr) {
+            transports.push(tx);
+        }
+    });
+    transports
+}
+
+pub fn enumerate_net_transports() -> Vec<VirtioPciTransport> {
+    let mut transports = Vec::new();
+    pci::enumerate(|addr| {
+        if pci::vendor_id(addr) != VIRTIO_VENDOR_ID {
+            return;
+        }
+        if pci::device_id(addr) != VIRTIO_NET_DEVICE_ID {
             return;
         }
         if let Ok(tx) = VirtioPciTransport::probe(addr) {

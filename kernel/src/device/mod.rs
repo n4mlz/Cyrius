@@ -1,6 +1,7 @@
 pub mod block;
 pub mod bus;
 pub mod char;
+pub mod net;
 pub mod probe;
 pub mod virtio;
 

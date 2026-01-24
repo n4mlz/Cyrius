@@ -22,12 +22,22 @@
 
 ## VirtIO Block Driver (`block.rs`)
 - Implements the `BlockDevice` trait on top of `Transport`, negotiating only the features currently supported (read-only flag, flush, block-size reporting) and rejecting devices with incompatible block sizes.
-- Requests now arm a queue-local interrupt object; PCI transports wire this to an MSI-X vector while test transports fall back to polling. Interrupts wake the waiter which then re-reads the used ring, so data-plane semantics are unchanged while the CPU is no longer stuck in a pure busy-spin during `cargo xtask test`.
+- Requests currently poll the used ring for completion; IRQ plumbing is present but not wired into the wait path yet. This keeps early bring-up deterministic while leaving room to switch to interrupt-driven waits later.
 - Discovery (`probe_pci_devices`) scans the PCI transport helper, instantiates `VirtioBlkDevice` objects with human-readable names, and logs failures without panicking so other devices can continue initialising.
 - Unit tests rely on a mock transport plus a test-only completion hook that simulates device acknowledgements by directly mutating the used ring, enabling deterministic verification of descriptor layout and data copying without QEMU.
+
+## VirtIO Network Driver (`net.rs`)
+- Implements a minimal virtio-net data path (one RX queue + one TX queue) using a two-descriptor chain (header + payload). This is a deliberate simplification and assumes one packet maps to exactly two descriptors.
+- Negotiates only MAC address and link-status features, leaving offloads disabled until the TCP/IP stack is integrated. Unsupported features must remain disabled until the header is parsed properly.
+- RX buffers are pre-posted during initialisation; completed descriptors are reinitialised before being recycled. The current RX path assumes a single buffer per packet and does not handle merged buffers yet.
+- TX uses a small free list of descriptor heads and waits synchronously for completion; completion ordering and pipelining are not handled yet.
+- IRQ plumbing is present but the wait path is polling-only; interrupts are not wired into completion handling at this stage.
+- Integration tests rely on QEMU attaching a `virtio-net-pci` device during `cargo xtask test`, while unit tests use a mock transport and manual used-ring updates.
 
 ## Testing Strategy
 - Unit tests cover descriptor layout calculations and DMA region accounting.
 - Integration tests (driven via `cargo xtask test`) attach `target/virtio-blk-test.img` as a
   VirtIO block device and assert that the driver can read the seeded pattern and persist writes,
   exercising the full DMA + queue path under QEMU.
+ - VirtIO-net tests verify queue submission with a mock transport and assert that a QEMU-provided
+   virtio-net device is present during integration runs.
