@@ -22,7 +22,7 @@
 
 ## VirtIO Block Driver (`block.rs`)
 - Implements the `BlockDevice` trait on top of `Transport`, negotiating only the features currently supported (read-only flag, flush, block-size reporting) and rejecting devices with incompatible block sizes.
-- Requests now arm a queue-local interrupt object; PCI transports wire this to an MSI-X vector while test transports fall back to polling. Interrupts wake the waiter which then re-reads the used ring, so data-plane semantics are unchanged while the CPU is no longer stuck in a pure busy-spin during `cargo xtask test`.
+- Requests currently poll the used ring for completion; IRQ plumbing is present but not wired into the wait path yet. This keeps early bring-up deterministic while leaving room to switch to interrupt-driven waits later.
 - Discovery (`probe_pci_devices`) scans the PCI transport helper, instantiates `VirtioBlkDevice` objects with human-readable names, and logs failures without panicking so other devices can continue initialising.
 - Unit tests rely on a mock transport plus a test-only completion hook that simulates device acknowledgements by directly mutating the used ring, enabling deterministic verification of descriptor layout and data copying without QEMU.
 

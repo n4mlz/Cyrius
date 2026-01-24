@@ -15,6 +15,7 @@ use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
+use core::sync::atomic::fence;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const VIRTIO_NET_RX_QUEUE_INDEX: u16 = 0;
@@ -178,7 +179,7 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
                 let slices = rx_queue.memory.slices();
                 slices.descriptors[index as usize] = desc;
             }
-            rx_queue.push(index);
+            rx_queue.push(index)?;
             rx_buffers.push(buffer);
         }
         {
@@ -254,7 +255,7 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
-        self.tx_queue.push(0);
+        self.tx_queue.push(0)?;
         self.transport
             .notify_queue(VIRTIO_NET_TX_QUEUE_INDEX)
             .map_err(VirtioNetError::Transport)?;
@@ -310,7 +311,7 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
         }
         let data = self.rx_buffers[index].data();
         buffer[..payload_len].copy_from_slice(&data[..payload_len]);
-        self.rx_queue.push(index as u16);
+        self.rx_queue.push(index as u16)?;
         Ok(Some(payload_len))
     }
 
@@ -330,7 +331,7 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
-        self.tx_queue.push(0);
+        self.tx_queue.push(0)?;
         self.transport
             .notify_queue(VIRTIO_NET_TX_QUEUE_INDEX)
             .map_err(VirtioNetError::Transport)?;
@@ -559,6 +560,7 @@ struct QueueState {
     memory: QueueMemory,
     avail_idx: u16,
     used_idx: u16,
+    in_flight: u16,
 }
 
 impl QueueState {
@@ -568,18 +570,27 @@ impl QueueState {
             memory,
             avail_idx: 0,
             used_idx: 0,
+            in_flight: 0,
         }
     }
 
-    fn push(&mut self, head: u16) {
+    fn push(&mut self, head: u16) -> Result<(), QueueError> {
+        if self.in_flight >= self.size {
+            return Err(QueueError::QueueFull);
+        }
         let mut slices = self.memory.slices();
         let slot = (self.avail_idx % self.size) as usize;
         slices.avail.ring()[slot] = head;
+        // Ensure descriptor writes are visible before updating avail.idx.
+        fence(Ordering::Release);
         self.avail_idx = self.avail_idx.wrapping_add(1);
         slices.avail.set_idx(self.avail_idx);
+        self.in_flight = self.in_flight.wrapping_add(1);
+        Ok(())
     }
 
     fn wait_for_used(&mut self) -> UsedElem {
+        // Polling-only completion for now; IRQs are not wired into the wait path.
         loop {
             if let Some(entry) = self.pop_used() {
                 return entry;
@@ -595,10 +606,13 @@ impl QueueState {
             return None;
         }
 
+        // Ensure we observe the used ring entry after reading used.idx.
+        fence(Ordering::Acquire);
         let slot = (self.used_idx % self.size) as usize;
         let ring = slices.used.ring();
         let entry = unsafe { core::ptr::read_volatile(&ring[slot]) };
         self.used_idx = self.used_idx.wrapping_add(1);
+        self.in_flight = self.in_flight.saturating_sub(1);
         Some(entry)
     }
 }
