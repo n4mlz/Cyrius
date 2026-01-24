@@ -434,8 +434,6 @@ fn handle_execve(
         Some(frame) => frame,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    // TODO: auxv is minimal (pagesize/entry only). This is enough for busybox but not a full
-    // Linux execve environment.
     let path_ptr = match invocation.arg(0) {
         Some(ptr) => ptr,
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
@@ -488,16 +486,7 @@ fn handle_execve(
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
-    let auxv = [
-        crate::loader::linux::AuxvEntry {
-            key: 6, // AT_PAGESZ
-            value: PageSize::SIZE_4K.bytes() as u64,
-        },
-        crate::loader::linux::AuxvEntry {
-            key: 9, // AT_ENTRY
-            value: program.entry.as_raw() as u64,
-        },
-    ];
+    let auxv = crate::loader::linux::build_auxv(&program, PageSize::SIZE_4K.bytes());
     let argv_refs: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: alloc::vec::Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
     let stack_top = <Arch as ArchThread>::user_stack_top(&program.user_stack);
