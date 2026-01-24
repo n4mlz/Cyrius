@@ -2,6 +2,7 @@
 
 static const char stat_path[] = "stat.txt";
 static const char child_path[] = "/child";
+static const usize page_size = 4096;
 
 static usize str_len(const char *s) {
     usize n = 0;
@@ -34,6 +35,13 @@ static void write_u32(u32 value) {
 }
 
 void _start(void) {
+    enum {
+        PROT_READ = 0x1,
+        PROT_WRITE = 0x2,
+        MAP_PRIVATE = 0x02,
+        MAP_ANON = 0x20,
+    };
+
     struct iovec iov[2];
     iov[0].iov_base = (void *)"WRITE";
     iov[0].iov_len = 5;
@@ -48,6 +56,20 @@ void _start(void) {
         write_str("STAT:OK\n");
     } else {
         write_str("STAT:BAD\n");
+    }
+
+    void *map = (void *)sys_mmap(0, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if ((isize)map < 0) {
+        write_str("MMAP:BAD\n");
+    } else {
+        volatile char *ptr = (volatile char *)map;
+        ptr[0] = 'O';
+        ptr[1] = 'K';
+        if (ptr[0] == 'O' && ptr[1] == 'K' && sys_munmap(map, page_size) == 0) {
+            write_str("MMAP:OK\n");
+        } else {
+            write_str("MMAP:BAD\n");
+        }
     }
 
     void *cur = (void *)sys_brk(0);

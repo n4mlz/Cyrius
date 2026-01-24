@@ -13,6 +13,8 @@ enum {
     SYS_open = 2,
     SYS_close = 3,
     SYS_stat = 4,
+    SYS_mmap = 9,
+    SYS_munmap = 11,
     SYS_brk = 12,
     SYS_writev = 20,
     SYS_fork = 57,
@@ -57,10 +59,13 @@ isize sys_call1(isize num, isize arg1);
 isize sys_call2(isize num, isize arg1, isize arg2);
 isize sys_call3(isize num, isize arg1, isize arg2, isize arg3);
 isize sys_call4(isize num, isize arg1, isize arg2, isize arg3, isize arg4);
+isize sys_call6(isize num, isize arg1, isize arg2, isize arg3, isize arg4, isize arg5, isize arg6);
 
 isize sys_write(int fd, const void *buf, usize len);
 isize sys_writev(int fd, const struct iovec *iov, int iovcnt);
 isize sys_stat(const char *path, struct linux_stat *statbuf);
+isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset);
+isize sys_munmap(void *addr, usize len);
 isize sys_brk(void *addr);
 isize sys_arch_prctl(isize code, isize addr);
 isize sys_fork(void);

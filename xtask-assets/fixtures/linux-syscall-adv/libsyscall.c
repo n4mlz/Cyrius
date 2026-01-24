@@ -51,6 +51,19 @@ isize sys_call4(isize num, isize arg1, isize arg2, isize arg3, isize arg4) {
     return ret;
 }
 
+isize sys_call6(isize num, isize arg1, isize arg2, isize arg3, isize arg4, isize arg5, isize arg6) {
+    isize ret;
+    register isize r10 __asm__("r10") = arg4;
+    register isize r8 __asm__("r8") = arg5;
+    register isize r9 __asm__("r9") = arg6;
+    __asm__ volatile(
+        "syscall"
+        : "=a"(ret)
+        : "a"(num), "D"(arg1), "S"(arg2), "d"(arg3), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
 isize sys_write(int fd, const void *buf, usize len) {
     return sys_call3(SYS_write, fd, (isize)buf, (isize)len);
 }
@@ -61,6 +74,14 @@ isize sys_writev(int fd, const struct iovec *iov, int iovcnt) {
 
 isize sys_stat(const char *path, struct linux_stat *statbuf) {
     return sys_call3(SYS_stat, (isize)path, (isize)statbuf, 0);
+}
+
+isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset) {
+    return sys_call6(SYS_mmap, (isize)addr, (isize)len, prot, flags, fd, offset);
+}
+
+isize sys_munmap(void *addr, usize len) {
+    return sys_call2(SYS_munmap, (isize)addr, (isize)len);
 }
 
 isize sys_brk(void *addr) {

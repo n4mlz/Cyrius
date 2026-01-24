@@ -6,9 +6,13 @@ use alloc::vec::Vec;
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
 use crate::fs::{FileType, VfsPath, with_vfs};
-use crate::mem::addr::{Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_up};
-use crate::mem::paging::{FrameAllocator, MapError, PageTableOps};
+use crate::mem::addr::{
+    Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up,
+};
+use crate::mem::manager;
+use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
+use crate::println;
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessId};
 use crate::thread::SCHEDULER;
@@ -31,6 +35,8 @@ pub enum LinuxSyscall {
     Open = 2,
     Close = 3,
     Stat = 4,
+    Mmap = 9,
+    Munmap = 11,
     Brk = 12,
     RtSigaction = 13,
     RtSigprocmask = 14,
@@ -41,6 +47,10 @@ pub enum LinuxSyscall {
     Execve = 59,
     Exit = 60,
     Wait4 = 61,
+    GetUid = 102,
+    GetGid = 104,
+    SetUid = 105,
+    SetGid = 106,
     ArchPrctl = 158,
     SetTidAddress = 218,
 }
@@ -53,6 +63,8 @@ impl LinuxSyscall {
             2 => Some(Self::Open),
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
+            9 => Some(Self::Mmap),
+            11 => Some(Self::Munmap),
             12 => Some(Self::Brk),
             13 => Some(Self::RtSigaction),
             14 => Some(Self::RtSigprocmask),
@@ -63,6 +75,10 @@ impl LinuxSyscall {
             59 => Some(Self::Execve),
             60 => Some(Self::Exit),
             61 => Some(Self::Wait4),
+            102 => Some(Self::GetUid),
+            104 => Some(Self::GetGid),
+            105 => Some(Self::SetUid),
+            106 => Some(Self::SetGid),
             158 => Some(Self::ArchPrctl),
             218 => Some(Self::SetTidAddress),
             _ => None,
@@ -75,6 +91,10 @@ pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
+    println!(
+        "Linux syscall invoked: number={}, args={:?}",
+        invocation.number, invocation.args
+    );
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -82,16 +102,23 @@ pub fn dispatch(
         Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
+        Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
+        Some(LinuxSyscall::Munmap) => DispatchResult::Completed(handle_munmap(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
         Some(LinuxSyscall::Fork) => handle_fork(invocation, frame),
         Some(LinuxSyscall::Execve) => handle_execve(invocation, frame),
         Some(LinuxSyscall::Wait4) => DispatchResult::Completed(handle_wait4(invocation)),
         Some(LinuxSyscall::ArchPrctl) => DispatchResult::Completed(handle_arch_prctl(invocation)),
         // These syscalls are currently stubbed and always report success (0).
-        Some(LinuxSyscall::Ioctl) => DispatchResult::Completed(handle_stub(invocation)),
-        Some(LinuxSyscall::RtSigaction) => DispatchResult::Completed(handle_stub(invocation)),
-        Some(LinuxSyscall::RtSigprocmask) => DispatchResult::Completed(handle_stub(invocation)),
-        Some(LinuxSyscall::SetTidAddress) => DispatchResult::Completed(handle_stub(invocation)),
+        Some(LinuxSyscall::Ioctl) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::RtSigaction) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::RtSigprocmask) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::SetTidAddress) => DispatchResult::Completed(Ok(0)),
+        // NOTE: UID/GID syscalls are stubbed to 0 for now; user/cred support is not implemented yet.
+        Some(LinuxSyscall::GetUid) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::GetGid) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::SetUid) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::SetGid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         None => DispatchResult::Completed(Err(SysError::NotImplemented)),
@@ -597,9 +624,193 @@ fn handle_arch_prctl(invocation: &SyscallInvocation) -> SysResult {
     Ok(0)
 }
 
-fn handle_stub(_invocation: &SyscallInvocation) -> SysResult {
-    // Stubbed syscalls currently behave as no-ops and return success.
+// NOTE: This is a minimal anonymous mmap implementation for busybox startup.
+// It only supports private, anonymous mappings with optional MAP_FIXED and
+// ignores file-backed mappings, offsets, and advanced flags.
+fn handle_mmap(invocation: &SyscallInvocation) -> SysResult {
+    const PROT_READ: u32 = 0x1;
+    const PROT_WRITE: u32 = 0x2;
+    const PROT_EXEC: u32 = 0x4;
+    const MAP_PRIVATE: u32 = 0x02;
+    const MAP_FIXED: u32 = 0x10;
+    const MAP_ANON: u32 = 0x20;
+
+    let addr = invocation.arg(0).unwrap_or(0);
+    let len = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let prot = invocation.arg(2).unwrap_or(0) as u32;
+    let flags = invocation.arg(3).unwrap_or(0) as u32;
+    let fd = invocation.arg(4).unwrap_or(u64::MAX) as i64;
+    let offset = invocation.arg(5).unwrap_or(0);
+
+    if len == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    if offset != 0 {
+        return Err(SysError::NotImplemented);
+    }
+
+    if flags & MAP_PRIVATE == 0 {
+        return Err(SysError::NotImplemented);
+    }
+
+    if flags & MAP_ANON == 0 || fd != -1 {
+        return Err(SysError::NotImplemented);
+    }
+
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let space = process.address_space();
+
+    let page_size = PageSize::SIZE_4K.bytes();
+    let len = align_up(len as usize, page_size);
+    let fixed = flags & MAP_FIXED != 0;
+    let mut target = addr as usize;
+    if fixed {
+        if !target.is_multiple_of(page_size) {
+            return Err(SysError::InvalidArgument);
+        }
+    } else if target == 0 {
+        let brk = process.brk_state();
+        target = align_up(brk.current.as_raw(), page_size);
+        let next = VirtAddr::new(target + len);
+        process.set_brk_state(crate::process::BrkState {
+            base: brk.base,
+            current: next,
+        });
+    } else {
+        target = align_up(target, page_size);
+    }
+
+    let mut perms = MemPerm::USER;
+    if prot & PROT_READ != 0 {
+        perms |= MemPerm::READ;
+    }
+    if prot & PROT_WRITE != 0 {
+        perms |= MemPerm::WRITE;
+    }
+    if prot & PROT_EXEC != 0 {
+        perms |= MemPerm::EXEC;
+    }
+
+    let max_attempts = if fixed { 1 } else { 128 };
+    let mut attempts = 0usize;
+    let mut mapped = false;
+
+    while attempts < max_attempts && !mapped {
+        let attempt_base = target;
+        let result = space.with_page_table(|table, allocator| {
+            let mut mapped_pages = 0usize;
+            for addr in (attempt_base..attempt_base + len).step_by(page_size) {
+                let page = Page::new(VirtAddr::new(addr), PageSize(page_size));
+                if fixed && let Ok(frame) = table.unmap(page) {
+                    allocator.deallocate(frame);
+                }
+                let frame = allocator
+                    .allocate(PageSize(page_size))
+                    .ok_or(MapError::FrameAllocationFailed)?;
+                if let Err(err) = table.map(page, frame, perms, allocator) {
+                    if let Ok(frame) = table.unmap(page) {
+                        allocator.deallocate(frame);
+                    }
+                    rollback_mapped(table, allocator, attempt_base, mapped_pages, page_size);
+                    return Err(err);
+                }
+
+                let phys = match table.translate(page.start) {
+                    Ok(phys) => phys,
+                    Err(_) => {
+                        rollback_mapped(
+                            table,
+                            allocator,
+                            attempt_base,
+                            mapped_pages + 1,
+                            page_size,
+                        );
+                        return Err(MapError::InternalError);
+                    }
+                };
+                let mapper = manager::phys_mapper();
+                unsafe {
+                    let ptr = mapper.phys_to_virt(phys).into_mut_ptr();
+                    core::ptr::write_bytes(ptr, 0, page_size);
+                }
+                mapped_pages += 1;
+            }
+            Ok::<(), MapError>(())
+        });
+
+        match result {
+            Ok(()) => {
+                mapped = true;
+            }
+            Err(MapError::AlreadyMapped) if !fixed => {
+                target = target
+                    .checked_add(page_size)
+                    .ok_or(SysError::InvalidArgument)?;
+            }
+            Err(_) => return Err(SysError::InvalidArgument),
+        }
+
+        attempts += 1;
+    }
+
+    if !mapped {
+        return Err(SysError::InvalidArgument);
+    }
+
+    Ok(target as u64)
+}
+
+// NOTE: This is a minimal munmap implementation that only tears down page-aligned ranges.
+fn handle_munmap(invocation: &SyscallInvocation) -> SysResult {
+    let addr = invocation.arg(0).ok_or(SysError::InvalidArgument)? as usize;
+    let len = invocation.arg(1).ok_or(SysError::InvalidArgument)? as usize;
+    if len == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let page_size = PageSize::SIZE_4K.bytes();
+    let addr = align_down(addr, page_size);
+    let len = align_up(len, page_size);
+
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let space = process.address_space();
+
+    space
+        .with_page_table(|table, allocator| {
+            for addr in (addr..addr + len).step_by(page_size) {
+                let page = Page::new(VirtAddr::new(addr), PageSize(page_size));
+                if let Ok(frame) = table.unmap(page) {
+                    allocator.deallocate(frame);
+                }
+            }
+            Ok::<(), SysError>(())
+        })
+        .map_err(|_| SysError::InvalidArgument)?;
+
     Ok(0)
+}
+
+fn rollback_mapped<T: PageTableOps, A: FrameAllocator>(
+    table: &mut T,
+    allocator: &mut A,
+    base: usize,
+    pages: usize,
+    page_size: usize,
+) {
+    let end = base.saturating_add(pages.saturating_mul(page_size));
+    for addr in (base..end).step_by(page_size) {
+        let page = Page::new(VirtAddr::new(addr), PageSize(page_size));
+        if let Ok(frame) = table.unmap(page) {
+            allocator.deallocate(frame);
+        }
+    }
 }
 
 fn errno_for(err: SysError) -> u16 {
@@ -989,7 +1200,7 @@ mod tests {
         let mut status = 0u32;
         let invocation = SyscallInvocation::new(
             LinuxSyscall::Wait4 as u64,
-            [pid as u64, &mut status as *mut u32 as u64, 0, 0, 0, 0],
+            [pid, &mut status as *mut u32 as u64, 0, 0, 0, 0],
         );
         match dispatch(&invocation, None) {
             DispatchResult::Completed(Ok(val)) => assert_eq!(val, pid),
@@ -1038,8 +1249,7 @@ mod tests {
         let proc = PROCESS_TABLE.process_handle(child).expect("process handle");
         proc.set_parent(parent);
 
-        let invocation =
-            SyscallInvocation::new(LinuxSyscall::Wait4 as u64, [child as u64, 0, 1, 0, 0, 0]);
+        let invocation = SyscallInvocation::new(LinuxSyscall::Wait4 as u64, [child, 0, 1, 0, 0, 0]);
         match dispatch(&invocation, None) {
             DispatchResult::Completed(Ok(0)) => {}
             other => panic!("unexpected dispatch result: {:?}", other),
@@ -1084,5 +1294,55 @@ mod tests {
             DispatchResult::Completed(Err(SysError::InvalidArgument)) => {}
             other => panic!("unexpected dispatch result: {:?}", other),
         }
+    }
+
+    #[kernel_test_case]
+    fn mmap_maps_and_munmaps_pages() {
+        println!("[test] mmap_maps_and_munmaps_pages");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+
+        const MAP_PRIVATE: u64 = 0x02;
+        const MAP_FIXED: u64 = 0x10;
+        const MAP_ANON: u64 = 0x20;
+        const PROT_READ: u64 = 0x1;
+        const PROT_WRITE: u64 = 0x2;
+
+        let addr = 0x500000u64;
+        let len = 0x2000u64;
+        let mmap = SyscallInvocation::new(
+            LinuxSyscall::Mmap as u64,
+            [
+                addr,
+                len,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON | MAP_FIXED,
+                u64::MAX,
+                0,
+            ],
+        );
+        match dispatch(&mmap, None) {
+            DispatchResult::Completed(Ok(val)) => assert_eq!(val, addr),
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+
+        let src = [0xABu8; 16];
+        copy_to_user(VirtAddr::new(addr as usize), &src).expect("copy to user");
+        let mut dst = [0u8; 16];
+        copy_from_user(&mut dst, VirtAddr::new(addr as usize)).expect("copy from user");
+        assert_eq!(dst, src);
+
+        let munmap = SyscallInvocation::new(LinuxSyscall::Munmap as u64, [addr, len, 0, 0, 0, 0]);
+        match dispatch(&munmap, None) {
+            DispatchResult::Completed(Ok(0)) => {}
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+
+        let pid = SCHEDULER.current_process_id().expect("current pid");
+        let space = PROCESS_TABLE.address_space(pid).expect("address space");
+        space.with_page_table(|table, _| {
+            assert!(table.translate(VirtAddr::new(addr as usize)).is_err());
+        });
     }
 }
