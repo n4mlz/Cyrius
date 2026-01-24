@@ -7,6 +7,7 @@
 ## `NetworkDevice` Trait
 - Exposes MAC address, MTU, and link state as lightweight metadata.
 - Uses `transmit_frame` / `receive_frame` for raw Ethernet frame I/O to avoid baking protocol choices into the device layer.
+- Drivers may choose to poll for completions during early bring-up; interrupt-driven waits can be layered on later. Early drivers in this tree currently use polling-only waits.
 - Defaults to `LinkState::Unknown` when a device cannot report link status.
 
 ## Provider Pattern

@@ -22,6 +22,11 @@ const VIRTIO_NET_RX_QUEUE_INDEX: u16 = 0;
 const VIRTIO_NET_TX_QUEUE_INDEX: u16 = 1;
 const MAX_QUEUE_SIZE: u16 = 256;
 const MIN_QUEUE_SIZE: u16 = 2;
+// NOTE: We currently assume one packet maps to exactly two descriptors:
+//       header + payload. This is a deliberate simplification and MUST be
+//       revisited before enabling features such as merged RX buffers, GSO,
+//       or any multi-segment TX/RX path.
+const DESCRIPTOR_STRIDE: u16 = 2;
 const DEFAULT_MTU: usize = 1500;
 const ETHERNET_HEADER_LEN: usize = 14;
 const MAX_FRAME_SIZE: usize = 2048;
@@ -118,7 +123,8 @@ pub struct VirtioNetDevice<T: VirtioNetTransport> {
     tx_queue: QueueState,
     rx_buffers: Vec<NetBuffer>,
     tx_buffer: NetBuffer,
-    dma: DmaRegionProvider,
+    tx_free: Vec<u16>,
+    _dma: DmaRegionProvider,
     mac: [u8; 6],
     mtu: usize,
     link_state: LinkState,
@@ -126,7 +132,7 @@ pub struct VirtioNetDevice<T: VirtioNetTransport> {
     irq_handler: Option<&'static QueueInterruptHandler>,
     irq_vector: Option<u8>,
     #[cfg(test)]
-    completion_hook: Option<fn(&mut QueueState)>,
+    completion_hook: Option<fn(&mut QueueState, u16)>,
 }
 
 impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
@@ -166,20 +172,12 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
         let frame_capacity = compute_frame_capacity(mtu)?;
 
         let mut dma = DmaRegionProvider::new();
-        let mut rx_buffers = Vec::with_capacity(rx_queue.size as usize);
-        for index in 0..rx_queue.size {
+        let mut rx_buffers = Vec::with_capacity(rx_queue.head_capacity() as usize);
+        for buffer_index in 0..rx_queue.head_capacity() {
+            let head = buffer_index * DESCRIPTOR_STRIDE;
             let buffer = NetBuffer::new(&mut dma, frame_capacity)?;
-            let desc = Descriptor {
-                addr: buffer.header_phys().as_raw() as u64,
-                len: buffer.total_len() as u32,
-                flags: DescriptorFlags::WRITE.bits(),
-                next: 0,
-            };
-            {
-                let slices = rx_queue.memory.slices();
-                slices.descriptors[index as usize] = desc;
-            }
-            rx_queue.push(index)?;
+            write_rx_descriptors(&mut rx_queue, head, &buffer);
+            rx_queue.push(head)?;
             rx_buffers.push(buffer);
         }
         {
@@ -188,6 +186,9 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
         }
 
         let tx_buffer = NetBuffer::new(&mut dma, frame_capacity)?;
+        let tx_free = (0..tx_queue.head_capacity())
+            .map(|idx| idx * DESCRIPTOR_STRIDE)
+            .collect();
 
         let mut device = Self {
             name,
@@ -196,7 +197,8 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
             tx_queue,
             rx_buffers,
             tx_buffer,
-            dma,
+            tx_free,
+            _dma: dma,
             mac,
             mtu,
             link_state,
@@ -250,32 +252,50 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), VirtioNetError> {
+        let head = self.allocate_tx_head()?;
         self.tx_buffer.prepare_tx(frame)?;
-        self.prepare_tx_descriptor(frame.len());
+        self.prepare_tx_descriptor(head, frame.len());
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
-        self.tx_queue.push(0)?;
+        self.tx_queue.push(head)?;
         self.transport
             .notify_queue(VIRTIO_NET_TX_QUEUE_INDEX)
             .map_err(VirtioNetError::Transport)?;
         #[cfg(test)]
         if let Some(hook) = self.completion_hook {
-            hook(&mut self.tx_queue);
+            hook(&mut self.tx_queue, head);
         }
-        let _completion = self.tx_queue.wait_for_used();
+        // NOTE: TX is currently synchronous (one outstanding completion
+        // awaited here). This assumes single-packet semantics; do not
+        // introduce pipelining without switching to full reclaim logic.
+        let completion = self.tx_queue.wait_for_used();
+        self.release_tx_head(completion.id as u16);
         Ok(())
     }
 
-    fn prepare_tx_descriptor(&mut self, frame_len: usize) {
+    fn prepare_tx_descriptor(&mut self, head: u16, frame_len: usize) {
+        let header_len = self.tx_buffer.header_len();
         let total_len = self
             .tx_buffer
             .total_len_for_payload(frame_len)
             .min(u32::MAX as usize) as u32;
         let mut slices = self.tx_queue.memory.slices();
-        slices.descriptors[0] = Descriptor {
+        let head_index = head as usize;
+        let data_index = head_index + 1;
+        slices.descriptors[head_index] = Descriptor {
             addr: self.tx_buffer.header_phys().as_raw() as u64,
-            len: total_len,
+            len: header_len as u32,
+            flags: DescriptorFlags::NEXT.bits(),
+            next: head + 1,
+        };
+        slices.descriptors[data_index] = Descriptor {
+            addr: self
+                .tx_buffer
+                .data_phys()
+                .expect("tx data phys missing")
+                .as_raw() as u64,
+            len: total_len.saturating_sub(header_len as u32),
             flags: 0,
             next: 0,
         };
@@ -287,16 +307,22 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
             return Ok(None);
         };
         let index = used.id as usize;
-        if index >= self.rx_buffers.len() {
+        if !index.is_multiple_of(DESCRIPTOR_STRIDE as usize) {
             return Err(VirtioNetError::InvalidRxDescriptor(index));
         }
-        let header_len = self.rx_buffers[index].header_len();
+        let buffer_index = index / DESCRIPTOR_STRIDE as usize;
+        if buffer_index >= self.rx_buffers.len() {
+            return Err(VirtioNetError::InvalidRxDescriptor(index));
+        }
+        let header_len = self.rx_buffers[buffer_index].header_len();
         let total = used.len as usize;
         if total < header_len {
             return Err(VirtioNetError::ShortRx(total));
         }
+        // NOTE: RX currently assumes one buffer holds one full packet.
+        // Multi-buffer packets (e.g. merged RX buffers) are not supported yet.
         let payload_len = total - header_len;
-        let capacity = self.rx_buffers[index].data_len();
+        let capacity = self.rx_buffers[buffer_index].data_len();
         if payload_len > capacity {
             return Err(VirtioNetError::RxOverflow {
                 capacity,
@@ -309,14 +335,36 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
                 provided: buffer.len(),
             });
         }
-        let data = self.rx_buffers[index].data();
+        let data = self.rx_buffers[buffer_index].data();
         buffer[..payload_len].copy_from_slice(&data[..payload_len]);
+        write_rx_descriptors(
+            &mut self.rx_queue,
+            index as u16,
+            &self.rx_buffers[buffer_index],
+        );
         self.rx_queue.push(index as u16)?;
         Ok(Some(payload_len))
     }
 
+    fn allocate_tx_head(&mut self) -> Result<u16, VirtioNetError> {
+        self.reclaim_tx_used();
+        self.tx_free.pop().ok_or(VirtioNetError::TxBusy)
+    }
+
+    fn release_tx_head(&mut self, head: u16) {
+        if head.is_multiple_of(DESCRIPTOR_STRIDE) {
+            self.tx_free.push(head);
+        }
+    }
+
+    fn reclaim_tx_used(&mut self) {
+        while let Some(entry) = self.tx_queue.pop_used() {
+            self.release_tx_head(entry.id as u16);
+        }
+    }
+
     #[cfg(test)]
-    pub(self) fn set_completion_hook(&mut self, hook: fn(&mut QueueState)) {
+    pub(self) fn set_completion_hook(&mut self, hook: fn(&mut QueueState, u16)) {
         self.completion_hook = Some(hook);
     }
 
@@ -326,21 +374,23 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
         frame: &[u8],
         spins: usize,
     ) -> Result<(), VirtioNetError> {
+        let head = self.allocate_tx_head()?;
         self.tx_buffer.prepare_tx(frame)?;
-        self.prepare_tx_descriptor(frame.len());
+        self.prepare_tx_descriptor(head, frame.len());
         if let Some(irq) = self.queue_irq {
             irq.arm();
         }
-        self.tx_queue.push(0)?;
+        self.tx_queue.push(head)?;
         self.transport
             .notify_queue(VIRTIO_NET_TX_QUEUE_INDEX)
             .map_err(VirtioNetError::Transport)?;
         #[cfg(test)]
         if let Some(hook) = self.completion_hook {
-            hook(&mut self.tx_queue);
+            hook(&mut self.tx_queue, head);
         }
         for _ in 0..spins {
             if self.tx_queue.pop_used().is_some() {
+                self.release_tx_head(head);
                 return Ok(());
             }
             core::hint::spin_loop();
@@ -394,6 +444,9 @@ fn setup_queue<T: VirtioNetTransport>(
         return Err(VirtioNetError::QueueTooSmall(device_queue_size));
     }
     let queue_size = device_queue_size.min(MAX_QUEUE_SIZE);
+    if queue_size % DESCRIPTOR_STRIDE != 0 {
+        return Err(VirtioNetError::QueueNotEven(queue_size));
+    }
     transport.set_queue_size(queue_size)?;
 
     let queue_memory = QueueMemory::allocate(index, queue_size, dma)?;
@@ -492,6 +545,9 @@ struct NetConfigLayout {
 
 impl NetConfigLayout {
     fn new(features: u32) -> Self {
+        // NOTE: Manual offset math assumes the current minimal config layout.
+        // When more config fields/features are supported, replace this with a
+        // structured parser tied to the virtio-net spec layout.
         let mut offset = 0;
         let mac_offset = if features & FeatureBits::MAC.bits() != 0 {
             let current = offset;
@@ -520,12 +576,14 @@ pub enum VirtioNetError {
     FeatureNegotiationFailed,
     InsufficientQueues(u16),
     QueueTooSmall(u16),
+    QueueNotEven(u16),
     ConfigTooSmall { required: usize, actual: usize },
     FrameTooLarge(usize),
     BufferTooSmall { needed: usize, provided: usize },
     RxOverflow { capacity: usize, received: usize },
     InvalidRxDescriptor(usize),
     ShortRx(usize),
+    TxBusy,
     TxTimeout,
     Interrupt(VirtioIrqError),
     InterruptController(InterruptError),
@@ -561,23 +619,34 @@ struct QueueState {
     avail_idx: u16,
     used_idx: u16,
     in_flight: u16,
+    head_stride: u16,
+    head_capacity: u16,
 }
 
 impl QueueState {
     fn new(size: u16, memory: QueueMemory) -> Self {
+        let head_stride = DESCRIPTOR_STRIDE;
+        let head_capacity = size / head_stride;
         Self {
             size,
             memory,
             avail_idx: 0,
             used_idx: 0,
             in_flight: 0,
+            head_stride,
+            head_capacity,
         }
     }
 
+    fn head_capacity(&self) -> u16 {
+        self.head_capacity
+    }
+
     fn push(&mut self, head: u16) -> Result<(), QueueError> {
-        if self.in_flight >= self.size {
+        if self.in_flight >= self.head_capacity {
             return Err(QueueError::QueueFull);
         }
+        debug_assert_eq!(head % self.head_stride, 0);
         let mut slices = self.memory.slices();
         let slot = (self.avail_idx % self.size) as usize;
         slices.avail.ring()[slot] = head;
@@ -639,6 +708,8 @@ impl QueueInterrupt {
     }
 
     fn notify(&self) {
+        // NOTE: IRQs are currently not integrated into the wait path.
+        // This flag exists for future interrupt-driven completion handling.
         self.pending.store(true, Ordering::Release);
     }
 }
@@ -697,10 +768,6 @@ impl NetBuffer {
         self.data_offset
     }
 
-    fn total_len(&self) -> usize {
-        self.data_offset + self.data_len
-    }
-
     fn total_len_for_payload(&self, payload_len: usize) -> usize {
         self.data_offset + payload_len
     }
@@ -711,6 +778,10 @@ impl NetBuffer {
 
     fn header_phys(&self) -> PhysAddr {
         self.region.phys_base()
+    }
+
+    fn data_phys(&self) -> Option<PhysAddr> {
+        self.region.phys_base().checked_add(self.data_offset)
     }
 
     fn header_ptr(&self) -> *mut VirtioNetHeader {
@@ -751,6 +822,25 @@ impl NetBuffer {
         data[..frame.len()].copy_from_slice(frame);
         Ok(())
     }
+}
+
+fn write_rx_descriptors(queue: &mut QueueState, head: u16, buffer: &NetBuffer) {
+    let header_len = buffer.header_len();
+    let slices = queue.memory.slices();
+    let head_index = head as usize;
+    let data_index = head_index + 1;
+    slices.descriptors[head_index] = Descriptor {
+        addr: buffer.header_phys().as_raw() as u64,
+        len: header_len as u32,
+        flags: DescriptorFlags::NEXT.bits() | DescriptorFlags::WRITE.bits(),
+        next: head + 1,
+    };
+    slices.descriptors[data_index] = Descriptor {
+        addr: buffer.data_phys().expect("rx data phys missing").as_raw() as u64,
+        len: buffer.data_len() as u32,
+        flags: DescriptorFlags::WRITE.bits(),
+        next: 0,
+    };
 }
 
 #[cfg(test)]
@@ -805,8 +895,8 @@ mod tests {
 
         let transport = MockTransport::default();
         let mut device = VirtioNetDevice::new("testnet".into(), transport).expect("device init");
-        device.set_completion_hook(|queue| {
-            queue.test_complete(0);
+        device.set_completion_hook(|queue, head| {
+            queue.test_complete_with_id(head as u32, 0);
         });
         let frame = [0x11u8; 60];
         device.transmit_frame(&frame).expect("tx");
@@ -906,6 +996,46 @@ mod tests {
                 .test_transmit_with_timeout(&frame, 1_000_000)
                 .expect("tx completion");
         });
+    }
+
+    #[kernel_test_case]
+    fn virtio_net_tx_reuses_descriptor() {
+        println!("[test] virtio_net_tx_reuses_descriptor");
+
+        let transport = MockTransport::default();
+        let mut device = VirtioNetDevice::new("testnet".into(), transport).expect("device init");
+        device.set_completion_hook(|queue, head| {
+            queue.test_complete_with_id(head as u32, 0);
+        });
+
+        let frame = [0xABu8; 60];
+        device.transmit_frame(&frame).expect("tx 1");
+        device.transmit_frame(&frame).expect("tx 2");
+    }
+
+    #[kernel_test_case]
+    fn virtio_net_rx_reinitializes_descriptors() {
+        println!("[test] virtio_net_rx_reinitializes_descriptors");
+
+        let transport = MockTransport::default();
+        let mut device = VirtioNetDevice::new("testnet".into(), transport).expect("device init");
+
+        let header_len = device.rx_buffers[0].header_len();
+        let used_len = header_len as u32;
+        device.rx_queue.test_complete_with_id(0, used_len);
+
+        let mut out = [0u8; 16];
+        let _ = device.receive_frame(&mut out).expect("rx");
+
+        let mut slices = device.rx_queue.memory.slices();
+        let desc0 = slices.descriptors[0];
+        let desc1 = slices.descriptors[1];
+        assert_eq!(
+            desc0.flags,
+            DescriptorFlags::NEXT.bits() | DescriptorFlags::WRITE.bits()
+        );
+        assert_eq!(desc0.next, 1);
+        assert_eq!(desc1.flags, DescriptorFlags::WRITE.bits());
     }
 
     #[derive(Clone)]

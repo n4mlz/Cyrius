@@ -27,10 +27,11 @@
 - Unit tests rely on a mock transport plus a test-only completion hook that simulates device acknowledgements by directly mutating the used ring, enabling deterministic verification of descriptor layout and data copying without QEMU.
 
 ## VirtIO Network Driver (`net.rs`)
-- Implements a minimal virtio-net data path (one RX queue + one TX queue) with a single-descriptor buffer layout to keep early bring-up simple.
-- Negotiates only MAC address and link-status features, leaving offloads disabled until the TCP/IP stack is integrated.
-- RX buffers are pre-posted during initialisation; completed descriptors are recycled immediately after copying the payload.
-- TX submits a single in-flight frame and waits for completion, matching the synchronous `NetworkDevice` contract.
+- Implements a minimal virtio-net data path (one RX queue + one TX queue) using a two-descriptor chain (header + payload). This is a deliberate simplification and assumes one packet maps to exactly two descriptors.
+- Negotiates only MAC address and link-status features, leaving offloads disabled until the TCP/IP stack is integrated. Unsupported features must remain disabled until the header is parsed properly.
+- RX buffers are pre-posted during initialisation; completed descriptors are reinitialised before being recycled. The current RX path assumes a single buffer per packet and does not handle merged buffers yet.
+- TX uses a small free list of descriptor heads and waits synchronously for completion; completion ordering and pipelining are not handled yet.
+- IRQ plumbing is present but the wait path is polling-only; interrupts are not wired into completion handling at this stage.
 - Integration tests rely on QEMU attaching a `virtio-net-pci` device during `cargo xtask test`, while unit tests use a mock transport and manual used-ring updates.
 
 ## Testing Strategy
