@@ -318,6 +318,34 @@ impl<T: VirtioNetTransport + VirtioIrqTransport> VirtioNetDevice<T> {
     pub(self) fn set_completion_hook(&mut self, hook: fn(&mut QueueState)) {
         self.completion_hook = Some(hook);
     }
+
+    #[cfg(test)]
+    fn test_transmit_with_timeout(
+        &mut self,
+        frame: &[u8],
+        spins: usize,
+    ) -> Result<(), VirtioNetError> {
+        self.tx_buffer.prepare_tx(frame)?;
+        self.prepare_tx_descriptor(frame.len());
+        if let Some(irq) = self.queue_irq {
+            irq.arm();
+        }
+        self.tx_queue.push(0);
+        self.transport
+            .notify_queue(VIRTIO_NET_TX_QUEUE_INDEX)
+            .map_err(VirtioNetError::Transport)?;
+        #[cfg(test)]
+        if let Some(hook) = self.completion_hook {
+            hook(&mut self.tx_queue);
+        }
+        for _ in 0..spins {
+            if self.tx_queue.pop_used().is_some() {
+                return Ok(());
+            }
+            core::hint::spin_loop();
+        }
+        Err(VirtioNetError::TxTimeout)
+    }
 }
 
 impl<T: VirtioNetTransport + VirtioIrqTransport> Device for VirtioNetDevice<T> {
@@ -497,6 +525,7 @@ pub enum VirtioNetError {
     RxOverflow { capacity: usize, received: usize },
     InvalidRxDescriptor(usize),
     ShortRx(usize),
+    TxTimeout,
     Interrupt(VirtioIrqError),
     InterruptController(InterruptError),
 }
@@ -770,6 +799,38 @@ mod tests {
     }
 
     #[kernel_test_case]
+    fn virtio_net_rejects_large_frame() {
+        println!("[test] virtio_net_rejects_large_frame");
+
+        let transport = MockTransport::default();
+        let mut device = VirtioNetDevice::new("testnet".into(), transport).expect("device init");
+        let frame = [0u8; MAX_FRAME_SIZE + 1];
+        match device.transmit_frame(&frame) {
+            Err(VirtioNetError::FrameTooLarge(_)) => {}
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn virtio_net_rx_reports_small_buffer() {
+        println!("[test] virtio_net_rx_reports_small_buffer");
+
+        let transport = MockTransport::default();
+        let mut device = VirtioNetDevice::new("testnet".into(), transport).expect("device init");
+
+        let header_len = device.rx_buffers[0].header_len();
+        let payload_len = 64;
+        let used_len = (header_len + payload_len) as u32;
+        device.rx_queue.test_complete_with_id(0, used_len);
+
+        let mut out = [0u8; 32];
+        match device.receive_frame(&mut out) {
+            Err(VirtioNetError::BufferTooSmall { .. }) => {}
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
     fn virtio_net_rx_polls_frame() {
         println!("[test] virtio_net_rx_polls_frame");
 
@@ -805,6 +866,31 @@ mod tests {
             let device = devices[0].lock();
             let mac = device.mac_address();
             assert!(mac.iter().any(|byte| *byte != 0));
+        });
+    }
+
+    /// Sends a best-effort Ethernet frame through the QEMU-backed virtio-net device.
+    ///
+    /// # Implicit dependency
+    /// Relies on `xtask::run_qemu` attaching a `virtio-net-pci` device with user networking
+    /// during `cargo xtask test`.
+    #[kernel_test_case]
+    fn virtio_net_tx_integration() {
+        println!("[test] virtio_net_tx_integration");
+
+        with_devices(|devices| {
+            assert!(
+                !devices.is_empty(),
+                "virtio-net integration test requires a network device"
+            );
+            let mut device = devices[0].lock();
+            let mut frame = [0u8; 60];
+            frame[..6].fill(0xFF);
+            frame[6..12].copy_from_slice(&device.mac_address());
+            frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes()); // ARP ether type
+            device
+                .test_transmit_with_timeout(&frame, 1_000_000)
+                .expect("tx completion");
         });
     }
 
