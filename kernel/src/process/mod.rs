@@ -42,14 +42,16 @@ impl ProcessFs {
     }
 
     fn install_stdio(&self) {
-        let tty = crate::fs::tty::global_tty();
+        let tty = crate::fs::devfs::global_tty_node();
         self.fd_table
-            .open_fixed(0, tty.clone())
+            .open_fixed_device(0, tty.clone())
             .expect("install stdin");
         self.fd_table
-            .open_fixed(1, tty.clone())
+            .open_fixed_device(1, tty.clone())
             .expect("install stdout");
-        self.fd_table.open_fixed(2, tty).expect("install stderr");
+        self.fd_table
+            .open_fixed_device(2, tty)
+            .expect("install stderr");
     }
 
     pub fn set_cwd(&self, path: VfsPath) {

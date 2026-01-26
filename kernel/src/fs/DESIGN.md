@@ -11,8 +11,10 @@
   container VFS instead of the global VFS.
 - Common filesystem helpers that operate directly on `Directory`/`File` live in `fs::ops`; any
   process-aware path handling stays in `process::fs`.
-- A global tty implements the `File` trait so processes can install stdin/stdout/stderr in their
-  `FdTable` without exposing UART details.
+- The VFS differentiates regular files from device nodes; device nodes implement `DeviceNode` and
+  expose `FileType::CharDevice` metadata.
+- Container VFS construction injects `/dev/tty` and `/dev/console` device nodes backed by the
+  global tty device (via `fs::devfs`).
 - TTY reads drain the buffered input first; only when no buffered bytes are available does the
   implementation consult the hardware console to avoid blocking after partial reads.
 
@@ -27,6 +29,8 @@
   at the root so callers (process VFS ops, tar extraction, loader) share consistent behaviour.
 - Process FDs advance offsets on successful reads/writes. Write/mmap are supported only by
   filesystems that opt in (e.g. memfs); read-only filesystems return `ReadOnly`.
+- Control-plane operations (ioctl-style) are routed through `DeviceNode::control`, keeping ioctl
+  out of the regular `File` abstraction while still exposing it through file descriptors.
 - `FileSystemProbe` abstracts per-filesystem probing so boot-time selection can iterate through
   candidate block devices without hard-coding driver logic in the kernel entrypoint.
 

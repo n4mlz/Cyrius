@@ -2,6 +2,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::fs::{DirEntry, Fd, NodeRef, Vfs, VfsError, VfsPath, read_to_end_with_vfs, with_vfs};
+use crate::util::stream::{ControlError, ControlRequest};
 
 use super::{PROCESS_TABLE, ProcessHandle, ProcessId, ProcessVfs};
 
@@ -27,11 +28,11 @@ fn with_process_vfs<R>(
 pub fn open_path(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
     let abs = VfsPath::resolve(raw_path, &process.cwd())?;
-    let file = with_process_vfs(&process, |vfs| match vfs.open_absolute(&abs)? {
-        NodeRef::File(file) => Ok(file),
+    match with_process_vfs(&process, |vfs| vfs.open_absolute(&abs))? {
+        NodeRef::File(file) => process.fd_table().open_file(file),
+        NodeRef::Device(device) => process.fd_table().open_device(device),
         NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
-    })?;
-    process.fd_table().open_file(file)
+    }
 }
 
 pub fn open_path_with_create(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
@@ -39,6 +40,7 @@ pub fn open_path_with_create(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsEr
     let abs = VfsPath::resolve(raw_path, &process.cwd())?;
     match with_process_vfs(&process, |vfs| vfs.open_absolute(&abs)) {
         Ok(NodeRef::File(file)) => process.fd_table().open_file(file),
+        Ok(NodeRef::Device(device)) => process.fd_table().open_device(device),
         Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
         Err(VfsError::NotFound) => {
             let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
@@ -50,7 +52,9 @@ pub fn open_path_with_create(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsEr
                 .to_string();
             let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
                 NodeRef::Directory(dir) => Ok(dir),
-                NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+                NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => {
+                    Err(VfsError::NotDirectory)
+                }
             })?;
             let file = dir.create_file(&name)?;
             process.fd_table().open_file(file)
@@ -74,12 +78,21 @@ pub fn close_fd(pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
     process.fd_table().close(fd)
 }
 
+pub fn control_fd(
+    pid: ProcessId,
+    fd: Fd,
+    request: &ControlRequest<'_>,
+) -> Result<u64, ControlError> {
+    let process = process_handle(pid).map_err(|_| ControlError::Invalid)?;
+    process.fd_table().control(fd, request)
+}
+
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
     let abs = VfsPath::resolve(raw_path, &process.cwd())?;
     let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&abs)? {
         NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+        NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
     })?;
     process.set_cwd(abs);
     // Keep dir alive by ensuring mount lookup remains valid; cwd path suffices.
@@ -105,7 +118,7 @@ pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
         .to_string();
     let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
         NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+        NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
     })?;
     dir.remove(&name)
 }
@@ -119,7 +132,9 @@ pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), Vfs
             let _ = f.write_at(0, data)?;
             Ok(())
         }
-        Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
+        Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) | Ok(NodeRef::Device(_)) => {
+            Err(VfsError::NotFile)
+        }
         Err(VfsError::NotFound) => {
             let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
             let name = abs
@@ -130,7 +145,9 @@ pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), Vfs
                 .to_string();
             let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
                 NodeRef::Directory(dir) => Ok(dir),
-                NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+                NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => {
+                    Err(VfsError::NotDirectory)
+                }
             })?;
             let file = dir.create_file(&name)?;
             file.truncate(0)?;
@@ -153,7 +170,7 @@ pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
         .to_string();
     let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
         NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+        NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
     })?;
     match dir.create_dir(&name) {
         Ok(_) => Ok(()),
@@ -175,7 +192,7 @@ pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsE
 
     let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
         NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+        NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
     })?;
 
     dir.create_symlink(&name, target)?;
@@ -200,10 +217,13 @@ pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result
             NodeRef::File(f) => NodeRef::File(f),
             NodeRef::Directory(_) => return Err(VfsError::NotDirectory),
             NodeRef::Symlink(_) => return Err(VfsError::NotFile),
+            NodeRef::Device(_) => return Err(VfsError::NotFile),
         };
         let dir = match vfs.open_absolute(&parent)? {
             NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
+            NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => {
+                Err(VfsError::NotDirectory)
+            }
         }?;
         Ok((node, dir))
     })?;

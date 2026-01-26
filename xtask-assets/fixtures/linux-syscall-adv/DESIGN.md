@@ -2,7 +2,7 @@
 
 ## Purpose
 - Exercise Linux-compatible syscalls beyond the minimal read/write/open/close path.
-- Cover `writev`, `stat`, `mmap`, `munmap`, `brk`, `arch_prctl`, `fork`, `execve`, and `wait4` in one deterministic run.
+- Cover `writev`, `stat`, `ioctl` (TIOCGWINSZ), `mmap`, `munmap`, `brk`, `arch_prctl`, `fork`, `execve`, and `wait4` in one deterministic run.
 
 ## Notes
 - Built as a static/PIE ELF with no libc dependency.

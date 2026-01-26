@@ -54,6 +54,7 @@ fn encode_error(err: SysError) -> u64 {
         SysError::InvalidArgument => HostErrno::InvalidArgument as u64,
         SysError::NotFound => HostErrno::NotFound as u64,
         SysError::BadAddress => HostErrno::BadAddress as u64,
+        SysError::NotTty => HostErrno::InvalidArgument as u64,
     }
 }
 

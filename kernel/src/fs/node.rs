@@ -1,10 +1,12 @@
 use alloc::sync::Arc;
 
 use super::{PathComponent, VfsError};
+use crate::util::stream::{ControlError, ControlRequest};
 
 #[derive(Clone)]
 pub enum NodeRef {
     File(Arc<dyn File>),
+    Device(Arc<dyn DeviceNode>),
     Directory(Arc<dyn Directory>),
     Symlink(Arc<dyn Symlink>),
 }
@@ -13,6 +15,7 @@ impl NodeRef {
     pub fn metadata(&self) -> Result<Metadata, VfsError> {
         match self {
             NodeRef::File(f) => f.metadata(),
+            NodeRef::Device(d) => d.metadata(),
             NodeRef::Directory(d) => d.metadata(),
             NodeRef::Symlink(s) => s.metadata(),
         }
@@ -21,6 +24,7 @@ impl NodeRef {
     pub fn kind(&self) -> FileType {
         match self {
             NodeRef::File(_) => FileType::File,
+            NodeRef::Device(_) => FileType::CharDevice,
             NodeRef::Directory(_) => FileType::Directory,
             NodeRef::Symlink(_) => FileType::Symlink,
         }
@@ -32,6 +36,7 @@ pub enum FileType {
     File,
     Directory,
     Symlink,
+    CharDevice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +66,18 @@ pub trait File: Send + Sync {
     fn truncate(&self, _len: usize) -> Result<(), VfsError> {
         Err(VfsError::ReadOnly)
     }
+}
+
+pub trait DeviceNode: Send + Sync {
+    fn metadata(&self) -> Result<Metadata, VfsError>;
+
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError>;
+
+    fn write_at(&self, _offset: usize, _data: &[u8]) -> Result<usize, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError>;
 }
 
 pub trait Directory: Send + Sync {

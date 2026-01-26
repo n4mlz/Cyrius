@@ -6,6 +6,7 @@ use core::convert::TryFrom;
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
+pub mod devfs;
 pub mod fat32;
 mod fd;
 pub mod init;
@@ -14,10 +15,9 @@ mod node;
 pub mod ops;
 mod path;
 pub mod probe;
-pub mod tty;
 
 pub use fd::{Fd, FdTable};
-pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};
+pub use node::{DeviceNode, DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};
 use path::normalize_components;
 pub use path::{PathComponent, VfsPath};
 
@@ -90,7 +90,9 @@ impl Vfs {
         let node = self.resolve_from(mount.root.clone(), Vec::new(), tail, 0)?;
         let dir = match node {
             NodeRef::Directory(dir) => dir,
-            NodeRef::File(_) | NodeRef::Symlink(_) => return Err(VfsError::NotDirectory),
+            NodeRef::File(_) | NodeRef::Device(_) | NodeRef::Symlink(_) => {
+                return Err(VfsError::NotDirectory);
+            }
         };
 
         let mut entries = dir.read_dir()?;
@@ -188,6 +190,13 @@ impl Vfs {
                     Err(VfsError::NotDirectory)
                 }
             }
+            NodeRef::Device(device) => {
+                if rest.is_empty() {
+                    Ok(NodeRef::Device(device))
+                } else {
+                    Err(VfsError::NotDirectory)
+                }
+            }
         }
     }
 }
@@ -232,7 +241,7 @@ pub fn read_to_end(path: &VfsPath) -> Result<Vec<u8>, VfsError> {
 pub fn read_to_end_with_vfs(vfs: &Vfs, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
     let file = match vfs.open_absolute(path)? {
         NodeRef::File(file) => Ok(file),
-        NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
+        NodeRef::Device(_) | NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
     }?;
 
     let meta = file.metadata()?;

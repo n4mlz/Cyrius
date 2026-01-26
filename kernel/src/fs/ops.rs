@@ -41,6 +41,9 @@ fn copy_directory_recursive_inner(
                 let target = link.target()?;
                 let _ = dest.create_symlink(&name, &target)?;
             }
+            NodeRef::Device(_) => {
+                // Skip device nodes while copying into container-owned filesystems.
+            }
         }
     }
     Ok(())

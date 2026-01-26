@@ -127,10 +127,10 @@ fn parse_cwd(raw: &str) -> Result<VfsPath, ContainerStartError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::tty::global_tty;
     use crate::fs::Directory;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
-    use crate::fs::tty::global_tty;
     use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
     use crate::println;
     use crate::test::kernel_test_case;

@@ -441,6 +441,7 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
                             size: entry.file_size,
                         }))),
                         FileType::Symlink => Err(VfsError::NotFound),
+                        FileType::CharDevice => Err(VfsError::NotFound),
                     };
                 }
             }

@@ -209,6 +209,7 @@ fn format_ls(entries: Vec<DirEntry>) -> String {
             crate::fs::FileType::Directory => "d",
             crate::fs::FileType::File => "-",
             crate::fs::FileType::Symlink => "l",
+            crate::fs::FileType::CharDevice => "c",
         };
         let line = alloc::format!("{kind} {} {}\n", entry.metadata.size, entry.name);
         out.push_str(&line);

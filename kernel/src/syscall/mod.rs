@@ -27,6 +27,7 @@ pub enum SysError {
     InvalidArgument,
     NotFound,
     BadAddress,
+    NotTty,
 }
 
 pub type SysResult = Result<u64, SysError>;

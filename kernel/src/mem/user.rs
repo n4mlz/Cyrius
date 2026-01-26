@@ -9,6 +9,7 @@ use core::ptr::copy_nonoverlapping;
 use crate::mem::addr::{Addr, PageSize, VirtAddr, VirtIntoPtr};
 use crate::mem::manager;
 use crate::mem::paging::{PageTableOps, PhysMapper, TranslationError};
+use crate::util::stream::{ControlAccess, ControlError};
 
 const USER_SPACE_LIMIT: usize = 0x0000_8000_0000_0000;
 
@@ -124,6 +125,20 @@ impl<'a, T: PageTableOps> UserMemoryAccess<'a, T> {
 
     pub fn write_u64(&self, user_dst: VirtAddr, value: u64) -> Result<(), UserAccessError> {
         self.write_bytes(user_dst, &value.to_ne_bytes())
+    }
+}
+
+impl<'a, T: PageTableOps> ControlAccess for UserMemoryAccess<'a, T> {
+    fn read(&self, addr: u64, dst: &mut [u8]) -> Result<(), ControlError> {
+        let addr = VirtAddr::new(addr as usize);
+        self.read_bytes(addr, dst)
+            .map_err(|_| ControlError::BadAddress)
+    }
+
+    fn write(&self, addr: u64, src: &[u8]) -> Result<(), ControlError> {
+        let addr = VirtAddr::new(addr as usize);
+        self.write_bytes(addr, src)
+            .map_err(|_| ControlError::BadAddress)
     }
 }
 

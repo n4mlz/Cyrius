@@ -11,6 +11,7 @@
 
 ## I/O Helpers
 - `stream` defines generic read/write traits and a `StreamError` enum to standardise transport-layer errors.
+- `ControlOps`/`ControlRequest` live alongside the stream traits to model ioctl-style control paths and user-memory access.
 - `Writer` adapts the active `ArchDevice::Console` into `core::fmt::Write`, backing the global `print!`/`println!` macros for logging.
 
 ## Conventions

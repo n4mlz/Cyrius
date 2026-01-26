@@ -3,6 +3,8 @@
 ## Role and Scope
 - Define shared interfaces for byte-oriented character devices (UARTs, serial consoles, debug ports).
 - Extend the base `Device` trait with streaming operations by inheriting from `ReadOps` and `WriteOps`.
+- Control-plane operations live on the separate `ControlOps` trait so devices can opt in to ioctl-style
+  requests when needed.
 
 ## Trait Structure
 - `CharDevice` supplies a single associated `Error` type, unifying read/write error handling for simplicity.

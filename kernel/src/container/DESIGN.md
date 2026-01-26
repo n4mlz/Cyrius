@@ -24,6 +24,8 @@
   resolved rootfs directory; table management stays in `ContainerTable`/`ContainerRepository`.
 - The container VFS currently copies the rootfs directory into container-owned memfs, so the mount
   table and storage are isolated from the host VFS.
+- The container VFS injects minimal device nodes (`/dev/tty`, `/dev/console`) backed by the global
+  tty device to keep Linux userlands functional without a full devtmpfs implementation.
 - The container VFS backing is selected by `CONTAINER_VFS_BACKING` and currently hard-coded to
   ramfs.
 

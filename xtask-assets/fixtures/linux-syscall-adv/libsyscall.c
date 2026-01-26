@@ -76,6 +76,10 @@ isize sys_stat(const char *path, struct linux_stat *statbuf) {
     return sys_call3(SYS_stat, (isize)path, (isize)statbuf, 0);
 }
 
+isize sys_ioctl(int fd, isize request, void *argp) {
+    return sys_call3(SYS_ioctl, fd, request, (isize)argp);
+}
+
 isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset) {
     return sys_call6(SYS_mmap, (isize)addr, (isize)len, prot, flags, fd, offset);
 }

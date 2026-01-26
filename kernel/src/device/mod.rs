@@ -3,6 +3,7 @@ pub mod bus;
 pub mod char;
 pub mod net;
 pub mod probe;
+pub mod tty;
 pub mod virtio;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

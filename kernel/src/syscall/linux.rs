@@ -25,6 +25,7 @@ pub enum LinuxErrno {
     NoSys = 38,
     InvalidArgument = 22,
     BadAddress = 14,
+    NotTty = 25,
 }
 
 #[repr(u64)]
@@ -109,8 +110,8 @@ pub fn dispatch(
         Some(LinuxSyscall::Execve) => handle_execve(invocation, frame),
         Some(LinuxSyscall::Wait4) => DispatchResult::Completed(handle_wait4(invocation)),
         Some(LinuxSyscall::ArchPrctl) => DispatchResult::Completed(handle_arch_prctl(invocation)),
+        Some(LinuxSyscall::Ioctl) => DispatchResult::Completed(handle_ioctl(invocation)),
         // These syscalls are currently stubbed and always report success (0).
-        Some(LinuxSyscall::Ioctl) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::RtSigaction) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::RtSigprocmask) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetTidAddress) => DispatchResult::Completed(Ok(0)),
@@ -238,6 +239,22 @@ fn handle_writev(invocation: &SyscallInvocation) -> SysResult {
     .map_err(|_| SysError::BadAddress)??;
 
     Ok(total)
+}
+
+fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let cmd = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let arg = invocation.arg(2).unwrap_or(0);
+
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
+        proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
+    })
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -819,6 +836,15 @@ fn errno_for(err: SysError) -> u16 {
         SysError::InvalidArgument => LinuxErrno::InvalidArgument as u16,
         SysError::NotFound => LinuxErrno::NoEntry as u16,
         SysError::BadAddress => LinuxErrno::BadAddress as u16,
+        SysError::NotTty => LinuxErrno::NotTty as u16,
+    }
+}
+
+fn map_control_error(err: crate::util::stream::ControlError) -> SysError {
+    match err {
+        crate::util::stream::ControlError::Unsupported => SysError::NotTty,
+        crate::util::stream::ControlError::Invalid => SysError::InvalidArgument,
+        crate::util::stream::ControlError::BadAddress => SysError::BadAddress,
     }
 }
 
@@ -892,14 +918,17 @@ fn mode_from_meta(file_type: FileType) -> u32 {
     const S_IFREG: u32 = 0o100000;
     const S_IFDIR: u32 = 0o040000;
     const S_IFLNK: u32 = 0o120000;
+    const S_IFCHR: u32 = 0o020000;
     const REG_PERM: u32 = 0o644;
     const DIR_PERM: u32 = 0o755;
     const LNK_PERM: u32 = 0o777;
+    const CHR_PERM: u32 = 0o666;
 
     match file_type {
         FileType::File => S_IFREG | REG_PERM,
         FileType::Directory => S_IFDIR | DIR_PERM,
         FileType::Symlink => S_IFLNK | LNK_PERM,
+        FileType::CharDevice => S_IFCHR | CHR_PERM,
     }
 }
 
@@ -1261,7 +1290,6 @@ mod tests {
         println!("[test] stub_syscalls_return_success");
 
         for num in [
-            LinuxSyscall::Ioctl,
             LinuxSyscall::RtSigaction,
             LinuxSyscall::RtSigprocmask,
             LinuxSyscall::SetTidAddress,

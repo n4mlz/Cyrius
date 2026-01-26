@@ -112,10 +112,10 @@ fn absolute_path(origin_pid: ProcessId, raw: &str) -> Result<String, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::tty::global_tty;
     use crate::fs::Directory;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
-    use crate::fs::tty::global_tty;
     use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
     use crate::println;
     use crate::process::PROCESS_TABLE;
@@ -210,7 +210,7 @@ mod tests {
         let output = tty.drain_output();
         assert_eq!(
             output,
-            b"WRITEV\nSTAT:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+            b"WRITEV\nSTAT:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
         );
 
         if started {
