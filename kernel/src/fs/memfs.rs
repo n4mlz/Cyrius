@@ -7,9 +7,11 @@ use alloc::{
 
 use crate::util::spinlock::SpinLock;
 
-use super::{
-    DirEntry, Directory, File, FileType, Metadata, NodeRef, PathComponent, Symlink, VfsError,
-};
+use super::{DirEntry, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, VfsError};
+
+const MODE_REG: u32 = 0o644;
+const MODE_DIR: u32 = 0o755;
+const MODE_LNK: u32 = 0o777;
 
 /// Simple in-memory writable filesystem backed by a tree of nodes.
 pub struct MemDirectory {
@@ -17,7 +19,7 @@ pub struct MemDirectory {
 }
 
 struct DirInner {
-    entries: BTreeMap<String, NodeRef>,
+    entries: BTreeMap<String, Arc<dyn Node>>,
 }
 
 impl MemDirectory {
@@ -30,36 +32,14 @@ impl MemDirectory {
     }
 }
 
-struct MemFile {
+struct MemFileNode {
     data: SpinLock<Vec<u8>>,
 }
 
-impl MemFile {
+impl MemFileNode {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             data: SpinLock::new(Vec::new()),
-        })
-    }
-}
-
-struct MemSymlink {
-    target: String,
-}
-
-impl MemSymlink {
-    fn new(target: &str) -> Arc<Self> {
-        Arc::new(Self {
-            target: target.to_string(),
-        })
-    }
-}
-
-impl File for MemFile {
-    fn metadata(&self) -> Result<Metadata, VfsError> {
-        let data = self.data.lock();
-        Ok(Metadata {
-            file_type: FileType::File,
-            size: data.len() as u64,
         })
     }
 
@@ -91,27 +71,124 @@ impl File for MemFile {
         data.resize(len, 0);
         Ok(())
     }
+
+    fn size(&self) -> u64 {
+        let data = self.data.lock();
+        data.len() as u64
+    }
 }
 
-impl Symlink for MemSymlink {
-    fn metadata(&self) -> Result<Metadata, VfsError> {
-        Ok(Metadata {
-            file_type: FileType::Symlink,
-            size: self.target.len() as u64,
+struct MemSymlink {
+    target: String,
+}
+
+impl MemSymlink {
+    fn new(target: &str) -> Arc<Self> {
+        Arc::new(Self {
+            target: target.to_string(),
+        })
+    }
+}
+
+struct MemFileHandle {
+    node: Arc<MemFileNode>,
+    pos: SpinLock<usize>,
+    _flags: OpenOptions,
+}
+
+impl MemFileHandle {
+    fn new(node: Arc<MemFileNode>, flags: OpenOptions) -> Self {
+        Self {
+            node,
+            pos: SpinLock::new(0),
+            _flags: flags,
+        }
+    }
+}
+
+impl File for MemFileHandle {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, VfsError> {
+        let mut guard = self.pos.lock();
+        let read = self.node.read_at(*guard, buf)?;
+        *guard = guard.checked_add(read).ok_or(VfsError::Corrupted)?;
+        Ok(read)
+    }
+
+    fn write(&self, data: &[u8]) -> Result<usize, VfsError> {
+        let mut guard = self.pos.lock();
+        let written = self.node.write_at(*guard, data)?;
+        *guard = guard.checked_add(written).ok_or(VfsError::Corrupted)?;
+        Ok(written)
+    }
+}
+
+struct MemDirFile {
+    node: Arc<MemDirectory>,
+    _flags: OpenOptions,
+}
+
+impl MemDirFile {
+    fn new(node: Arc<MemDirectory>, flags: OpenOptions) -> Self {
+        Self {
+            node,
+            _flags: flags,
+        }
+    }
+}
+
+impl File for MemDirFile {
+    fn read(&self, _buf: &mut [u8]) -> Result<usize, VfsError> {
+        Err(VfsError::NotFile)
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
+        self.node.read_dir()
+    }
+}
+
+impl Node for MemFileNode {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Regular
+    }
+
+    fn stat(&self) -> Result<NodeStat, VfsError> {
+        Ok(NodeStat {
+            kind: NodeKind::Regular,
+            mode: MODE_REG,
+            uid: 0,
+            gid: 0,
+            size: self.size(),
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
         })
     }
 
-    fn target(&self) -> Result<String, VfsError> {
-        Ok(self.target.clone())
+    fn open(self: Arc<Self>, options: OpenOptions) -> Result<Arc<dyn File>, VfsError> {
+        Ok(Arc::new(MemFileHandle::new(self, options)))
     }
 }
 
-impl Directory for MemDirectory {
-    fn metadata(&self) -> Result<Metadata, VfsError> {
-        Ok(Metadata {
-            file_type: FileType::Directory,
+impl Node for MemDirectory {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Directory
+    }
+
+    fn stat(&self) -> Result<NodeStat, VfsError> {
+        Ok(NodeStat {
+            kind: NodeKind::Directory,
+            mode: MODE_DIR,
+            uid: 0,
+            gid: 0,
             size: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
         })
+    }
+
+    fn open(self: Arc<Self>, options: OpenOptions) -> Result<Arc<dyn File>, VfsError> {
+        Ok(Arc::new(MemDirFile::new(self, options)))
     }
 
     fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError> {
@@ -120,13 +197,13 @@ impl Directory for MemDirectory {
         for (name, node) in inner.entries.iter() {
             out.push(DirEntry {
                 name: name.clone(),
-                metadata: node.metadata()?,
+                stat: node.stat()?,
             });
         }
         Ok(out)
     }
 
-    fn lookup(&self, name: &PathComponent) -> Result<NodeRef, VfsError> {
+    fn lookup(&self, name: &PathComponent) -> Result<Arc<dyn Node>, VfsError> {
         let inner = self.inner.lock();
         inner
             .entries
@@ -135,31 +212,27 @@ impl Directory for MemDirectory {
             .ok_or(VfsError::NotFound)
     }
 
-    fn create_file(&self, name: &str) -> Result<Arc<dyn File>, VfsError> {
+    fn create_file(&self, name: &str) -> Result<Arc<dyn Node>, VfsError> {
         let mut inner = self.inner.lock();
         if inner.entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        let file = MemFile::new();
-        inner
-            .entries
-            .insert(name.to_string(), NodeRef::File(file.clone()));
+        let file = MemFileNode::new();
+        inner.entries.insert(name.to_string(), file.clone());
         Ok(file)
     }
 
-    fn create_dir(&self, name: &str) -> Result<Arc<dyn Directory>, VfsError> {
+    fn create_dir(&self, name: &str) -> Result<Arc<dyn Node>, VfsError> {
         let mut inner = self.inner.lock();
         if inner.entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
         let dir = MemDirectory::new();
-        inner
-            .entries
-            .insert(name.to_string(), NodeRef::Directory(dir.clone()));
+        inner.entries.insert(name.to_string(), dir.clone());
         Ok(dir)
     }
 
-    fn remove(&self, name: &str) -> Result<(), VfsError> {
+    fn unlink(&self, name: &str) -> Result<(), VfsError> {
         let mut inner = self.inner.lock();
         if inner.entries.remove(name).is_some() {
             Ok(())
@@ -168,24 +241,49 @@ impl Directory for MemDirectory {
         }
     }
 
-    fn create_symlink(&self, name: &str, target: &str) -> Result<Arc<dyn Symlink>, VfsError> {
+    fn create_symlink(&self, name: &str, target: &str) -> Result<Arc<dyn Node>, VfsError> {
         let mut inner = self.inner.lock();
         if inner.entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
         let link = MemSymlink::new(target);
-        inner
-            .entries
-            .insert(name.to_string(), NodeRef::Symlink(link.clone()));
+        inner.entries.insert(name.to_string(), link.clone());
         Ok(link)
     }
 
-    fn link(&self, name: &str, node: NodeRef) -> Result<(), VfsError> {
+    fn link(&self, name: &str, node: Arc<dyn Node>) -> Result<(), VfsError> {
         let mut inner = self.inner.lock();
         if inner.entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
         inner.entries.insert(name.to_string(), node);
         Ok(())
+    }
+}
+
+impl Node for MemSymlink {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Symlink
+    }
+
+    fn stat(&self) -> Result<NodeStat, VfsError> {
+        Ok(NodeStat {
+            kind: NodeKind::Symlink,
+            mode: MODE_LNK,
+            uid: 0,
+            gid: 0,
+            size: self.target.len() as u64,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
+        })
+    }
+
+    fn open(self: Arc<Self>, _options: OpenOptions) -> Result<Arc<dyn File>, VfsError> {
+        Err(VfsError::NotFile)
+    }
+
+    fn readlink(&self) -> Result<String, VfsError> {
+        Ok(self.target.clone())
     }
 }

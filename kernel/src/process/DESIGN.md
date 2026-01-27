@@ -60,8 +60,8 @@
 - `ProcessError` signals precondition violations and internal consistency issues to callers such as the scheduler.
 - The process table is guarded by a spin lock, while per-process state (`threads`, `cwd`) uses dedicated spin locks inside `Process`.
 - Path resolution and process-facing filesystem operations live in the `process::fs` helper module; reusable filesystem utilities live in `fs::ops`.
-- Standard file descriptors (0/1/2) are installed from the global tty device via `devfs` device
-  nodes when `ProcessFs` is created.
+- Standard file descriptors (0/1/2) are installed from the global tty device via `devfs` nodes and
+  `Node::open` when `ProcessFs` is created.
 - Locks are expected to be held briefly; interrupt handlers should avoid taking process-table locks.
 
 ## Future Extensions

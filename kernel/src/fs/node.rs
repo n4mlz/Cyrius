@@ -1,121 +1,99 @@
+use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use super::{PathComponent, VfsError};
 use crate::util::stream::{ControlError, ControlRequest};
 
-#[derive(Clone)]
-pub enum NodeRef {
-    File(Arc<dyn File>),
-    Device(Arc<dyn DeviceNode>),
-    Directory(Arc<dyn Directory>),
-    Symlink(Arc<dyn Symlink>),
-}
-
-impl NodeRef {
-    pub fn metadata(&self) -> Result<Metadata, VfsError> {
-        match self {
-            NodeRef::File(f) => f.metadata(),
-            NodeRef::Device(d) => d.metadata(),
-            NodeRef::Directory(d) => d.metadata(),
-            NodeRef::Symlink(s) => s.metadata(),
-        }
-    }
-
-    pub fn kind(&self) -> FileType {
-        match self {
-            NodeRef::File(_) => FileType::File,
-            NodeRef::Device(_) => FileType::CharDevice,
-            NodeRef::Directory(_) => FileType::Directory,
-            NodeRef::Symlink(_) => FileType::Symlink,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileType {
-    File,
+pub enum NodeKind {
+    Regular,
     Directory,
     Symlink,
     CharDevice,
+    BlockDevice,
+    Pipe,
+    Socket,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Metadata {
-    pub file_type: FileType,
+pub struct NodeStat {
+    pub kind: NodeKind,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub size: u64,
+    pub atime: u64,
+    pub mtime: u64,
+    pub ctime: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct DirEntry {
-    pub name: alloc::string::String,
-    pub metadata: Metadata,
+    pub name: String,
+    pub stat: NodeStat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenOptions {
+    pub flags: u64,
+}
+
+impl OpenOptions {
+    pub const fn new(flags: u64) -> Self {
+        Self { flags }
+    }
+}
+
+pub trait Node: Send + Sync {
+    fn kind(&self) -> NodeKind;
+    fn stat(&self) -> Result<NodeStat, VfsError>;
+    fn open(self: Arc<Self>, options: OpenOptions) -> Result<Arc<dyn File>, VfsError>;
+
+    fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError> {
+        Err(VfsError::NotDirectory)
+    }
+
+    fn lookup(&self, _name: &PathComponent) -> Result<Arc<dyn Node>, VfsError> {
+        Err(VfsError::NotDirectory)
+    }
+
+    fn create_file(&self, _name: &str) -> Result<Arc<dyn Node>, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn create_dir(&self, _name: &str) -> Result<Arc<dyn Node>, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn create_symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn Node>, VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn link(&self, _name: &str, _node: Arc<dyn Node>) -> Result<(), VfsError> {
+        Err(VfsError::ReadOnly)
+    }
+
+    fn readlink(&self) -> Result<String, VfsError> {
+        Err(VfsError::InvalidPath)
+    }
 }
 
 pub trait File: Send + Sync {
-    fn metadata(&self) -> Result<Metadata, VfsError>;
-
-    /// Reads up to `buf.len()` bytes starting from `offset`. Returns the number of bytes read.
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError>;
-
-    /// Writes up to `data.len()` bytes starting from `offset`. Returns the number of bytes written.
-    fn write_at(&self, _offset: usize, _data: &[u8]) -> Result<usize, VfsError> {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, VfsError>;
+    fn write(&self, _data: &[u8]) -> Result<usize, VfsError> {
         Err(VfsError::ReadOnly)
     }
 
-    /// Truncates or extends the file to `len` bytes.
-    fn truncate(&self, _len: usize) -> Result<(), VfsError> {
-        Err(VfsError::ReadOnly)
-    }
-}
-
-pub trait DeviceNode: Send + Sync {
-    fn metadata(&self) -> Result<Metadata, VfsError>;
-
-    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError>;
-
-    fn write_at(&self, _offset: usize, _data: &[u8]) -> Result<usize, VfsError> {
-        Err(VfsError::ReadOnly)
+    fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
+        Err(VfsError::NotDirectory)
     }
 
-    fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError>;
-}
-
-pub trait Directory: Send + Sync {
-    fn metadata(&self) -> Result<Metadata, VfsError>;
-
-    /// Lists entries for this directory.
-    fn read_dir(&self) -> Result<alloc::vec::Vec<DirEntry>, VfsError>;
-
-    /// Locates a child entry by name.
-    fn lookup(&self, name: &PathComponent) -> Result<NodeRef, VfsError>;
-
-    /// Creates a new empty file entry and returns its handle.
-    fn create_file(&self, _name: &str) -> Result<Arc<dyn File>, VfsError> {
-        Err(VfsError::ReadOnly)
+    fn ioctl(&self, _request: &ControlRequest<'_>) -> Result<u64, ControlError> {
+        Err(ControlError::Unsupported)
     }
-
-    /// Creates a new directory and returns it.
-    fn create_dir(&self, _name: &str) -> Result<Arc<dyn Directory>, VfsError> {
-        Err(VfsError::ReadOnly)
-    }
-
-    /// Removes a file or directory entry.
-    fn remove(&self, _name: &str) -> Result<(), VfsError> {
-        Err(VfsError::ReadOnly)
-    }
-
-    /// Creates a symbolic link entry pointing at `target`.
-    fn create_symlink(&self, _name: &str, _target: &str) -> Result<Arc<dyn Symlink>, VfsError> {
-        Err(VfsError::ReadOnly)
-    }
-
-    /// Inserts a hard link to an existing node.
-    fn link(&self, _name: &str, _node: NodeRef) -> Result<(), VfsError> {
-        Err(VfsError::ReadOnly)
-    }
-}
-
-pub trait Symlink: Send + Sync {
-    fn metadata(&self) -> Result<Metadata, VfsError>;
-    fn target(&self) -> Result<alloc::string::String, VfsError>;
 }

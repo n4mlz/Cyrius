@@ -72,7 +72,7 @@ pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Directory;
+    use crate::fs::Node;
     use crate::fs::VfsPath;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
@@ -95,7 +95,10 @@ mod tests {
             .expect("create config");
         let json =
             br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"},"annotations":{"org.example/foo":"bar"}}"#;
-        config.write_at(0, json).expect("write config");
+        let handle = config
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open config");
+        handle.write(json).expect("write config");
 
         let container = CONTAINER_TABLE
             .create("demo", "/bundle")
@@ -135,8 +138,11 @@ mod tests {
         let config = bundle_dir
             .create_file("config.json")
             .expect("create config");
-        config
-            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
+        let handle = config
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open config");
+        handle
+            .write(br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
         CONTAINER_TABLE

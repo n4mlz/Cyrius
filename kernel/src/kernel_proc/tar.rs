@@ -37,7 +37,7 @@ pub fn extract_to_ramfs(
     };
     TarExtractor::ensure_dir_chain_static(pid, &base)?;
 
-    let fd = proc_fs::open_path(pid, archive_path).map_err(TarError::Fs)?;
+    let fd = proc_fs::open_path(pid, archive_path, 0).map_err(TarError::Fs)?;
     let mut reader = TarReader::new(pid, fd);
     let result = TarExtractor {
         pid,
@@ -536,7 +536,7 @@ mod tests {
     }
 
     fn read_all(pid: ProcessId, path: &str) -> Vec<u8> {
-        let fd = proc_fs::open_path(pid, path).expect("open path");
+        let fd = proc_fs::open_path(pid, path, 0).expect("open path");
         let mut buf = [0u8; 512];
         let mut out = Vec::new();
         loop {
@@ -565,12 +565,12 @@ mod tests {
                 let shared = SharedBlockDevice::from_arc(dev.clone());
                 if let Ok(fs) = FatFileSystem::new(shared) {
                     force_replace_root(MemDirectory::new());
-                    let root: Arc<dyn crate::fs::Directory> = fs.root_dir();
+                    let root: Arc<dyn crate::fs::Node> = fs.root_dir();
                     if mount_at(mount_path.clone(), root).is_err() {
                         continue;
                     }
                     let target_path = alloc::format!("/mnt/{file}");
-                    if proc_fs::open_path(pid, target_path.as_str()).is_ok() {
+                    if proc_fs::open_path(pid, target_path.as_str(), 0).is_ok() {
                         mounted = true;
                         break;
                     }

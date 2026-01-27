@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
-use crate::fs::{FileType, VfsPath, with_vfs};
+use crate::fs::NodeKind;
 use crate::mem::addr::{
     Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up,
 };
@@ -196,9 +196,9 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
     let fd = if create {
-        proc_fs::open_path_with_create(pid, &path)
+        proc_fs::open_path_with_create(pid, &path, flags)
     } else {
-        proc_fs::open_path(pid, &path)
+        proc_fs::open_path(pid, &path, flags)
     }
     .map_err(|_| SysError::InvalidArgument)?;
 
@@ -289,16 +289,13 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
         let user = UserMemoryAccess::new(table);
         read_cstring_with_user(&user, path_ptr)
     })?;
-    let cwd = proc_fs::cwd(pid).map_err(|_| SysError::InvalidArgument)?;
-    let abs = VfsPath::resolve(&path, &cwd).map_err(|_| SysError::InvalidArgument)?;
-    let node = with_vfs(|vfs| vfs.open_absolute(&abs)).map_err(|err| match err {
+    let stat = proc_fs::stat_path(pid, &path).map_err(|err| match err {
         crate::fs::VfsError::NotFound => SysError::NotFound,
         _ => SysError::InvalidArgument,
     })?;
-    let meta = node.metadata().map_err(|_| SysError::InvalidArgument)?;
 
-    let mode = mode_from_meta(meta.file_type);
-    let stat = LinuxStat::from_meta(mode, meta.size);
+    let mode = mode_from_meta(stat.kind);
+    let stat = LinuxStat::from_meta(mode, stat.size);
     let dst = VirtAddr::new(stat_ptr as usize);
     process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
@@ -914,21 +911,27 @@ fn current_pid() -> Result<u64, SysError> {
         .ok_or(SysError::InvalidArgument)
 }
 
-fn mode_from_meta(file_type: FileType) -> u32 {
+fn mode_from_meta(kind: NodeKind) -> u32 {
     const S_IFREG: u32 = 0o100000;
     const S_IFDIR: u32 = 0o040000;
     const S_IFLNK: u32 = 0o120000;
     const S_IFCHR: u32 = 0o020000;
+    const S_IFBLK: u32 = 0o060000;
+    const S_IFIFO: u32 = 0o010000;
+    const S_IFSOCK: u32 = 0o140000;
     const REG_PERM: u32 = 0o644;
     const DIR_PERM: u32 = 0o755;
     const LNK_PERM: u32 = 0o777;
     const CHR_PERM: u32 = 0o666;
 
-    match file_type {
-        FileType::File => S_IFREG | REG_PERM,
-        FileType::Directory => S_IFDIR | DIR_PERM,
-        FileType::Symlink => S_IFLNK | LNK_PERM,
-        FileType::CharDevice => S_IFCHR | CHR_PERM,
+    match kind {
+        NodeKind::Regular => S_IFREG | REG_PERM,
+        NodeKind::Directory => S_IFDIR | DIR_PERM,
+        NodeKind::Symlink => S_IFLNK | LNK_PERM,
+        NodeKind::CharDevice => S_IFCHR | CHR_PERM,
+        NodeKind::BlockDevice => S_IFBLK | CHR_PERM,
+        NodeKind::Pipe => S_IFIFO | CHR_PERM,
+        NodeKind::Socket => S_IFSOCK | CHR_PERM,
     }
 }
 
@@ -1054,7 +1057,7 @@ impl LinuxStat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Directory;
+    use crate::fs::Node;
     use crate::mem::addr::VirtAddr;
     use crate::println;
     use crate::process::PROCESS_TABLE;
@@ -1146,7 +1149,8 @@ mod tests {
         crate::fs::force_replace_root(root.clone());
         let file = root.create_file("note").expect("create file");
         let payload = b"abc";
-        let _ = file.write_at(0, payload).expect("write");
+        let handle = file.open(crate::fs::OpenOptions::new(0)).expect("open");
+        let _ = handle.write(payload).expect("write");
 
         let mut stat = core::mem::MaybeUninit::<LinuxStat>::zeroed();
         let path = b"/note\0";

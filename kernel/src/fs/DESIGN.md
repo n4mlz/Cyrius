@@ -3,20 +3,15 @@
 ## Scope
 - Provides a read/write VFS surface with mount support: path parsing (absolute or relative to cwd,
   rejects `..`), a root mount, and basic metadata exposure.
-- Exposes core traits: `Directory` (lookup/list/create/remove) and `File` (read/write/truncate,
-  offset-based), wrapped in `NodeRef` so callers can resolve paths without leaking concrete
-  filesystem types.
-- Each process owns its own `FdTable` and current working directory; `open` binds a file descriptor
-  to that process at allocation time. Container-backed processes route path resolution through the
-  container VFS instead of the global VFS.
-- Common filesystem helpers that operate directly on `Directory`/`File` live in `fs::ops`; any
-  process-aware path handling stays in `process::fs`.
-- The VFS differentiates regular files from device nodes; device nodes implement `DeviceNode` and
-  expose `FileType::CharDevice` metadata.
-- Container VFS construction injects `/dev/tty` and `/dev/console` device nodes backed by the
-  global tty device (via `fs::devfs`).
-- TTY reads drain the buffered input first; only when no buffered bytes are available does the
-  implementation consult the hardware console to avoid blocking after partial reads.
+- Exposes a persistent `Node` abstraction (inode-like) that owns metadata and open-time validation,
+  while `File` represents per-open state (offset/flags) and handles I/O operations.
+- Each process owns its own `FdTable` and current working directory; `open` resolves a `Node`,
+  calls `Node::open`, and binds the resulting `File` to an FD in the process table. Container
+  processes route path resolution through the container VFS instead of the global VFS.
+- Common filesystem helpers that operate directly on `Node` live in `fs::ops`; any process-aware
+  path handling stays in `process::fs`.
+- The VFS differentiates node kinds via `NodeKind` (regular/dir/symlink/device/etc.); device nodes
+  are modelled as `NodeKind::CharDevice` and are exposed under `/dev` by `fs::devfs`.
 
 ## VFS Behaviour
 - `mount_root` installs a root filesystem; additional filesystems can be mounted at absolute paths
@@ -27,10 +22,10 @@
 - `VfsPath::parse` normalises out empty/`.` segments and rejects `..` to keep raw paths strict.
 - `VfsPath::resolve` handles relative inputs by folding `..` segments against a base path, clamping
   at the root so callers (process VFS ops, tar extraction, loader) share consistent behaviour.
-- Process FDs advance offsets on successful reads/writes. Write/mmap are supported only by
-  filesystems that opt in (e.g. memfs); read-only filesystems return `ReadOnly`.
-- Control-plane operations (ioctl-style) are routed through `DeviceNode::control`, keeping ioctl
-  out of the regular `File` abstraction while still exposing it through file descriptors.
+- Process FDs advance offsets on successful reads/writes. Write support is provided by filesystems
+  that opt in (e.g. memfs); read-only filesystems return `ReadOnly`.
+- Control-plane operations (ioctl-style) are routed through `File::ioctl` and only device-backed
+  `File` implementations opt in, keeping ioctl out of regular file nodes.
 - `FileSystemProbe` abstracts per-filesystem probing so boot-time selection can iterate through
   candidate block devices without hard-coding driver logic in the kernel entrypoint.
 

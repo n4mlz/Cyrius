@@ -267,7 +267,8 @@ mod tests {
         Arch,
         api::{ArchPageTableAccess, ArchThread},
     };
-    use crate::fs::{Directory, memfs::MemDirectory};
+    use crate::fs::Node;
+    use crate::fs::memfs::MemDirectory;
     use crate::mem::addr::{Addr, VirtIntoPtr};
     use crate::mem::paging::{MapError, PageTableOps, PhysMapper};
     use crate::println;
@@ -294,7 +295,10 @@ mod tests {
 
         let elf = test_elf_image();
         let file = root.create_file("demo").expect("create file");
-        let _ = file.write_at(0, &elf).expect("write image");
+        let handle = file
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open file");
+        let _ = handle.write(&elf).expect("write image");
 
         let program = load_elf(pid, "/demo").expect("load ELF");
         assert_eq!(program.entry.as_raw(), 0x400100);
@@ -374,7 +378,10 @@ mod tests {
 
         let elf = test_pie_image();
         let file = root.create_file("pie").expect("create file");
-        let _ = file.write_at(0, &elf).expect("write image");
+        let handle = file
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open file");
+        let _ = handle.write(&elf).expect("write image");
 
         let program = load_elf(pid, "/pie").expect("load PIE");
         assert_eq!(program.load_bias.as_raw(), 0x400000);

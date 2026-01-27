@@ -143,7 +143,7 @@ fn shell_cd(pid: ProcessId, path: &str) -> Result<(), ShellError> {
 }
 
 fn shell_cat(pid: ProcessId, path: &str) -> Result<String, ShellError> {
-    let fd = proc_fs::open_path(pid, path).map_err(ShellError::Fs)?;
+    let fd = proc_fs::open_path(pid, path, 0).map_err(ShellError::Fs)?;
     let mut buf = [0u8; 128];
     let mut out = String::new();
     loop {
@@ -205,13 +205,16 @@ fn parse_command(line: &str) -> Result<CommandInvocation<'_>, ShellError> {
 fn format_ls(entries: Vec<DirEntry>) -> String {
     let mut out = String::new();
     for entry in entries {
-        let kind = match entry.metadata.file_type {
-            crate::fs::FileType::Directory => "d",
-            crate::fs::FileType::File => "-",
-            crate::fs::FileType::Symlink => "l",
-            crate::fs::FileType::CharDevice => "c",
+        let kind = match entry.stat.kind {
+            crate::fs::NodeKind::Directory => "d",
+            crate::fs::NodeKind::Regular => "-",
+            crate::fs::NodeKind::Symlink => "l",
+            crate::fs::NodeKind::CharDevice => "c",
+            crate::fs::NodeKind::BlockDevice => "b",
+            crate::fs::NodeKind::Pipe => "p",
+            crate::fs::NodeKind::Socket => "s",
         };
-        let line = alloc::format!("{kind} {} {}\n", entry.metadata.size, entry.name);
+        let line = alloc::format!("{kind} {} {}\n", entry.stat.size, entry.name);
         out.push_str(&line);
     }
     out

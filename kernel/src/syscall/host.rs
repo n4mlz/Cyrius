@@ -98,7 +98,7 @@ fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Directory;
+    use crate::fs::Node;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -117,8 +117,11 @@ mod tests {
         let config = bundle_dir
             .create_file("config.json")
             .expect("create config");
-        config
-            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
+        let handle = config
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open config");
+        handle
+            .write(br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
         let id = "syscall-demo";

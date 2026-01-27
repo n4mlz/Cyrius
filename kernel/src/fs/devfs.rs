@@ -5,8 +5,9 @@ use crate::device::char::CharDevice;
 use crate::device::tty;
 use crate::util::stream::{ControlError, ControlOps, ControlRequest};
 
-use super::Directory;
-use super::{DeviceNode, FileType, Metadata, NodeRef, PathComponent, VfsError};
+use super::File;
+use super::PathComponent;
+use super::{Node, NodeKind, NodeStat, OpenOptions, VfsError};
 
 struct CharDeviceNode<D> {
     device: Arc<D>,
@@ -18,53 +19,86 @@ impl<D> CharDeviceNode<D> {
     }
 }
 
-impl<D> DeviceNode for CharDeviceNode<D>
+impl<D> Node for CharDeviceNode<D>
 where
     D: Device + CharDevice + ControlOps + Send + Sync + 'static,
 {
-    fn metadata(&self) -> Result<Metadata, VfsError> {
-        Ok(Metadata {
-            file_type: FileType::CharDevice,
+    fn kind(&self) -> NodeKind {
+        NodeKind::CharDevice
+    }
+
+    fn stat(&self) -> Result<NodeStat, VfsError> {
+        Ok(NodeStat {
+            kind: NodeKind::CharDevice,
+            mode: 0,
+            uid: 0,
+            gid: 0,
             size: 0,
+            atime: 0,
+            mtime: 0,
+            ctime: 0,
         })
     }
 
-    fn read_at(&self, _offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
+    fn open(self: Arc<Self>, _options: OpenOptions) -> Result<Arc<dyn File>, VfsError> {
+        Ok(Arc::new(DeviceFile::new(self.device.clone())))
+    }
+}
+
+struct DeviceFile<D> {
+    device: Arc<D>,
+}
+
+impl<D> DeviceFile<D> {
+    fn new(device: Arc<D>) -> Self {
+        Self { device }
+    }
+}
+
+impl<D> File for DeviceFile<D>
+where
+    D: Device + CharDevice + ControlOps + Send + Sync + 'static,
+{
+    fn read(&self, buf: &mut [u8]) -> Result<usize, VfsError> {
         self.device
             .read(buf)
             .map_err(|_| VfsError::UnderlyingDevice)
     }
 
-    fn write_at(&self, _offset: usize, data: &[u8]) -> Result<usize, VfsError> {
+    fn write(&self, data: &[u8]) -> Result<usize, VfsError> {
         self.device
             .write(data)
             .map_err(|_| VfsError::UnderlyingDevice)
     }
 
-    fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
+    fn ioctl(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
         self.device.control(request)
     }
 }
 
-pub fn global_tty_node() -> Arc<dyn DeviceNode> {
+pub fn global_tty_node() -> Arc<dyn Node> {
     CharDeviceNode::new(tty::global_tty())
 }
 
-pub fn install_default_nodes(root: &dyn Directory) -> Result<(), VfsError> {
+pub fn install_default_nodes(root: &dyn Node) -> Result<(), VfsError> {
+    if root.kind() != NodeKind::Directory {
+        return Err(VfsError::NotDirectory);
+    }
+
     let dev_dir = match root.lookup(&PathComponent::new("dev")) {
-        Ok(NodeRef::Directory(dir)) => dir,
+        Ok(dir) if dir.kind() == NodeKind::Directory => dir,
         Ok(_) => return Err(VfsError::NotDirectory),
         Err(VfsError::NotFound) => root.create_dir("dev")?,
         Err(err) => return Err(err),
     };
 
     let tty_node = global_tty_node();
-    let _ = dev_dir.remove("tty");
-    dev_dir.link("tty", NodeRef::Device(tty_node))?;
+    let _ = dev_dir.unlink("tty");
+    dev_dir.link("tty", tty_node)?;
 
     let console_node = global_tty_node();
-    let _ = dev_dir.remove("console");
-    dev_dir.link("console", NodeRef::Device(console_node))?;
+    let _ = dev_dir.unlink("console");
+    dev_dir.link("console", console_node)?;
 
     Ok(())
 }

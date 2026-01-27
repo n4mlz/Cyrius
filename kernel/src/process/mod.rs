@@ -43,14 +43,18 @@ impl ProcessFs {
 
     fn install_stdio(&self) {
         let tty = crate::fs::devfs::global_tty_node();
+        let tty_file = tty
+            .clone()
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open tty");
         self.fd_table
-            .open_fixed_device(0, tty.clone())
+            .open_fixed(0, tty_file.clone())
             .expect("install stdin");
         self.fd_table
-            .open_fixed_device(1, tty.clone())
+            .open_fixed(1, tty_file.clone())
             .expect("install stdout");
         self.fd_table
-            .open_fixed_device(2, tty)
+            .open_fixed(2, tty_file)
             .expect("install stderr");
     }
 

@@ -2,51 +2,35 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::{DeviceNode, File, VfsError};
+use super::{File, VfsError};
 use crate::util::spinlock::SpinLock;
-use crate::util::stream::{ControlError, ControlRequest};
 
 pub type Fd = u32;
 
 #[derive(Clone)]
-pub enum OpenEntry {
-    File(Arc<dyn File>),
-    Device(Arc<dyn DeviceNode>),
+pub struct FdEntry {
+    file: Arc<dyn File>,
+    close_on_exec: bool,
 }
 
-#[derive(Clone)]
-pub struct OpenHandle {
-    entry: OpenEntry,
-    offset: usize,
-}
-
-impl OpenHandle {
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, VfsError> {
-        let read = match &self.entry {
-            OpenEntry::File(file) => file.read_at(self.offset, buf)?,
-            OpenEntry::Device(dev) => dev.read_at(self.offset, buf)?,
-        };
-        self.offset = self.offset.checked_add(read).ok_or(VfsError::Corrupted)?;
-        Ok(read)
-    }
-
-    pub fn write(&mut self, data: &[u8]) -> Result<usize, VfsError> {
-        let written = match &self.entry {
-            OpenEntry::File(file) => file.write_at(self.offset, data)?,
-            OpenEntry::Device(dev) => dev.write_at(self.offset, data)?,
-        };
-        self.offset = self
-            .offset
-            .checked_add(written)
-            .ok_or(VfsError::Corrupted)?;
-        Ok(written)
-    }
-
-    pub fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
-        match &self.entry {
-            OpenEntry::File(_) => Err(ControlError::Unsupported),
-            OpenEntry::Device(dev) => dev.control(request),
+impl FdEntry {
+    pub fn new(file: Arc<dyn File>) -> Self {
+        Self {
+            file,
+            close_on_exec: false,
         }
+    }
+
+    pub fn file(&self) -> &Arc<dyn File> {
+        &self.file
+    }
+
+    pub fn close_on_exec(&self) -> bool {
+        self.close_on_exec
+    }
+
+    pub fn set_close_on_exec(&mut self, value: bool) {
+        self.close_on_exec = value;
     }
 }
 
@@ -66,26 +50,7 @@ impl FdTable {
     pub fn open_file(&self, file: Arc<dyn File>) -> Result<Fd, VfsError> {
         let mut guard = self.inner.lock();
         let fd = guard.allocate_fd(self.next_fd.fetch_add(1, Ordering::AcqRel));
-        guard.set(
-            fd,
-            OpenHandle {
-                entry: OpenEntry::File(file),
-                offset: 0,
-            },
-        )?;
-        Ok(fd)
-    }
-
-    pub fn open_device(&self, device: Arc<dyn DeviceNode>) -> Result<Fd, VfsError> {
-        let mut guard = self.inner.lock();
-        let fd = guard.allocate_fd(self.next_fd.fetch_add(1, Ordering::AcqRel));
-        guard.set(
-            fd,
-            OpenHandle {
-                entry: OpenEntry::Device(device),
-                offset: 0,
-            },
-        )?;
+        guard.set(fd, FdEntry::new(file))?;
         Ok(fd)
     }
 
@@ -94,41 +59,20 @@ impl FdTable {
         if guard.exists(fd) {
             return Err(VfsError::AlreadyExists);
         }
-        guard.set(
-            fd,
-            OpenHandle {
-                entry: OpenEntry::File(file),
-                offset: 0,
-            },
-        )?;
-        Ok(())
-    }
-
-    pub fn open_fixed_device(&self, fd: Fd, device: Arc<dyn DeviceNode>) -> Result<(), VfsError> {
-        let mut guard = self.inner.lock();
-        if guard.exists(fd) {
-            return Err(VfsError::AlreadyExists);
-        }
-        guard.set(
-            fd,
-            OpenHandle {
-                entry: OpenEntry::Device(device),
-                offset: 0,
-            },
-        )?;
+        guard.set(fd, FdEntry::new(file))?;
         Ok(())
     }
 
     pub fn read(&self, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError> {
-        let mut guard = self.inner.lock();
-        let file = guard.get_mut(fd)?;
-        file.read(buf)
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        entry.file().read(buf)
     }
 
     pub fn write(&self, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
-        let mut guard = self.inner.lock();
-        let file = guard.get_mut(fd)?;
-        file.write(data)
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        entry.file().write(data)
     }
 
     pub fn close(&self, fd: Fd) -> Result<(), VfsError> {
@@ -136,10 +80,9 @@ impl FdTable {
         guard.clear(fd)
     }
 
-    pub fn control(&self, fd: Fd, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
-        let mut guard = self.inner.lock();
-        let file = guard.get_mut(fd).map_err(|_| ControlError::Invalid)?;
-        file.control(request)
+    pub fn entry(&self, fd: Fd) -> Result<FdEntry, VfsError> {
+        let guard = self.inner.lock();
+        guard.get(fd).cloned()
     }
 }
 
@@ -150,7 +93,7 @@ impl Default for FdTable {
 }
 
 struct FdTableInner {
-    slots: Vec<Option<OpenHandle>>,
+    slots: Vec<Option<FdEntry>>,
 }
 
 impl FdTableInner {
@@ -169,7 +112,7 @@ impl FdTableInner {
         fd as Fd
     }
 
-    fn set(&mut self, fd: Fd, entry: OpenHandle) -> Result<(), VfsError> {
+    fn set(&mut self, fd: Fd, entry: FdEntry) -> Result<(), VfsError> {
         let index = fd as usize;
         if index >= self.slots.len() {
             self.slots.resize(index + 1, None);
@@ -185,10 +128,10 @@ impl FdTableInner {
             .is_some()
     }
 
-    fn get_mut(&mut self, fd: Fd) -> Result<&mut OpenHandle, VfsError> {
+    fn get(&self, fd: Fd) -> Result<&FdEntry, VfsError> {
         self.slots
-            .get_mut(fd as usize)
-            .and_then(|entry| entry.as_mut())
+            .get(fd as usize)
+            .and_then(|entry| entry.as_ref())
             .ok_or(VfsError::NotFound)
     }
 
