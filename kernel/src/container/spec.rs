@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::fs::devfs;
 use crate::fs::memfs::MemDirectory;
 use crate::fs::ops::copy_directory_recursive;
-use crate::fs::{Vfs, VfsError, VfsPath, read_to_end, with_vfs};
+use crate::fs::{Path, Vfs, VfsError, read_to_end, with_vfs};
 
 use super::{CONTAINER_VFS_BACKING, ContainerError, ContainerVfsBacking};
 
@@ -21,8 +21,8 @@ pub struct SpecMetadata {
 }
 
 impl SpecLoader {
-    pub fn load(bundle_path: &VfsPath) -> Result<Spec, ContainerError> {
-        let config_path = bundle_path.join(&VfsPath::parse("config.json")?)?;
+    pub fn load(bundle_path: &Path) -> Result<Spec, ContainerError> {
+        let config_path = bundle_path.join(&Path::parse("config.json")?)?;
         let bytes = read_to_end(&config_path)?;
         let text = core::str::from_utf8(&bytes).map_err(|_| ContainerError::ConfigNotUtf8)?;
 
@@ -40,11 +40,11 @@ impl SpecLoader {
     /// This uses the global VFS to locate the rootfs entry inside the bundle, then copies the
     /// directory tree into a container-owned memfs instance so storage is fully isolated.
     pub fn build_container_vfs(
-        bundle_path: &VfsPath,
+        bundle_path: &Path,
         spec: &Spec,
     ) -> Result<Arc<Vfs>, ContainerError> {
         let root = spec.root().as_ref().ok_or(ContainerError::MissingRoot)?;
-        let root_path = VfsPath::parse(root.path())?;
+        let root_path = Path::parse(root.path())?;
         let abs = if root_path.is_absolute() {
             root_path
         } else {

@@ -18,7 +18,7 @@ use alloc::{
 use crate::device::block::BlockDevice;
 use crate::util::spinlock::SpinLock;
 
-use super::{
+use crate::fs::{
     DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, VfsError,
 };
 
@@ -406,13 +406,7 @@ impl<D: BlockDevice + Send + 'static> Node for FatDirectory<D> {
     fn stat(&self) -> Result<NodeStat, VfsError> {
         Ok(NodeStat {
             kind: NodeKind::Directory,
-            mode: 0,
-            uid: 0,
-            gid: 0,
             size: u64::from(self.chain.len() as u32) * u64::from(self.volume.cluster_size),
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
         })
     }
 
@@ -528,13 +522,7 @@ impl<D: BlockDevice + Send + 'static> Node for FatFileNode<D> {
     fn stat(&self) -> Result<NodeStat, VfsError> {
         Ok(NodeStat {
             kind: NodeKind::Regular,
-            mode: 0,
-            uid: 0,
-            gid: 0,
             size: u64::from(self.size),
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
         })
     }
 
@@ -591,13 +579,7 @@ impl ParsedDirEntry {
     fn stat(&self) -> NodeStat {
         NodeStat {
             kind: self.kind,
-            mode: 0,
-            uid: 0,
-            gid: 0,
             size: u64::from(self.file_size),
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
         }
     }
 

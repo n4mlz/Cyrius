@@ -2,7 +2,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::fs::{
-    DirEntry, Fd, NodeKind, OpenOptions, Vfs, VfsError, VfsPath, read_to_end_with_vfs, with_vfs,
+    DirEntry, Fd, NodeKind, OpenOptions, Path, Vfs, VfsError, read_to_end_with_vfs, with_vfs,
 };
 use crate::util::stream::{ControlError, ControlRequest};
 
@@ -29,7 +29,7 @@ fn with_process_vfs<R>(
 
 pub fn open_path(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     let file = with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     })?;
@@ -38,7 +38,7 @@ pub fn open_path(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsEr
 
 pub fn open_path_with_create(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     match with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     }) {
@@ -91,7 +91,7 @@ pub fn control_fd(
 
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&abs))?;
     let _dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
     process.set_cwd(abs);
@@ -101,19 +101,19 @@ pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
 
 pub fn list_dir(pid: ProcessId, raw_path: &str) -> Result<Vec<DirEntry>, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     with_process_vfs(&process, |vfs| vfs.read_dir(&abs))
 }
 
 pub fn stat_path(pid: ProcessId, raw_path: &str) -> Result<crate::fs::NodeStat, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     with_process_vfs(&process, |vfs| vfs.stat_absolute(&abs))
 }
 
 pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = abs
         .components()
@@ -128,7 +128,7 @@ pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
 
 pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     match with_process_vfs(&process, |vfs| vfs.open_absolute(&abs, OpenOptions::new(0))) {
         Ok(file) => {
             let _ = file.write(data)?;
@@ -155,7 +155,7 @@ pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), Vfs
 
 pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = abs
         .components()
@@ -174,7 +174,7 @@ pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
 
 pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let link_abs = VfsPath::resolve(link_path, &process.cwd())?;
+    let link_abs = Path::resolve(link_path, &process.cwd())?;
     let parent = link_abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = link_abs
         .components()
@@ -191,8 +191,8 @@ pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsE
 
 pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let src_abs = VfsPath::resolve(existing_path, &process.cwd())?;
-    let link_abs = VfsPath::resolve(link_path, &process.cwd())?;
+    let src_abs = Path::resolve(existing_path, &process.cwd())?;
+    let link_abs = Path::resolve(link_path, &process.cwd())?;
 
     let parent = link_abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = link_abs
@@ -218,16 +218,16 @@ pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result
 
 pub fn read_to_end(pid: ProcessId, raw_path: &str) -> Result<Vec<u8>, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     read_to_end_at(pid, &abs)
 }
 
-pub fn read_to_end_at(pid: ProcessId, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+pub fn read_to_end_at(pid: ProcessId, path: &Path) -> Result<Vec<u8>, VfsError> {
     let process = process_handle(pid)?;
     with_process_vfs(&process, |vfs| read_to_end_with_vfs(vfs, path))
 }
 
-pub fn cwd(pid: ProcessId) -> Result<VfsPath, VfsError> {
+pub fn cwd(pid: ProcessId) -> Result<Path, VfsError> {
     let process = process_handle(pid)?;
     Ok(process.cwd())
 }

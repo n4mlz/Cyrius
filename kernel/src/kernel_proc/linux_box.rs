@@ -3,7 +3,7 @@
 use alloc::string::{String, ToString};
 
 use crate::arch::api::ArchPageTableAccess;
-use crate::fs::{VfsError, VfsPath};
+use crate::fs::{Path, VfsError};
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
@@ -105,7 +105,7 @@ fn wait_for_exit(pid: ProcessId) {
 
 fn absolute_path(origin_pid: ProcessId, raw: &str) -> Result<String, RunError> {
     let cwd = proc_fs::cwd(origin_pid)?;
-    let abs = VfsPath::resolve(raw, &cwd)?;
+    let abs = Path::resolve(raw, &cwd)?;
     Ok(abs.to_string())
 }
 

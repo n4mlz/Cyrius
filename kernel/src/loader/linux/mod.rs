@@ -1,5 +1,5 @@
 use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
-use crate::fs::{VfsError, VfsPath};
+use crate::fs::{Path, VfsError};
 use crate::loader::DefaultLinuxElfPlatform;
 use crate::mem::addr::{Addr, VirtAddr, align_up};
 use crate::mem::paging::MapError;
@@ -151,9 +151,9 @@ where
     })
 }
 
-fn resolve_path(pid: ProcessId, raw: &str) -> Result<VfsPath, LinuxLoadError> {
+fn resolve_path(pid: ProcessId, raw: &str) -> Result<Path, LinuxLoadError> {
     let cwd = proc_fs::cwd(pid)?;
-    VfsPath::resolve(raw, &cwd).map_err(LinuxLoadError::from)
+    Path::resolve(raw, &cwd).map_err(LinuxLoadError::from)
 }
 
 fn compute_heap_base<P: ArchLinuxElfPlatform>(

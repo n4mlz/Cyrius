@@ -6,19 +6,23 @@ use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
 pub mod devfs;
-pub mod fat32;
 mod fd;
+mod file;
 pub mod init;
-pub mod memfs;
 mod node;
 pub mod ops;
 mod path;
 pub mod probe;
+pub mod vfs;
 
 pub use fd::{Fd, FdTable};
-pub use node::{DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, SymlinkNode};
+pub use file::File;
+pub use node::{
+    CharDeviceNode, DirEntry, DirNode, Node, NodeKind, NodeStat, OpenOptions, SymlinkNode,
+};
 use path::normalize_components;
-pub use path::{PathComponent, VfsPath};
+pub use path::{Path, PathComponent};
+pub use vfs::{fat32, memfs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfsError {
@@ -41,7 +45,7 @@ static VFS: LazyLock<SpinLock<Option<Vfs>>> = LazyLock::new_const(|| SpinLock::n
 
 #[derive(Clone)]
 struct Mount {
-    path: VfsPath,
+    path: Path,
     root: Arc<dyn Node>,
 }
 
@@ -54,13 +58,13 @@ impl Vfs {
         assert!(root.as_dir().is_some(), "root must be a directory node");
         Self {
             mounts: vec![Mount {
-                path: VfsPath::root(),
+                path: Path::root(),
                 root,
             }],
         }
     }
 
-    pub fn mount(&mut self, path: VfsPath, root: Arc<dyn Node>) -> Result<(), VfsError> {
+    pub fn mount(&mut self, path: Path, root: Arc<dyn Node>) -> Result<(), VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
@@ -82,7 +86,7 @@ impl Vfs {
             .clone()
     }
 
-    pub fn read_dir(&self, path: &VfsPath) -> Result<Vec<DirEntry>, VfsError> {
+    pub fn read_dir(&self, path: &Path) -> Result<Vec<DirEntry>, VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
@@ -96,23 +100,23 @@ impl Vfs {
 
     pub fn open_absolute(
         &self,
-        path: &VfsPath,
+        path: &Path,
         options: OpenOptions,
     ) -> Result<Arc<dyn File>, VfsError> {
         let node = self.resolve_absolute(path, 0)?;
         node.clone().open(options)
     }
 
-    pub fn stat_absolute(&self, path: &VfsPath) -> Result<NodeStat, VfsError> {
+    pub fn stat_absolute(&self, path: &Path) -> Result<NodeStat, VfsError> {
         let node = self.resolve_absolute(path, 0)?;
         node.stat()
     }
 
-    pub fn resolve_node(&self, path: &VfsPath) -> Result<Arc<dyn Node>, VfsError> {
+    pub fn resolve_node(&self, path: &Path) -> Result<Arc<dyn Node>, VfsError> {
         self.resolve_absolute(path, 0)
     }
 
-    fn inject_mount_points(&self, path: &VfsPath, entries: &mut Vec<DirEntry>) {
+    fn inject_mount_points(&self, path: &Path, entries: &mut Vec<DirEntry>) {
         let base_components = path.components();
         for mount in &self.mounts {
             let mount_components = mount.path.components();
@@ -131,13 +135,7 @@ impl Vfs {
                 name: name.to_string(),
                 stat: NodeStat {
                     kind: NodeKind::Directory,
-                    mode: 0,
-                    uid: 0,
-                    gid: 0,
                     size: 0,
-                    atime: 0,
-                    mtime: 0,
-                    ctime: 0,
                 },
             });
         }
@@ -145,7 +143,7 @@ impl Vfs {
 
     fn select_mount<'a, 'b>(
         &'a self,
-        path: &'b VfsPath,
+        path: &'b Path,
     ) -> Result<(&'a Mount, &'b [PathComponent]), VfsError> {
         for mount in &self.mounts {
             let mp = mount.path.components();
@@ -157,7 +155,7 @@ impl Vfs {
         Err(VfsError::NotFound)
     }
 
-    fn resolve_absolute(&self, path: &VfsPath, depth: u8) -> Result<Arc<dyn Node>, VfsError> {
+    fn resolve_absolute(&self, path: &Path, depth: u8) -> Result<Arc<dyn Node>, VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
@@ -194,7 +192,7 @@ impl Vfs {
             if !rest.is_empty() {
                 combined_components.extend(rest.iter().cloned());
             }
-            let combined = VfsPath::from_components(true, combined_components);
+            let combined = Path::from_components(true, combined_components);
             self.resolve_absolute(&combined, depth + 1)
         } else if rest.is_empty() {
             Ok(node)
@@ -225,7 +223,7 @@ pub fn mount_root(root: Arc<dyn Node>) -> Result<(), VfsError> {
     Ok(())
 }
 
-pub fn mount_at(path: VfsPath, root: Arc<dyn Node>) -> Result<(), VfsError> {
+pub fn mount_at(path: Path, root: Arc<dyn Node>) -> Result<(), VfsError> {
     let mut guard = VFS.get().lock();
     let vfs = guard.as_mut().ok_or(VfsError::NotInitialised)?;
     vfs.mount(path, root)
@@ -237,11 +235,11 @@ pub fn with_vfs<R>(f: impl FnOnce(&Vfs) -> Result<R, VfsError>) -> Result<R, Vfs
     f(vfs)
 }
 
-pub fn read_to_end(path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+pub fn read_to_end(path: &Path) -> Result<Vec<u8>, VfsError> {
     with_vfs(|vfs| read_to_end_with_vfs(vfs, path))
 }
 
-pub fn read_to_end_with_vfs(vfs: &Vfs, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+pub fn read_to_end_with_vfs(vfs: &Vfs, path: &Path) -> Result<Vec<u8>, VfsError> {
     let stat = vfs.stat_absolute(path)?;
     if stat.kind != NodeKind::Regular {
         return Err(VfsError::NotFile);
@@ -293,7 +291,7 @@ mod tests {
         let handle = file.open(OpenOptions::new(0)).expect("open file");
         let _ = handle.write(&[0xAA, 0xBB]).expect("write");
 
-        let path = VfsPath::parse("/foo").expect("parse path");
+        let path = Path::parse("/foo").expect("parse path");
         let stat = with_vfs(|vfs| vfs.stat_absolute(&path)).expect("stat");
         assert_eq!(stat.kind, NodeKind::Regular);
     }
@@ -310,7 +308,7 @@ mod tests {
                 if let Ok(fs) = FatFileSystem::new(shared) {
                     let root: Arc<dyn Node> = fs.root_dir();
                     force_replace_root(MemDirectory::new());
-                    mount_at(VfsPath::parse("/mnt").unwrap(), root).expect("mount fat");
+                    mount_at(Path::parse("/mnt").unwrap(), root).expect("mount fat");
                     mounted = true;
                     break;
                 }

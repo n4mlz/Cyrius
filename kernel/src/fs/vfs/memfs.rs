@@ -7,14 +7,10 @@ use alloc::{
 
 use crate::util::spinlock::SpinLock;
 
-use super::{
+use crate::fs::{
     DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, SymlinkNode,
     VfsError,
 };
-
-const MODE_REG: u32 = 0o644;
-const MODE_DIR: u32 = 0o755;
-const MODE_LNK: u32 = 0o777;
 
 /// Simple in-memory writable filesystem backed by a tree of nodes.
 pub struct MemDirectory {
@@ -157,13 +153,7 @@ impl Node for MemFileNode {
     fn stat(&self) -> Result<NodeStat, VfsError> {
         Ok(NodeStat {
             kind: NodeKind::Regular,
-            mode: MODE_REG,
-            uid: 0,
-            gid: 0,
             size: self.size(),
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
         })
     }
 
@@ -180,13 +170,7 @@ impl Node for MemDirectory {
     fn stat(&self) -> Result<NodeStat, VfsError> {
         Ok(NodeStat {
             kind: NodeKind::Directory,
-            mode: MODE_DIR,
-            uid: 0,
-            gid: 0,
             size: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
         })
     }
 
@@ -278,13 +262,7 @@ impl Node for MemSymlink {
     fn stat(&self) -> Result<NodeStat, VfsError> {
         Ok(NodeStat {
             kind: NodeKind::Symlink,
-            mode: MODE_LNK,
-            uid: 0,
-            gid: 0,
             size: self.target.len() as u64,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
         })
     }
 

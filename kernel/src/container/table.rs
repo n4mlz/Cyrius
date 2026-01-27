@@ -2,7 +2,7 @@ use alloc::string::ToString;
 use alloc::sync::Arc;
 
 use crate::container::{Container, ContainerContext, ContainerState, ContainerStatus};
-use crate::fs::VfsPath;
+use crate::fs::Path;
 
 use super::ContainerError;
 use super::repository::ContainerRepository;
@@ -29,7 +29,7 @@ impl ContainerTable {
             return Err(ContainerError::InvalidId);
         }
 
-        let bundle = VfsPath::parse(bundle_path)?;
+        let bundle = Path::parse(bundle_path)?;
         if !bundle.is_absolute() {
             return Err(ContainerError::BundlePathNotAbsolute);
         }
@@ -73,7 +73,7 @@ pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
 mod tests {
     use super::*;
     use crate::fs::DirNode;
-    use crate::fs::VfsPath;
+    use crate::fs::Path;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -115,7 +115,7 @@ mod tests {
             .expect("create host-only file");
         let root_entries = container
             .vfs()
-            .read_dir(&VfsPath::parse("/").expect("parse root"))
+            .read_dir(&Path::parse("/").expect("parse root"))
             .expect("read rootfs");
         assert!(root_entries.iter().any(|entry| entry.name == "probe"));
         assert!(!root_entries.iter().any(|entry| entry.name == "host-only"));

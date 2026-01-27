@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 
 use crate::arch::api::ArchPageTableAccess;
 use crate::container::{CONTAINER_TABLE, Container, ContainerError, ContainerStatus};
-use crate::fs::VfsPath;
+use crate::fs::Path;
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::thread::{SCHEDULER, SpawnError};
@@ -114,12 +114,12 @@ pub fn start_container(container: Arc<Container>) -> Result<ProcessId, Container
     Ok(pid)
 }
 
-fn parse_cwd(raw: &str) -> Result<VfsPath, ContainerStartError> {
-    let cwd = VfsPath::parse(raw).map_err(ContainerStartError::InvalidCwd)?;
+fn parse_cwd(raw: &str) -> Result<Path, ContainerStartError> {
+    let cwd = Path::parse(raw).map_err(ContainerStartError::InvalidCwd)?;
     if cwd.is_absolute() {
         return Ok(cwd);
     }
-    VfsPath::root()
+    Path::root()
         .join(&cwd)
         .map_err(ContainerStartError::InvalidCwd)
 }
