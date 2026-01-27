@@ -128,7 +128,7 @@ fn parse_cwd(raw: &str) -> Result<VfsPath, ContainerStartError> {
 mod tests {
     use super::*;
     use crate::device::tty::global_tty;
-    use crate::fs::Node;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
@@ -159,17 +159,23 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let rootfs_dir = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let bin = rootfs_dir.create_file("demo").expect("create demo");
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let rootfs_dir = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let rootfs_dir_view = rootfs_dir.as_dir().expect("rootfs is dir");
+        let bin = rootfs_dir_view.create_file("demo").expect("create demo");
         let handle = bin.open(crate::fs::OpenOptions::new(0)).expect("open demo");
         let _ = handle.write(LINUX_SYSCALL_ELF).expect("write demo");
-        let msg = rootfs_dir.create_file("msg.txt").expect("create msg.txt");
+        let msg = rootfs_dir_view
+            .create_file("msg.txt")
+            .expect("create msg.txt");
         let handle = msg
             .open(crate::fs::OpenOptions::new(0))
             .expect("open msg.txt");
         let _ = handle.write(b"FILE\n").expect("write msg.txt");
 
-        let config = bundle_dir
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
         let handle = config

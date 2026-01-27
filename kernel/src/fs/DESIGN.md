@@ -5,6 +5,9 @@
   rejects `..`), a root mount, and basic metadata exposure.
 - Exposes a persistent `Node` abstraction (inode-like) that owns metadata and open-time validation,
   while `File` represents per-open state (offset/flags) and handles I/O operations.
+- Directory and symlink responsibilities are split out of `Node` into `DirNode` and
+  `SymlinkNode`. The VFS uses dynamic dispatch (`as_dir` / `as_symlink`) instead of routing all
+  operations through a single mega-trait.
 - Each process owns its own `FdTable` and current working directory; `open` resolves a `Node`,
   calls `Node::open`, and binds the resulting `File` to an FD in the process table. Container
   processes route path resolution through the container VFS instead of the global VFS.
@@ -19,6 +22,8 @@
   that mount’s root.
 - Directory listings include mount points even if the parent directory does not contain an explicit
   entry, making mounted filesystems visible under their parent (e.g. `/mnt` shows up in `/`).
+- The root node is asserted to be directory-like (`Node::as_dir().is_some()`), matching the
+  expectation that mounts are attached to directory nodes.
 - `VfsPath::parse` normalises out empty/`.` segments and rejects `..` to keep raw paths strict.
 - `VfsPath::resolve` handles relative inputs by folding `..` segments against a base path, clamping
   at the root so callers (process VFS ops, tar extraction, loader) share consistent behaviour.
@@ -40,6 +45,7 @@
   root cluster number >= 2) to avoid mounting incompatible images.
 - Directory and file nodes cache their cluster chains eagerly; FAT lookups are served from a
   single-sector cache to avoid repeated device traffic.
+- FAT32 directory nodes implement `DirNode` while file nodes implement only `Node`.
 - The driver is read-only and marks missing features (write, fsync) for future extension once page
   cache and transactional updates are defined.
 

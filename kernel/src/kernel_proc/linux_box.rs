@@ -113,7 +113,7 @@ fn absolute_path(origin_pid: ProcessId, raw: &str) -> Result<String, RunError> {
 mod tests {
     use super::*;
     use crate::device::tty::global_tty;
-    use crate::fs::Node;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};

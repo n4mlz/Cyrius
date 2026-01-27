@@ -267,7 +267,7 @@ mod tests {
         Arch,
         api::{ArchPageTableAccess, ArchThread},
     };
-    use crate::fs::Node;
+    use crate::fs::DirNode;
     use crate::fs::memfs::MemDirectory;
     use crate::mem::addr::{Addr, VirtIntoPtr};
     use crate::mem::paging::{MapError, PageTableOps, PhysMapper};

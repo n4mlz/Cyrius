@@ -15,39 +15,42 @@ fn copy_directory_recursive_inner(
     dest: Arc<dyn Node>,
     hardlink_map: &mut BTreeMap<usize, Arc<dyn Node>>,
 ) -> Result<(), VfsError> {
-    if source.kind() != NodeKind::Directory || dest.kind() != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
+    let src_dir = source.as_dir().ok_or(VfsError::NotDirectory)?;
+    let dest_dir = dest.as_dir().ok_or(VfsError::NotDirectory)?;
 
-    let entries = source.read_dir()?;
+    let entries = src_dir.read_dir()?;
     for entry in entries {
         let name = entry.name;
-        let node = source.lookup(&PathComponent::new(&name))?;
+        let node = src_dir.lookup(&PathComponent::new(&name))?;
+        if node.as_dir().is_some() {
+            let new_dir = dest_dir.create_dir(&name)?;
+            copy_directory_recursive_inner(node, new_dir, hardlink_map)?;
+            continue;
+        }
+
         match node.kind() {
-            NodeKind::Directory => {
-                let new_dir = dest.create_dir(&name)?;
-                copy_directory_recursive_inner(node, new_dir, hardlink_map)?;
-            }
             NodeKind::Regular => {
                 let key = Arc::as_ptr(&node) as *const () as usize;
                 if let Some(existing) = hardlink_map.get(&key) {
-                    dest.link(&name, existing.clone())?;
+                    dest_dir.link(&name, existing.clone())?;
                     continue;
                 }
 
                 let stat = node.stat()?;
-                let new_file = dest.create_file(&name)?;
+                let new_file = dest_dir.create_file(&name)?;
                 let size = usize::try_from(stat.size).map_err(|_| VfsError::Corrupted)?;
                 copy_file_contents(&node, &new_file, size)?;
                 hardlink_map.insert(key, new_file);
             }
             NodeKind::Symlink => {
-                let target = node.readlink()?;
-                let _ = dest.create_symlink(&name, &target)?;
+                let link = node.as_symlink().ok_or(VfsError::InvalidPath)?;
+                let target = link.readlink()?;
+                let _ = dest_dir.create_symlink(&name, &target)?;
             }
             NodeKind::CharDevice | NodeKind::BlockDevice | NodeKind::Pipe | NodeKind::Socket => {
                 // Skip special nodes while copying into container-owned filesystems.
             }
+            NodeKind::Directory => return Err(VfsError::Corrupted),
         }
     }
     Ok(())

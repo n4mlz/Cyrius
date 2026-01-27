@@ -16,7 +16,7 @@ mod path;
 pub mod probe;
 
 pub use fd::{Fd, FdTable};
-pub use node::{DirEntry, File, Node, NodeKind, NodeStat, OpenOptions};
+pub use node::{DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, SymlinkNode};
 use path::normalize_components;
 pub use path::{PathComponent, VfsPath};
 
@@ -51,6 +51,7 @@ pub struct Vfs {
 
 impl Vfs {
     pub fn new(root: Arc<dyn Node>) -> Self {
+        assert!(root.as_dir().is_some(), "root must be a directory node");
         Self {
             mounts: vec![Mount {
                 path: VfsPath::root(),
@@ -87,11 +88,8 @@ impl Vfs {
         }
         let (mount, tail) = self.select_mount(path)?;
         let node = self.resolve_from(mount.root.clone(), Vec::new(), tail, 0)?;
-        if node.kind() != NodeKind::Directory {
-            return Err(VfsError::NotDirectory);
-        }
-
-        let mut entries = node.read_dir()?;
+        let dir = node.as_dir().ok_or(VfsError::NotDirectory)?;
+        let mut entries = dir.read_dir()?;
         self.inject_mount_points(path, &mut entries);
         Ok(entries)
     }
@@ -182,34 +180,26 @@ impl Vfs {
             return Ok(current);
         }
 
-        if current.kind() != NodeKind::Directory {
-            return Err(VfsError::NotDirectory);
-        }
+        let dir = current.as_dir().ok_or(VfsError::NotDirectory)?;
 
         let (first, rest) = components.split_first().expect("components not empty");
-        let node = current.lookup(first)?;
+        let node = dir.lookup(first)?;
 
-        match node.kind() {
-            NodeKind::Directory => {
-                current_path.push(first.clone());
-                self.resolve_from(node, current_path, rest, depth)
+        if node.as_dir().is_some() {
+            current_path.push(first.clone());
+            self.resolve_from(node, current_path, rest, depth)
+        } else if let Some(link) = node.as_symlink() {
+            let target_raw = link.readlink()?;
+            let mut combined_components = resolve_link_components(&current_path, &target_raw)?;
+            if !rest.is_empty() {
+                combined_components.extend(rest.iter().cloned());
             }
-            NodeKind::Symlink => {
-                let target_raw = node.readlink()?;
-                let mut combined_components = resolve_link_components(&current_path, &target_raw)?;
-                if !rest.is_empty() {
-                    combined_components.extend(rest.iter().cloned());
-                }
-                let combined = VfsPath::from_components(true, combined_components);
-                self.resolve_absolute(&combined, depth + 1)
-            }
-            _ => {
-                if rest.is_empty() {
-                    Ok(node)
-                } else {
-                    Err(VfsError::NotDirectory)
-                }
-            }
+            let combined = VfsPath::from_components(true, combined_components);
+            self.resolve_absolute(&combined, depth + 1)
+        } else if rest.is_empty() {
+            Ok(node)
+        } else {
+            Err(VfsError::NotDirectory)
         }
     }
 }

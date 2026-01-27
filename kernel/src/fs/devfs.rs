@@ -81,24 +81,25 @@ pub fn global_tty_node() -> Arc<dyn Node> {
 }
 
 pub fn install_default_nodes(root: &dyn Node) -> Result<(), VfsError> {
-    if root.kind() != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
+    let root_dir = root.as_dir().ok_or(VfsError::NotDirectory)?;
 
-    let dev_dir = match root.lookup(&PathComponent::new("dev")) {
-        Ok(dir) if dir.kind() == NodeKind::Directory => dir,
-        Ok(_) => return Err(VfsError::NotDirectory),
-        Err(VfsError::NotFound) => root.create_dir("dev")?,
+    let dev_dir = match root_dir.lookup(&PathComponent::new("dev")) {
+        Ok(dir) => {
+            let _dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+            dir
+        }
+        Err(VfsError::NotFound) => root_dir.create_dir("dev")?,
         Err(err) => return Err(err),
     };
+    let dev_dir_view = dev_dir.as_dir().ok_or(VfsError::NotDirectory)?;
 
     let tty_node = global_tty_node();
-    let _ = dev_dir.unlink("tty");
-    dev_dir.link("tty", tty_node)?;
+    let _ = dev_dir_view.unlink("tty");
+    dev_dir_view.link("tty", tty_node)?;
 
     let console_node = global_tty_node();
-    let _ = dev_dir.unlink("console");
-    dev_dir.link("console", console_node)?;
+    let _ = dev_dir_view.unlink("console");
+    dev_dir_view.link("console", console_node)?;
 
     Ok(())
 }

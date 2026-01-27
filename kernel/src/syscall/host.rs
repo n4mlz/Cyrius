@@ -98,7 +98,7 @@ fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Node;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -113,8 +113,11 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let config = bundle_dir
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let _ = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
         let handle = config

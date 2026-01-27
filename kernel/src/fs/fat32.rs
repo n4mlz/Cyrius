@@ -18,7 +18,9 @@ use alloc::{
 use crate::device::block::BlockDevice;
 use crate::util::spinlock::SpinLock;
 
-use super::{DirEntry, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, VfsError};
+use super::{
+    DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, VfsError,
+};
 
 const FAT32_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const ATTR_LONG_NAME: u8 = 0x0F;
@@ -418,6 +420,12 @@ impl<D: BlockDevice + Send + 'static> Node for FatDirectory<D> {
         Ok(Arc::new(FatDirFile::new(self)))
     }
 
+    fn as_dir(&self) -> Option<&dyn DirNode> {
+        Some(self)
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> DirNode for FatDirectory<D> {
     fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError> {
         let mut entries = Vec::new();
         for cluster in &self.chain {

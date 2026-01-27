@@ -11,11 +11,20 @@ pub enum NodeKind {
     Directory,
     Symlink,
     CharDevice,
+    /// Planned but not implemented yet.
     BlockDevice,
+    /// Planned but not implemented yet.
     Pipe,
+    /// Planned but not implemented yet.
     Socket,
 }
 
+/// Minimal stat-like metadata for nodes.
+///
+/// # Note
+/// Several fields (mode/uid/gid/timestamps) are currently placeholders in most
+/// implementations. They are kept here to stabilise the interface and will be
+/// populated with real permission and time metadata later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeStat {
     pub kind: NodeKind,
@@ -45,18 +54,27 @@ impl OpenOptions {
     }
 }
 
+/// Inode-like persistent object. It does not perform I/O directly.
 pub trait Node: Send + Sync {
     fn kind(&self) -> NodeKind;
     fn stat(&self) -> Result<NodeStat, VfsError>;
     fn open(self: Arc<Self>, options: OpenOptions) -> Result<Arc<dyn File>, VfsError>;
 
-    fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError> {
-        Err(VfsError::NotDirectory)
+    /// Returns a directory view if this node is a directory.
+    fn as_dir(&self) -> Option<&dyn DirNode> {
+        None
     }
 
-    fn lookup(&self, _name: &PathComponent) -> Result<Arc<dyn Node>, VfsError> {
-        Err(VfsError::NotDirectory)
+    /// Returns a symlink view if this node is a symlink.
+    fn as_symlink(&self) -> Option<&dyn SymlinkNode> {
+        None
     }
+}
+
+/// Directory-specific operations. Only directory nodes implement this trait.
+pub trait DirNode: Send + Sync {
+    fn lookup(&self, name: &PathComponent) -> Result<Arc<dyn Node>, VfsError>;
+    fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError>;
 
     fn create_file(&self, _name: &str) -> Result<Arc<dyn Node>, VfsError> {
         Err(VfsError::ReadOnly)
@@ -77,10 +95,11 @@ pub trait Node: Send + Sync {
     fn link(&self, _name: &str, _node: Arc<dyn Node>) -> Result<(), VfsError> {
         Err(VfsError::ReadOnly)
     }
+}
 
-    fn readlink(&self) -> Result<String, VfsError> {
-        Err(VfsError::InvalidPath)
-    }
+/// Symlink-specific operations. Only symlink nodes implement this trait.
+pub trait SymlinkNode: Send + Sync {
+    fn readlink(&self) -> Result<String, VfsError>;
 }
 
 pub trait File: Send + Sync {

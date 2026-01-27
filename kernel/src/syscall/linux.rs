@@ -1057,7 +1057,7 @@ impl LinuxStat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Node;
+    use crate::fs::DirNode;
     use crate::mem::addr::VirtAddr;
     use crate::println;
     use crate::process::PROCESS_TABLE;

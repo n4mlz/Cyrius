@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::fs::devfs;
 use crate::fs::memfs::MemDirectory;
 use crate::fs::ops::copy_directory_recursive;
-use crate::fs::{NodeKind, Vfs, VfsError, VfsPath, read_to_end, with_vfs};
+use crate::fs::{Vfs, VfsError, VfsPath, read_to_end, with_vfs};
 
 use super::{CONTAINER_VFS_BACKING, ContainerError, ContainerVfsBacking};
 
@@ -52,9 +52,9 @@ impl SpecLoader {
         };
 
         let rootfs = with_vfs(|vfs| vfs.resolve_node(&abs)).map_err(ContainerError::Vfs)?;
-        if rootfs.kind() != NodeKind::Directory {
-            return Err(ContainerError::Vfs(VfsError::NotDirectory));
-        }
+        let _root_dir = rootfs
+            .as_dir()
+            .ok_or(ContainerError::Vfs(VfsError::NotDirectory))?;
 
         let container_root = match CONTAINER_VFS_BACKING {
             ContainerVfsBacking::Ramfs => MemDirectory::new(),

@@ -52,10 +52,8 @@ pub fn open_path_with_create(pid: ProcessId, raw_path: &str, flags: u64) -> Resu
                 .as_str()
                 .to_string();
             let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
-            if dir.kind() != NodeKind::Directory {
-                return Err(VfsError::NotDirectory);
-            }
-            let file_node = dir.create_file(&name)?;
+            let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+            let file_node = dir_view.create_file(&name)?;
             let file = file_node.clone().open(OpenOptions::new(flags))?;
             process.fd_table().open_file(file)
         }
@@ -95,9 +93,7 @@ pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
     let abs = VfsPath::resolve(raw_path, &process.cwd())?;
     let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&abs))?;
-    if dir.kind() != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
+    let _dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
     process.set_cwd(abs);
     drop(dir);
     Ok(())
@@ -126,10 +122,8 @@ pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
         .as_str()
         .to_string();
     let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
-    if dir.kind() != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
-    dir.unlink(&name)
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    dir_view.unlink(&name)
 }
 
 pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), VfsError> {
@@ -149,10 +143,8 @@ pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), Vfs
                 .as_str()
                 .to_string();
             let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
-            if dir.kind() != NodeKind::Directory {
-                return Err(VfsError::NotDirectory);
-            }
-            let file_node = dir.create_file(&name)?;
+            let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+            let file_node = dir_view.create_file(&name)?;
             let file = file_node.clone().open(OpenOptions::new(0))?;
             let _ = file.write(data)?;
             Ok(())
@@ -172,10 +164,8 @@ pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
         .as_str()
         .to_string();
     let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
-    if dir.kind() != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
-    match dir.create_dir(&name) {
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    match dir_view.create_dir(&name) {
         Ok(_) => Ok(()),
         Err(VfsError::AlreadyExists) => Ok(()),
         Err(err) => Err(err),
@@ -194,11 +184,8 @@ pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsE
         .to_string();
 
     let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
-    if dir.kind() != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
-
-    dir.create_symlink(&name, target)?;
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    dir_view.create_symlink(&name, target)?;
     Ok(())
 }
 
@@ -221,13 +208,12 @@ pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result
             return Err(VfsError::NotDirectory);
         }
         let dir = vfs.resolve_node(&parent)?;
-        if dir.kind() != NodeKind::Directory {
-            return Err(VfsError::NotDirectory);
-        }
+        let _dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
         Ok((node, dir))
     })?;
 
-    dir.link(&name, node)
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    dir_view.link(&name, node)
 }
 
 pub fn read_to_end(pid: ProcessId, raw_path: &str) -> Result<Vec<u8>, VfsError> {
@@ -250,7 +236,7 @@ pub fn cwd(pid: ProcessId) -> Result<VfsPath, VfsError> {
 mod tests {
     use super::*;
     use crate::container::CONTAINER_TABLE;
-    use crate::fs::Node;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -266,8 +252,12 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let rootfs_dir = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let container_file = rootfs_dir
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let rootfs_dir = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let rootfs_dir_view = rootfs_dir.as_dir().expect("rootfs is dir");
+        let container_file = rootfs_dir_view
             .create_file("shadow.txt")
             .expect("create container file");
         let file = container_file
@@ -279,7 +269,7 @@ mod tests {
         let host_handle = host_file.open(OpenOptions::new(0)).expect("open host file");
         let _ = host_handle.write(b"host").expect("write host file");
 
-        let config = bundle_dir
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
         let handle = config.open(OpenOptions::new(0)).expect("open config");

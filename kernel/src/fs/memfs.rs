@@ -7,7 +7,10 @@ use alloc::{
 
 use crate::util::spinlock::SpinLock;
 
-use super::{DirEntry, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, VfsError};
+use super::{
+    DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, SymlinkNode,
+    VfsError,
+};
 
 const MODE_REG: u32 = 0o644;
 const MODE_DIR: u32 = 0o755;
@@ -191,6 +194,12 @@ impl Node for MemDirectory {
         Ok(Arc::new(MemDirFile::new(self, options)))
     }
 
+    fn as_dir(&self) -> Option<&dyn DirNode> {
+        Some(self)
+    }
+}
+
+impl DirNode for MemDirectory {
     fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError> {
         let inner = self.inner.lock();
         let mut out = Vec::with_capacity(inner.entries.len());
@@ -283,6 +292,12 @@ impl Node for MemSymlink {
         Err(VfsError::NotFile)
     }
 
+    fn as_symlink(&self) -> Option<&dyn SymlinkNode> {
+        Some(self)
+    }
+}
+
+impl SymlinkNode for MemSymlink {
     fn readlink(&self) -> Result<String, VfsError> {
         Ok(self.target.clone())
     }
