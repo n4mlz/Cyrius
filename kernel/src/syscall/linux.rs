@@ -716,8 +716,10 @@ fn handle_mmap(invocation: &SyscallInvocation) -> SysResult {
     while attempts < max_attempts && !mapped {
         let attempt_base = target;
         let result = space.with_page_table(|table, allocator| {
-            let mut mapped_pages = 0usize;
-            for addr in (attempt_base..attempt_base + len).step_by(page_size) {
+            for (mapped_pages, addr) in (attempt_base..attempt_base + len)
+                .step_by(page_size)
+                .enumerate()
+            {
                 let page = Page::new(VirtAddr::new(addr), PageSize(page_size));
                 if fixed && let Ok(frame) = table.unmap(page) {
                     allocator.deallocate(frame);
@@ -751,7 +753,6 @@ fn handle_mmap(invocation: &SyscallInvocation) -> SysResult {
                     let ptr = mapper.phys_to_virt(phys).into_mut_ptr();
                     core::ptr::write_bytes(ptr, 0, page_size);
                 }
-                mapped_pages += 1;
             }
             Ok::<(), MapError>(())
         });

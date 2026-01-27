@@ -65,12 +65,6 @@ impl MemFileNode {
         Ok(payload.len())
     }
 
-    fn truncate(&self, len: usize) -> Result<(), VfsError> {
-        let mut data = self.data.lock();
-        data.resize(len, 0);
-        Ok(())
-    }
-
     fn size(&self) -> u64 {
         let data = self.data.lock();
         data.len() as u64
