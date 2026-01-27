@@ -16,4 +16,5 @@
 
 ## Future Work
 - Add queueing/async wrappers once the network stack is in place.
-- Extend metadata with offload capabilities when smoltcp integration begins.
+- Extend metadata with offload capabilities now that smoltcp integration is available.
+- Document when a device advertises offload features that smoltcp must know about (checksum, GSO).

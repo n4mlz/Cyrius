@@ -10,6 +10,7 @@
 - **container**: container registry and OCI spec-backed metadata/state for runtime-managed containers.
 - **interrupt**: vector registration, trap dispatch, and timer orchestration.
 - **mem**: address wrappers, heap allocator, and paging interfaces.
+- **net**: smoltcp-backed network stack adapter and no_std_net-facing address types.
 - **process/thread**: execution and scheduling primitives built atop architecture contexts.
 - **syscall**: ABI-aware syscall dispatch, wired to the trap layer via `int 0x80` on x86_64.
 - **trap**: global trap dispatcher and logging with architecture-specific frames.

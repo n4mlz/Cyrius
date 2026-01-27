@@ -19,6 +19,7 @@ pub mod io;
 pub mod kernel_proc;
 pub mod loader;
 pub mod mem;
+pub mod net;
 pub mod process;
 pub mod syscall;
 #[cfg(test)]
