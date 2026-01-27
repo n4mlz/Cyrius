@@ -291,6 +291,9 @@ pub struct Process {
     brk: SpinLock<BrkState>,
     abi: Abi,
     domain: ProcessDomain,
+    session_id: SpinLock<ProcessId>,
+    pgrp_id: SpinLock<ProcessId>,
+    controlling_tty: SpinLock<Option<ControllingTty>>,
 }
 
 /// Process domain determines the ABI and VFS visibility contract.
@@ -352,6 +355,9 @@ impl Process {
             brk: SpinLock::new(BrkState::empty()),
             abi,
             domain: ProcessDomain::Host,
+            session_id: SpinLock::new(id),
+            pgrp_id: SpinLock::new(id),
+            controlling_tty: SpinLock::new(None),
         }
     }
 
@@ -376,6 +382,9 @@ impl Process {
             brk: SpinLock::new(BrkState::empty()),
             abi,
             domain,
+            session_id: SpinLock::new(id),
+            pgrp_id: SpinLock::new(id),
+            controlling_tty: SpinLock::new(None),
         }
     }
 
@@ -508,6 +517,42 @@ impl Process {
         guard.current = base;
     }
 
+    pub fn session_id(&self) -> ProcessId {
+        *self.session_id.lock()
+    }
+
+    pub fn set_session_id(&self, session: ProcessId) {
+        let mut guard = self.session_id.lock();
+        *guard = session;
+    }
+
+    pub fn pgrp_id(&self) -> ProcessId {
+        *self.pgrp_id.lock()
+    }
+
+    pub fn set_pgrp_id(&self, pgrp: ProcessId) {
+        let mut guard = self.pgrp_id.lock();
+        *guard = pgrp;
+    }
+
+    pub fn controlling_tty(&self) -> Option<ControllingTty> {
+        *self.controlling_tty.lock()
+    }
+
+    pub fn has_controlling_tty(&self) -> bool {
+        self.controlling_tty.lock().is_some()
+    }
+
+    pub fn set_controlling_tty(&self, tty: ControllingTty) {
+        let mut guard = self.controlling_tty.lock();
+        *guard = Some(tty);
+    }
+
+    pub fn clear_controlling_tty(&self) {
+        let mut guard = self.controlling_tty.lock();
+        *guard = None;
+    }
+
     fn set_state_if_alive(&self, state: ProcessState) {
         if matches!(self.state(), ProcessState::Terminated) {
             return;
@@ -544,6 +589,11 @@ pub enum ProcessState {
 enum ProcessKind {
     Kernel,
     User,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControllingTty {
+    Global,
 }
 
 #[cfg(test)]
@@ -626,5 +676,30 @@ mod tests {
             .expect("create linux process");
         let abi = PROCESS_TABLE.abi(pid).expect("abi present");
         assert_eq!(abi, Abi::Linux);
+    }
+
+    #[kernel_test_case]
+    fn process_defaults_session_and_pgrp_to_pid() {
+        println!("[test] process_defaults_session_and_pgrp_to_pid");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("session-proc", ProcessDomain::Host)
+            .expect("create user process");
+        let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
+        assert_eq!(proc.session_id(), pid);
+        assert_eq!(proc.pgrp_id(), pid);
+    }
+
+    #[kernel_test_case]
+    fn process_default_has_no_controlling_tty() {
+        println!("[test] process_default_has_no_controlling_tty");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("ctty-proc", ProcessDomain::Host)
+            .expect("create user process");
+        let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
+        assert!(!proc.has_controlling_tty());
     }
 }

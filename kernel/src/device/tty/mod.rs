@@ -5,6 +5,9 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::device::{Device, DeviceType};
+use crate::println;
+use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle};
+use crate::thread::SCHEDULER;
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
 use crate::util::stream::{ControlError, ControlOps, ControlRequest, ReadOps, WriteOps};
@@ -15,6 +18,7 @@ const IOCTL_TCGETS: u64 = 0x5401;
 const IOCTL_TCSETS: u64 = 0x5402;
 const IOCTL_TCSETSW: u64 = 0x5403;
 const IOCTL_TCSETSF: u64 = 0x5404;
+const IOCTL_TIOCSCTTY: u64 = 0x540e;
 const IOCTL_TIOCGPGRP: u64 = 0x540f;
 const IOCTL_TIOCSPGRP: u64 = 0x5410;
 const IOCTL_TIOCGWINSZ: u64 = 0x5413;
@@ -129,6 +133,7 @@ struct TtyState {
 /// # Implicit dependencies
 /// - Assumes `Arch::console()` is initialised and can be accessed from any context that invokes
 ///   read/write operations on the global TTY.
+/// - Resolves the caller process group via the scheduler when answering job-control ioctls.
 pub struct TtyDevice {
     input: SpinLock<VecDeque<u8>>,
     output: SpinLock<VecDeque<u8>>,
@@ -212,6 +217,24 @@ impl TtyDevice {
     fn set_pgrp(&self, pgrp: u32) {
         self.state.lock().pgrp = pgrp;
     }
+
+    fn current_process(&self) -> Option<ProcessHandle> {
+        let pid = SCHEDULER.current_process_id()?;
+        PROCESS_TABLE.process_handle(pid).ok()
+    }
+
+    fn current_process_pgrp(&self) -> Option<u32> {
+        let proc = self.current_process()?;
+        Some(proc.pgrp_id() as u32)
+    }
+
+    fn require_controlling_tty(&self) -> Result<ProcessHandle, ControlError> {
+        let proc = self.current_process().ok_or(ControlError::Invalid)?;
+        if !proc.has_controlling_tty() {
+            return Err(ControlError::Invalid);
+        }
+        Ok(proc)
+    }
 }
 
 impl Default for TtyDevice {
@@ -261,7 +284,12 @@ impl CharDevice for TtyDevice {
 
 impl ControlOps for TtyDevice {
     fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
-        match request.command {
+        println!(
+            "[tty ioctl] pid={} cmd=0x{:x}",
+            SCHEDULER.current_process_id().unwrap_or(0),
+            request.command
+        );
+        let result = match request.command {
             IOCTL_TCGETS => {
                 let termios = self.termios_snapshot();
                 request.write_struct(&termios)?;
@@ -282,21 +310,56 @@ impl ControlOps for TtyDevice {
                 self.set_winsize(winsize);
                 Ok(0)
             }
+            IOCTL_TIOCSCTTY => {
+                let proc = self.current_process().ok_or(ControlError::Invalid)?;
+                let pid = proc.id();
+                if proc.session_id() != pid {
+                    return Err(ControlError::Invalid);
+                }
+                if proc.has_controlling_tty() {
+                    return Err(ControlError::Invalid);
+                }
+                proc.set_controlling_tty(ControllingTty::Global);
+                self.set_pgrp(proc.pgrp_id() as u32);
+                Ok(0)
+            }
             IOCTL_TIOCGPGRP => {
-                let pgrp = self.pgrp() as i32;
+                let _ = self.require_controlling_tty()?;
+                let mut pgrp = self.pgrp();
+                if pgrp == 0 {
+                    if let Some(current) = self.current_process_pgrp() {
+                        pgrp = current;
+                        self.set_pgrp(pgrp);
+                    }
+                }
+                let pgrp = pgrp as i32;
                 request.write_struct(&pgrp)?;
                 Ok(0)
             }
             IOCTL_TIOCSPGRP => {
+                let _ = self.require_controlling_tty()?;
                 let pgrp = request.read_struct::<i32>()?;
                 if pgrp < 0 {
+                    return Err(ControlError::Invalid);
+                }
+                if pgrp == 0 {
                     return Err(ControlError::Invalid);
                 }
                 self.set_pgrp(pgrp as u32);
                 Ok(0)
             }
             _ => Err(ControlError::Unsupported),
-        }
+        };
+        println!(
+            "[tty ioctl] pid={} cmd=0x{:x} ret={}",
+            SCHEDULER.current_process_id().unwrap_or(0),
+            request.command,
+            match &result {
+                Ok(val) => alloc::format!("ok({})", val),
+                Err(err) => alloc::format!("err({:?})", err),
+            }
+        );
+        result
     }
 }
 

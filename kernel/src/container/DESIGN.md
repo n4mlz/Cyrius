@@ -34,6 +34,8 @@
   `cwd` before loading the ELF image.
 - Container init processes are created with Linux ABI and are tied to the container VFS at process
   creation time, ensuring path resolution never touches the host VFS.
+- Container init processes are assigned the global controlling TTY so shells can enable job control
+  without requiring a separate `cttyhack` step.
 - Starting a container transitions status from `Created` to `Running` and stores the init PID.
 
 ## Future Work

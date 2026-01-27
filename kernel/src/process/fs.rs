@@ -76,6 +76,21 @@ pub fn close_fd(pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
     process.fd_table().close(fd)
 }
 
+pub fn dup_fd_min(pid: ProcessId, fd: Fd, min: Fd, close_on_exec: bool) -> Result<Fd, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().dup_min(fd, min, close_on_exec)
+}
+
+pub fn get_fd_flags(pid: ProcessId, fd: Fd) -> Result<u32, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().get_fd_flags(fd)
+}
+
+pub fn set_fd_flags(pid: ProcessId, fd: Fd, flags: u32) -> Result<(), VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().set_fd_flags(fd, flags)
+}
+
 pub fn control_fd(
     pid: ProcessId,
     fd: Fd,

@@ -5,6 +5,7 @@ use crate::arch::api::ArchPageTableAccess;
 use crate::container::{CONTAINER_TABLE, Container, ContainerError, ContainerStatus};
 use crate::fs::Path;
 use crate::loader::linux::{self, LinuxLoadError};
+use crate::println;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
 use crate::thread::{SCHEDULER, SpawnError};
 
@@ -85,6 +86,8 @@ pub fn start_container(container: Arc<Container>) -> Result<ProcessId, Container
         .process_handle(pid)
         .map_err(ContainerStartError::from)?;
     process.set_cwd(cwd);
+    process.set_controlling_tty(crate::process::ControllingTty::Global);
+    println!("[ctty] pid={} assigned=tty", pid);
 
     let program = linux::load_elf(pid, entry)?;
     let auxv = linux::build_auxv(&program, crate::mem::addr::PageSize::SIZE_4K.bytes());
@@ -195,6 +198,8 @@ mod tests {
             .create("demo", "/bundle")
             .expect("create container");
         let pid = start_container_by_id("demo").expect("start container");
+        let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
+        assert!(proc.has_controlling_tty());
         wait_for_exit(pid);
 
         let output = tty.drain_output();

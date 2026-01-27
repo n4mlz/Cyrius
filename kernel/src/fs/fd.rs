@@ -80,6 +80,33 @@ impl FdTable {
         guard.clear(fd)
     }
 
+    pub fn dup_min(&self, src: Fd, min: Fd, close_on_exec: bool) -> Result<Fd, VfsError> {
+        let mut guard = self.inner.lock();
+        let entry = guard.get(src)?.clone();
+        let mut entry = entry;
+        entry.set_close_on_exec(close_on_exec);
+        let fd = guard.allocate_fd_from(min);
+        guard.set(fd, entry)?;
+        Ok(fd)
+    }
+
+    pub fn get_fd_flags(&self, fd: Fd) -> Result<u32, VfsError> {
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        Ok(if entry.close_on_exec() { 1 } else { 0 })
+    }
+
+    pub fn set_fd_flags(&self, fd: Fd, flags: u32) -> Result<(), VfsError> {
+        let mut guard = self.inner.lock();
+        let entry = guard
+            .slots
+            .get_mut(fd as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or(VfsError::NotFound)?;
+        entry.set_close_on_exec(flags & 1 != 0);
+        Ok(())
+    }
+
     pub fn entry(&self, fd: Fd) -> Result<FdEntry, VfsError> {
         let guard = self.inner.lock();
         guard.get(fd).cloned()
@@ -106,6 +133,23 @@ impl FdTableInner {
             return index as Fd;
         }
         let fd = suggested as usize;
+        if fd >= self.slots.len() {
+            self.slots.resize(fd + 1, None);
+        }
+        fd as Fd
+    }
+
+    fn allocate_fd_from(&mut self, min: Fd) -> Fd {
+        if let Some((index, _)) = self
+            .slots
+            .iter()
+            .enumerate()
+            .skip(min as usize)
+            .find(|(_, entry)| entry.is_none())
+        {
+            return index as Fd;
+        }
+        let fd = min as usize;
         if fd >= self.slots.len() {
             self.slots.resize(fd + 1, None);
         }

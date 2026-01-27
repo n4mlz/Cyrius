@@ -14,7 +14,7 @@ use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
 use crate::println;
 use crate::process::fs as proc_fs;
-use crate::process::{PROCESS_TABLE, ProcessId};
+use crate::process::{ControllingTty, PROCESS_TABLE, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 
@@ -44,6 +44,11 @@ pub enum LinuxSyscall {
     Ioctl = 16,
     Writev = 20,
     GetPid = 39,
+    Fcntl = 72,
+    SetPgid = 109,
+    GetPpid = 110,
+    GetPgrp = 111,
+    SetSid = 112,
     Fork = 57,
     Execve = 59,
     Exit = 60,
@@ -52,6 +57,8 @@ pub enum LinuxSyscall {
     GetGid = 104,
     SetUid = 105,
     SetGid = 106,
+    GetPgid = 121,
+    GetSid = 124,
     ArchPrctl = 158,
     SetTidAddress = 218,
 }
@@ -72,6 +79,11 @@ impl LinuxSyscall {
             16 => Some(Self::Ioctl),
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
+            72 => Some(Self::Fcntl),
+            109 => Some(Self::SetPgid),
+            110 => Some(Self::GetPpid),
+            111 => Some(Self::GetPgrp),
+            112 => Some(Self::SetSid),
             57 => Some(Self::Fork),
             59 => Some(Self::Execve),
             60 => Some(Self::Exit),
@@ -80,6 +92,8 @@ impl LinuxSyscall {
             104 => Some(Self::GetGid),
             105 => Some(Self::SetUid),
             106 => Some(Self::SetGid),
+            121 => Some(Self::GetPgid),
+            124 => Some(Self::GetSid),
             158 => Some(Self::ArchPrctl),
             218 => Some(Self::SetTidAddress),
             _ => None,
@@ -106,6 +120,11 @@ pub fn dispatch(
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
         Some(LinuxSyscall::Munmap) => DispatchResult::Completed(handle_munmap(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
+        Some(LinuxSyscall::Fcntl) => DispatchResult::Completed(handle_fcntl(invocation)),
+        Some(LinuxSyscall::SetPgid) => DispatchResult::Completed(handle_setpgid(invocation)),
+        Some(LinuxSyscall::GetPpid) => DispatchResult::Completed(handle_getppid(invocation)),
+        Some(LinuxSyscall::GetPgrp) => DispatchResult::Completed(handle_getpgrp(invocation)),
+        Some(LinuxSyscall::SetSid) => DispatchResult::Completed(handle_setsid(invocation)),
         Some(LinuxSyscall::Fork) => handle_fork(invocation, frame),
         Some(LinuxSyscall::Execve) => handle_execve(invocation, frame),
         Some(LinuxSyscall::Wait4) => DispatchResult::Completed(handle_wait4(invocation)),
@@ -121,6 +140,8 @@ pub fn dispatch(
         Some(LinuxSyscall::SetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetGid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
+        Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
+        Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         None => DispatchResult::Completed(Err(SysError::NotImplemented)),
     }
@@ -195,13 +216,32 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
     })?;
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
-    let fd = if create {
+    let result = if create {
         proc_fs::open_path_with_create(pid, &path, flags)
     } else {
         proc_fs::open_path(pid, &path, flags)
-    }
-    .map_err(|_| SysError::InvalidArgument)?;
+    };
 
+    if path == "/dev/tty" || path == "/dev/console" {
+        println!(
+            "[open] pid={} path={} flags=0x{:x} => {}",
+            pid,
+            path,
+            flags,
+            match &result {
+                Ok(fd) => alloc::format!("fd={}", fd),
+                Err(_) => "err".into(),
+            }
+        );
+    }
+
+    let fd = result.map_err(|_| SysError::InvalidArgument)?;
+    if path == "/dev/tty" {
+        if process.session_id() == pid && !process.has_controlling_tty() {
+            process.set_controlling_tty(ControllingTty::Global);
+            println!("[ctty] pid={} acquired=tty", pid);
+        }
+    }
     Ok(fd as u64)
 }
 
@@ -241,6 +281,57 @@ fn handle_writev(invocation: &SyscallInvocation) -> SysResult {
     Ok(total)
 }
 
+fn handle_fcntl(invocation: &SyscallInvocation) -> SysResult {
+    const F_DUPFD: u64 = 0;
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const F_DUPFD_CLOEXEC: u64 = 1030;
+
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let cmd = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let arg = invocation.arg(2).unwrap_or(0);
+
+    let result = match cmd {
+        F_DUPFD => {
+            let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
+            proc_fs::dup_fd_min(pid, fd, min, false)
+                .map(|val| val as u64)
+                .map_err(|_| SysError::InvalidArgument)
+        }
+        F_DUPFD_CLOEXEC => {
+            let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
+            proc_fs::dup_fd_min(pid, fd, min, true)
+                .map(|val| val as u64)
+                .map_err(|_| SysError::InvalidArgument)
+        }
+        F_GETFD => proc_fs::get_fd_flags(pid, fd)
+            .map(|val| val as u64)
+            .map_err(|_| SysError::InvalidArgument),
+        F_SETFD => {
+            let flags = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
+            proc_fs::set_fd_flags(pid, fd, flags)
+                .map(|_| 0)
+                .map_err(|_| SysError::InvalidArgument)
+        }
+        _ => Err(SysError::NotImplemented),
+    };
+
+    println!(
+        "[fcntl] pid={} fd={} cmd={} arg={} => {}",
+        pid,
+        fd,
+        cmd,
+        arg,
+        match &result {
+            Ok(val) => alloc::format!("ok({})", val),
+            Err(err) => alloc::format!("err({:?})", err),
+        }
+    );
+
+    result
+}
+
 fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
     let pid = current_pid()?;
     let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
@@ -250,11 +341,24 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
-    process.address_space().with_page_table(|table, _| {
+    let result = process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
         proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
-    })
+    });
+
+    println!(
+        "[ioctl] pid={} fd={} cmd=0x{:x} => {}",
+        pid,
+        fd,
+        cmd,
+        match &result {
+            Ok(val) => alloc::format!("ok({})", val),
+            Err(err) => alloc::format!("err({:?})", err),
+        }
+    );
+
+    result
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -262,6 +366,91 @@ fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
         .current_process_id()
         .ok_or(SysError::InvalidArgument)?;
     Ok(pid)
+}
+
+fn handle_getppid(_invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(process.parent().unwrap_or(0))
+}
+
+fn handle_getpgrp(_invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(process.pgrp_id())
+}
+
+fn handle_setsid(_invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    println!(
+        "[setsid] pid={} old_sid={} old_pgrp={}",
+        pid,
+        process.session_id(),
+        process.pgrp_id()
+    );
+    if process.session_id() == pid {
+        return Err(SysError::InvalidArgument);
+    }
+    process.set_session_id(pid);
+    process.set_pgrp_id(pid);
+    process.clear_controlling_tty();
+    Ok(pid)
+}
+
+fn handle_getpgid(invocation: &SyscallInvocation) -> SysResult {
+    let pid = invocation.arg(0).unwrap_or(0);
+    let target = if pid == 0 { current_pid()? } else { pid };
+    let process = PROCESS_TABLE
+        .process_handle(target)
+        .map_err(|_| SysError::NotFound)?;
+    Ok(process.pgrp_id())
+}
+
+fn handle_getsid(invocation: &SyscallInvocation) -> SysResult {
+    let pid = invocation.arg(0).unwrap_or(0);
+    let target = if pid == 0 { current_pid()? } else { pid };
+    let process = PROCESS_TABLE
+        .process_handle(target)
+        .map_err(|_| SysError::NotFound)?;
+    Ok(process.session_id())
+}
+
+fn handle_setpgid(invocation: &SyscallInvocation) -> SysResult {
+    let pid_arg = invocation.arg(0).unwrap_or(0);
+    let pgid_arg = invocation.arg(1).unwrap_or(0);
+
+    let caller_pid = current_pid()?;
+    let target_pid = if pid_arg == 0 { caller_pid } else { pid_arg };
+    let target_pgid = if pgid_arg == 0 { target_pid } else { pgid_arg };
+
+    let caller = PROCESS_TABLE
+        .process_handle(caller_pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let target = PROCESS_TABLE
+        .process_handle(target_pid)
+        .map_err(|_| SysError::NotFound)?;
+
+    if target_pid != caller_pid && !PROCESS_TABLE.is_child(caller_pid, target_pid) {
+        return Err(SysError::InvalidArgument);
+    }
+
+    if target.session_id() != caller.session_id() {
+        return Err(SysError::InvalidArgument);
+    }
+
+    println!(
+        "[setpgid] caller={} target={} new_pgrp={}",
+        caller_pid, target_pid, target_pgid
+    );
+    target.set_pgrp_id(target_pgid);
+    Ok(0)
 }
 
 fn handle_exit(invocation: &SyscallInvocation) -> DispatchResult {
@@ -436,6 +625,11 @@ fn handle_fork(
     if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
         child_proc.set_brk_state(parent_proc.brk_state());
         child_proc.set_parent(pid);
+        child_proc.set_session_id(parent_proc.session_id());
+        child_proc.set_pgrp_id(parent_proc.pgrp_id());
+        if let Some(tty) = parent_proc.controlling_tty() {
+            child_proc.set_controlling_tty(tty);
+        }
     }
 
     let stack_size = parent_stack.size;
@@ -549,6 +743,13 @@ fn handle_execve(
 
     if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
         process.set_brk_base(program.heap_base);
+        println!(
+            "[proc] pid={} sid={} pgrp={} ctty={}",
+            pid,
+            process.session_id(),
+            process.pgrp_id(),
+            process.has_controlling_tty()
+        );
     }
 
     frame.rip = program.entry.as_raw() as u64;
@@ -1135,6 +1336,28 @@ mod tests {
             DispatchResult::Completed(Ok(written)) => {
                 assert_eq!(written, (a.len() + b.len()) as u64)
             }
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn fcntl_dupfd_sets_cloexec() {
+        println!("[test] fcntl_dupfd_sets_cloexec");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+
+        let dup_inv = SyscallInvocation::new(LinuxSyscall::Fcntl as u64, [0, 1030, 10, 0, 0, 0]);
+        let new_fd = match dispatch(&dup_inv, None) {
+            DispatchResult::Completed(Ok(fd)) => fd as u32,
+            other => panic!("unexpected dispatch result: {:?}", other),
+        };
+        assert_eq!(new_fd, 10);
+
+        let get_inv =
+            SyscallInvocation::new(LinuxSyscall::Fcntl as u64, [new_fd as u64, 1, 0, 0, 0, 0]);
+        match dispatch(&get_inv, None) {
+            DispatchResult::Completed(Ok(flags)) => assert_eq!(flags, 1),
             other => panic!("unexpected dispatch result: {:?}", other),
         }
     }
