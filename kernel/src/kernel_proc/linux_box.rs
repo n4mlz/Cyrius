@@ -2,6 +2,7 @@
 
 use alloc::string::{String, ToString};
 
+use crate::arch::api::ArchPageTableAccess;
 use crate::fs::{VfsError, VfsPath};
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::fs as proc_fs;
@@ -43,13 +44,13 @@ impl From<SpawnError> for RunError {
 
 /// Launch a Linux ELF image as a new process, wait until all of its threads finish, and return.
 ///
-/// The loader expects a static, non-PIE ELF64 image and rewrites `syscall` instructions to
+/// The loader expects a Linux ELF64 image (static/PIE) and rewrites `syscall` instructions to
 /// `int 0x80` to reuse the existing trap vector. Standard file descriptors (0/1/2) are backed
 /// by the global tty, and other descriptors use the per-process VFS/FdTable.
 pub fn run_and_wait(origin_pid: ProcessId, raw_path: &str) -> Result<(), RunError> {
     let abs = absolute_path(origin_pid, raw_path)?;
     crate::println!(
-        "[linux] launch {abs} (static ELF64, no PIE or dynamic linking; limited syscalls supported)"
+        "[linux] launch {abs} (ELF64 static/PIE; no dynamic linking yet; limited syscalls supported)"
     );
     let pid = launch_process(&abs)?;
     wait_for_exit(pid);
@@ -64,12 +65,26 @@ fn launch_process(path: &str) -> Result<ProcessId, RunError> {
     if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
         process.set_brk_base(program.heap_base);
     }
+    let argv_refs = [path];
+    let envp_refs: [&str; 0] = [];
+    let auxv = linux::build_auxv(&program, crate::mem::addr::PageSize::SIZE_4K.bytes());
+    let stack_top =
+        <crate::arch::Arch as crate::arch::api::ArchThread>::user_stack_top(&program.user_stack);
+    let stack_pointer = PROCESS_TABLE
+        .address_space(pid)
+        .ok_or(RunError::Process(ProcessError::NotFound))?
+        .with_page_table(|table, _| {
+            linux::initialise_stack_with_args_in_table(
+                table, stack_top, &argv_refs, &envp_refs, &auxv,
+            )
+        })
+        .map_err(|err| RunError::Loader(LinuxLoadError::from(err)))?;
     let _tid = SCHEDULER.spawn_user_thread_with_stack(
         pid,
         "linux-main",
         program.entry,
         program.user_stack,
-        program.stack_pointer,
+        stack_pointer,
     )?;
 
     Ok(pid)
@@ -195,7 +210,7 @@ mod tests {
         let output = tty.drain_output();
         assert_eq!(
             output,
-            b"WRITEV\nSTAT:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+            b"WRITEV\nSTAT:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
         );
 
         if started {

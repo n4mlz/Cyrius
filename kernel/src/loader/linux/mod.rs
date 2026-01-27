@@ -1,14 +1,16 @@
 use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
 use crate::fs::{VfsError, VfsPath};
 use crate::loader::DefaultLinuxElfPlatform;
-use crate::mem::addr::{VirtAddr, align_up};
+use crate::mem::addr::{Addr, VirtAddr, align_up};
 use crate::mem::paging::MapError;
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use alloc::vec::Vec;
 
 mod elf;
 mod map;
 mod patch;
+mod reloc;
 mod stack;
 
 pub use stack::{
@@ -16,12 +18,23 @@ pub use stack::{
     initialise_stack_with_args_in_table,
 };
 
+pub const AT_PHDR: u64 = 3;
+pub const AT_PHENT: u64 = 4;
+pub const AT_PHNUM: u64 = 5;
+pub const AT_PAGESZ: u64 = 6;
+pub const AT_BASE: u64 = 7;
+pub const AT_ENTRY: u64 = 9;
+
 /// Linux ELF image loaded into a process address space.
 pub struct LinuxProgram<S> {
     pub entry: VirtAddr,
     pub user_stack: S,
     pub stack_pointer: VirtAddr,
     pub heap_base: VirtAddr,
+    pub load_bias: VirtAddr,
+    pub phdr: VirtAddr,
+    pub phent: u16,
+    pub phnum: u16,
 }
 
 #[derive(Debug)]
@@ -36,6 +49,9 @@ pub enum LinuxLoadError {
     StackBuild(StackBuildError),
     NotFound,
     AlignmentMismatch,
+    UserAccess(crate::mem::user::UserAccessError),
+    UnsupportedRelocation(u32),
+    RelocationTargetOutOfRange,
 }
 
 impl From<ProcessError> for LinuxLoadError {
@@ -68,7 +84,7 @@ impl From<StackBuildError> for LinuxLoadError {
     }
 }
 
-/// Load a static, non-PIE 64-bit ELF into the target process address space.
+/// Load a 64-bit ELF (static/PIE) into the target process address space.
 pub fn load_elf(
     pid: ProcessId,
     raw_path: &str,
@@ -89,25 +105,49 @@ where
     let abs = resolve_path(pid, raw_path)?;
     let elf_bytes = proc_fs::read_to_end_at(pid, &abs)?;
     let elf = elf::ElfFile::parse::<P>(&elf_bytes)?;
+    let load_bias = choose_load_bias::<P>(&elf)?;
 
     let space: P::AddressSpace = PROCESS_TABLE
         .address_space(pid)
         .ok_or(LinuxLoadError::Process(ProcessError::NotFound))?;
 
-    map::map_segments::<P>(&space, &elf, &elf_bytes)?;
+    let mapped = map::map_segments::<P>(&space, &elf, &elf_bytes, load_bias)?;
+    if let Some(dynamic) = elf.dynamic.as_ref() {
+        space.with_page_table(|table, _| {
+            let info = reloc::read_dynamic_info(table, load_bias, dynamic)?;
+            reloc::apply_relocations(table, load_bias, &info, &mapped)?;
+            Ok::<(), LinuxLoadError>(())
+        })?;
+    }
+    space.with_page_table(|table, _| {
+        map::apply_segment_permissions(table, &mapped)?;
+        if elf.interp.is_some() {
+            if let Some(relro) = elf.relro.as_ref() {
+                reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
+            }
+        } else if elf.relro.is_some() {
+            crate::println!("[loader] GNU_RELRO skipped (no PT_INTERP)");
+        }
+        Ok::<(), LinuxLoadError>(())
+    })?;
 
     let user_stack = P::allocate_user_stack(&space, 32 * 1024)?;
     let stack_top = P::user_stack_top(&user_stack);
     let stack_pointer = space
         .with_page_table(|table, _| stack::initialise_minimal_stack(table, stack_top))
         .map_err(LinuxLoadError::from)?;
-    let heap_base = compute_heap_base::<P>(&elf)?;
+    let heap_base = compute_heap_base::<P>(load_bias, &elf)?;
+    let phdr = compute_phdr_address(load_bias, &elf, &mapped)?;
 
     Ok(LinuxProgram {
-        entry: elf.entry,
+        entry: add_base(load_bias, elf.entry)?,
         user_stack,
         stack_pointer,
         heap_base,
+        load_bias,
+        phdr,
+        phent: elf.ph_entry_size,
+        phnum: elf.ph_count,
     })
 }
 
@@ -117,6 +157,7 @@ fn resolve_path(pid: ProcessId, raw: &str) -> Result<VfsPath, LinuxLoadError> {
 }
 
 fn compute_heap_base<P: ArchLinuxElfPlatform>(
+    base: VirtAddr,
     elf: &elf::ElfFile,
 ) -> Result<VirtAddr, LinuxLoadError> {
     let mut max_end = 0usize;
@@ -131,7 +172,90 @@ fn compute_heap_base<P: ArchLinuxElfPlatform>(
         }
     }
     let aligned = align_up(max_end, P::page_size());
-    Ok(VirtAddr::new(aligned))
+    add_base(base, VirtAddr::new(aligned))
+}
+
+fn choose_load_bias<P: ArchLinuxElfPlatform>(
+    elf: &elf::ElfFile,
+) -> Result<VirtAddr, LinuxLoadError> {
+    match elf.elf_type {
+        elf::ElfType::Exec => Ok(VirtAddr::new(0)),
+        elf::ElfType::Dyn => Ok(VirtAddr::new(default_pie_base::<P>())),
+    }
+}
+
+fn default_pie_base<P: ArchLinuxElfPlatform>() -> usize {
+    align_up(0x400000, P::page_size())
+}
+
+fn compute_phdr_address(
+    base: VirtAddr,
+    elf: &elf::ElfFile,
+    mapped: &[map::MappedSegment],
+) -> Result<VirtAddr, LinuxLoadError> {
+    let phdr = if let Some(vaddr) = elf.phdr_vaddr {
+        add_base(base, vaddr)?
+    } else {
+        let phoff = elf.ph_offset;
+        let mut resolved = None;
+        for seg in &elf.segments {
+            let seg_end = seg
+                .offset
+                .checked_add(seg.file_size)
+                .ok_or(LinuxLoadError::SizeOverflow)?;
+            if phoff >= seg.offset && phoff < seg_end {
+                let offset_in_seg = phoff - seg.offset;
+                let vaddr = seg
+                    .vaddr
+                    .as_raw()
+                    .checked_add(offset_in_seg)
+                    .ok_or(LinuxLoadError::SizeOverflow)?;
+                resolved = Some(add_base(base, VirtAddr::new(vaddr))?);
+                break;
+            }
+        }
+        resolved.ok_or(LinuxLoadError::InvalidElf("PHDR not in loadable segment"))?
+    };
+    if !is_mapped(phdr, mapped) {
+        return Err(LinuxLoadError::InvalidElf("PHDR not mapped"));
+    }
+    Ok(phdr)
+}
+
+pub fn build_auxv<S>(program: &LinuxProgram<S>, page_size: usize) -> Vec<AuxvEntry> {
+    let mut auxv = Vec::with_capacity(5);
+    auxv.push(AuxvEntry {
+        key: AT_PAGESZ,
+        value: page_size as u64,
+    });
+    auxv.push(AuxvEntry {
+        key: AT_PHDR,
+        value: program.phdr.as_raw() as u64,
+    });
+    auxv.push(AuxvEntry {
+        key: AT_PHENT,
+        value: program.phent as u64,
+    });
+    auxv.push(AuxvEntry {
+        key: AT_PHNUM,
+        value: program.phnum as u64,
+    });
+    auxv.push(AuxvEntry {
+        key: AT_ENTRY,
+        value: program.entry.as_raw() as u64,
+    });
+    auxv
+}
+
+pub(crate) fn add_base(base: VirtAddr, addr: VirtAddr) -> Result<VirtAddr, LinuxLoadError> {
+    base.checked_add(addr.as_raw())
+        .ok_or(LinuxLoadError::SizeOverflow)
+}
+
+fn is_mapped(addr: VirtAddr, segments: &[map::MappedSegment]) -> bool {
+    segments
+        .iter()
+        .any(|seg| addr >= seg.start && addr < seg.end)
 }
 
 #[cfg(test)]
@@ -150,8 +274,8 @@ mod tests {
     use crate::test::kernel_test_case;
 
     use super::elf::{
-        ELF_CLASS_64, ELF_DATA_LSB, ELF_MAGIC, ELF_TYPE_EXEC, ELF_VERSION_CURRENT, PT_LOAD,
-        ProgramHeaderRaw,
+        ELF_CLASS_64, ELF_DATA_LSB, ELF_MAGIC, ELF_TYPE_DYN, ELF_TYPE_EXEC, ELF_VERSION_CURRENT,
+        PT_DYNAMIC, PT_LOAD, ProgramHeaderRaw,
     };
     use super::*;
     use core::mem::size_of;
@@ -173,7 +297,7 @@ mod tests {
         let _ = file.write_at(0, &elf).expect("write image");
 
         let program = load_elf(pid, "/demo").expect("load ELF");
-        assert_eq!(program.entry.as_raw(), 0x400080);
+        assert_eq!(program.entry.as_raw(), 0x400100);
         assert_eq!(program.heap_base.as_raw(), 0x402000);
         let space = PROCESS_TABLE
             .address_space(pid)
@@ -215,6 +339,54 @@ mod tests {
         out
     }
 
+    fn read_user_u64(
+        space: &<Arch as ArchThread>::AddressSpace,
+        addr: VirtAddr,
+    ) -> Result<u64, LinuxLoadError> {
+        let mut out = Ok(0u64);
+        space
+            .with_page_table(|table, _| {
+                if out.is_ok() {
+                    let phys = table.translate(addr)?;
+                    let mapper = crate::mem::manager::phys_mapper();
+                    unsafe {
+                        let ptr = mapper.phys_to_virt(phys).into_ptr() as *const u64;
+                        out = Ok(core::ptr::read(ptr));
+                    }
+                }
+                Ok::<(), LinuxLoadError>(())
+            })
+            .map_err(|_| LinuxLoadError::Map(MapError::NotMapped))?;
+        out
+    }
+
+    #[kernel_test_case]
+    fn loads_pie_with_relative_relocations() {
+        println!("[test] loads_pie_with_relative_relocations");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("linux-proc", crate::process::ProcessDomain::Host)
+            .expect("create user process");
+
+        let root = MemDirectory::new();
+        crate::fs::force_replace_root(root.clone());
+
+        let elf = test_pie_image();
+        let file = root.create_file("pie").expect("create file");
+        let _ = file.write_at(0, &elf).expect("write image");
+
+        let program = load_elf(pid, "/pie").expect("load PIE");
+        assert_eq!(program.load_bias.as_raw(), 0x400000);
+        assert_eq!(program.entry.as_raw(), 0x400000 + 0x100);
+
+        let space = PROCESS_TABLE
+            .address_space(pid)
+            .expect("user address space");
+        let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400)).expect("read reloc");
+        assert_eq!(relocated, 0x400000 + 0x1234);
+    }
+
     fn test_elf_image() -> Vec<u8> {
         let mut buf = vec![0u8; 0x2000 + 0x200];
 
@@ -226,7 +398,7 @@ mod tests {
         buf[16..18].copy_from_slice(&ELF_TYPE_EXEC.to_le_bytes());
         buf[18..20].copy_from_slice(&DefaultLinuxElfPlatform::machine_id().to_le_bytes());
         buf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
-        buf[24..32].copy_from_slice(&(0x400080u64).to_le_bytes()); // e_entry
+        buf[24..32].copy_from_slice(&(0x400100u64).to_le_bytes()); // e_entry
         buf[32..40].copy_from_slice(&(64u64).to_le_bytes()); // e_phoff
         buf[54..56].copy_from_slice(&(size_of::<ProgramHeaderRaw>() as u16).to_le_bytes());
         buf[56..58].copy_from_slice(&(2u16).to_le_bytes()); // phnum
@@ -237,7 +409,7 @@ mod tests {
             ProgramHeaderRaw {
                 typ: PT_LOAD,
                 flags: 0x5,
-                offset: 0x1000,
+                offset: 0x0,
                 vaddr: 0x400000,
                 _paddr: 0,
                 file_size: 0x200,
@@ -261,12 +433,68 @@ mod tests {
             },
         );
 
-        // Write code segment bytes.
-        buf[0x1000..0x1000 + 0x200].fill(0x90);
-        buf[0x1000 + 0x80..0x1000 + 0x80 + 2].copy_from_slice(&[0x0F, 0x05]);
+        // Write code segment bytes after headers.
+        buf[0x100..0x200].fill(0x90);
+        buf[0x100..0x100 + 2].copy_from_slice(&[0x0F, 0x05]);
 
         // Write data segment bytes.
         buf[0x2000..0x2000 + 0x100].fill(0xAA);
+
+        buf
+    }
+
+    fn test_pie_image() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x600];
+
+        buf[0..4].copy_from_slice(ELF_MAGIC);
+        buf[4] = ELF_CLASS_64;
+        buf[5] = ELF_DATA_LSB;
+        buf[6] = ELF_VERSION_CURRENT;
+        buf[16..18].copy_from_slice(&ELF_TYPE_DYN.to_le_bytes());
+        buf[18..20].copy_from_slice(&DefaultLinuxElfPlatform::machine_id().to_le_bytes());
+        buf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        buf[24..32].copy_from_slice(&(0x100u64).to_le_bytes());
+        buf[32..40].copy_from_slice(&(64u64).to_le_bytes());
+        buf[54..56].copy_from_slice(&(size_of::<ProgramHeaderRaw>() as u16).to_le_bytes());
+        buf[56..58].copy_from_slice(&(2u16).to_le_bytes());
+
+        write_ph(
+            &mut buf[64..64 + size_of::<ProgramHeaderRaw>()],
+            ProgramHeaderRaw {
+                typ: PT_LOAD,
+                flags: 0x7,
+                offset: 0x0,
+                vaddr: 0x0,
+                _paddr: 0,
+                file_size: 0x500,
+                mem_size: 0x500,
+                align: 0x1000,
+            },
+        );
+
+        write_ph(
+            &mut buf[64 + size_of::<ProgramHeaderRaw>()..64 + 2 * size_of::<ProgramHeaderRaw>()],
+            ProgramHeaderRaw {
+                typ: PT_DYNAMIC,
+                flags: 0x6,
+                offset: 0x200,
+                vaddr: 0x200,
+                _paddr: 0,
+                file_size: 0x40,
+                mem_size: 0x40,
+                align: 0x8,
+            },
+        );
+
+        buf[0x100..0x180].fill(0x90);
+        buf[0x100..0x102].copy_from_slice(&[0x0F, 0x05]);
+
+        write_dyn(&mut buf[0x200..0x210], 7, 0x300);
+        write_dyn(&mut buf[0x210..0x220], 8, 24);
+        write_dyn(&mut buf[0x220..0x230], 9, 24);
+        write_dyn(&mut buf[0x230..0x240], 0, 0);
+
+        write_rela(&mut buf[0x300..0x318], 0x400, 8, 0x1234);
 
         buf
     }
@@ -280,5 +508,17 @@ mod tests {
         slot[32..40].copy_from_slice(&ph.file_size.to_le_bytes());
         slot[40..48].copy_from_slice(&ph.mem_size.to_le_bytes());
         slot[48..56].copy_from_slice(&ph.align.to_le_bytes());
+    }
+
+    fn write_dyn(slot: &mut [u8], tag: i64, val: u64) {
+        slot[0..8].copy_from_slice(&(tag as u64).to_le_bytes());
+        slot[8..16].copy_from_slice(&val.to_le_bytes());
+    }
+
+    fn write_rela(slot: &mut [u8], offset: u64, typ: u32, addend: i64) {
+        let info = typ as u64;
+        slot[0..8].copy_from_slice(&offset.to_le_bytes());
+        slot[8..16].copy_from_slice(&info.to_le_bytes());
+        slot[16..24].copy_from_slice(&addend.to_le_bytes());
     }
 }

@@ -5,20 +5,48 @@ use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::paging::{MapError, PhysMapper, TranslationError};
 
 use super::LinuxLoadError;
+use super::add_base;
 use super::elf::{ElfFile, ProgramSegment};
 use super::patch::rewrite_syscalls_in_table;
+use alloc::vec::Vec;
+
+pub struct MappedSegment {
+    pub start: VirtAddr,
+    pub end: VirtAddr,
+    pub perms: MemPerm,
+    pub page_size: usize,
+}
 
 pub fn map_segments<P: ArchLinuxElfPlatform>(
     space: &P::AddressSpace,
     elf: &ElfFile,
     image: &[u8],
-) -> Result<(), LinuxLoadError> {
+    base: VirtAddr,
+) -> Result<Vec<MappedSegment>, LinuxLoadError> {
     space.with_page_table(|table, allocator| {
+        let mut mapped = alloc::vec::Vec::new();
         for seg in &elf.segments {
-            map_single_segment::<_, _, P>(table, allocator, seg, image)?;
+            if let Some(segment) =
+                map_single_segment::<_, _, P>(table, allocator, seg, image, base)?
+            {
+                mapped.push(segment);
+            }
         }
-        Ok(())
+        Ok(mapped)
     })
+}
+
+pub fn apply_segment_permissions<T: PageTableOps>(
+    table: &mut T,
+    segments: &[MappedSegment],
+) -> Result<(), LinuxLoadError> {
+    for seg in segments {
+        for addr in (seg.start.as_raw()..seg.end.as_raw()).step_by(seg.page_size) {
+            let page = Page::new(VirtAddr::new(addr), PageSize(seg.page_size));
+            table.update_permissions(page, seg.perms)?;
+        }
+    }
+    Ok(())
 }
 
 fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatform>(
@@ -26,9 +54,10 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     allocator: &mut A,
     seg: &ProgramSegment,
     image: &[u8],
-) -> Result<(), LinuxLoadError> {
+    base: VirtAddr,
+) -> Result<Option<MappedSegment>, LinuxLoadError> {
     if seg.mem_size == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     // Map with write permissions for population; tighten later if necessary.
@@ -36,9 +65,10 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     let map_perms = target_perms | MemPerm::WRITE;
 
     let page_size = P::page_size();
-    let start = align_down(seg.vaddr.as_raw(), page_size);
+    let seg_vaddr = add_base(base, seg.vaddr)?;
+    let start = align_down(seg_vaddr.as_raw(), page_size);
     let end = align_up(
-        seg.vaddr
+        seg_vaddr
             .as_raw()
             .checked_add(seg.mem_size)
             .ok_or(LinuxLoadError::SizeOverflow)?,
@@ -64,12 +94,11 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     let file_slice = image
         .get(seg.offset..file_range)
         .ok_or(LinuxLoadError::InvalidElf("segment out of file bounds"))?;
-    copy_into_mapped(table, seg.vaddr, file_slice)?;
+    copy_into_mapped(table, seg_vaddr, file_slice)?;
 
     // Zero BSS.
     if seg.mem_size > seg.file_size {
-        let bss_start = seg
-            .vaddr
+        let bss_start = seg_vaddr
             .as_raw()
             .checked_add(seg.file_size)
             .ok_or(LinuxLoadError::SizeOverflow)?;
@@ -78,17 +107,15 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     }
 
     if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
-        rewrite_syscalls_in_table(seg, table).map_err(LinuxLoadError::from)?;
+        rewrite_syscalls_in_table(seg_vaddr, seg.file_size, table).map_err(LinuxLoadError::from)?;
     }
 
-    if !target_perms.contains(MemPerm::WRITE) {
-        for addr in (start..end).step_by(page_size) {
-            let page = Page::new(VirtAddr::new(addr), page_sz);
-            table.update_permissions(page, target_perms)?;
-        }
-    }
-
-    Ok(())
+    Ok(Some(MappedSegment {
+        start: VirtAddr::new(start),
+        end: VirtAddr::new(end),
+        perms: target_perms,
+        page_size,
+    }))
 }
 
 fn copy_into_mapped<T: PageTableOps>(

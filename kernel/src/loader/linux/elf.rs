@@ -1,3 +1,4 @@
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use core::mem::size_of;
@@ -12,11 +13,30 @@ pub(crate) const ELF_CLASS_64: u8 = 2;
 pub(crate) const ELF_DATA_LSB: u8 = 1;
 pub(crate) const ELF_VERSION_CURRENT: u8 = 1;
 pub(crate) const ELF_TYPE_EXEC: u16 = 2;
+pub(crate) const ELF_TYPE_DYN: u16 = 3;
 pub(crate) const PT_LOAD: u32 = 1;
+pub(crate) const PT_DYNAMIC: u32 = 2;
+pub(crate) const PT_INTERP: u32 = 3;
+pub(crate) const PT_PHDR: u32 = 6;
+pub(crate) const PT_GNU_RELRO: u32 = 0x6474_e552;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ElfType {
+    Exec,
+    Dyn,
+}
 
 pub struct ElfFile {
     pub entry: VirtAddr,
     pub segments: Vec<ProgramSegment>,
+    pub elf_type: ElfType,
+    pub ph_offset: usize,
+    pub ph_entry_size: u16,
+    pub ph_count: u16,
+    pub dynamic: Option<DynamicSegment>,
+    pub relro: Option<RelroSegment>,
+    pub phdr_vaddr: Option<VirtAddr>,
+    pub interp: Option<String>,
 }
 
 pub struct ProgramSegment {
@@ -27,10 +47,24 @@ pub struct ProgramSegment {
     pub mem_size: usize,
 }
 
+pub struct DynamicSegment {
+    pub vaddr: VirtAddr,
+    pub mem_size: usize,
+}
+
+pub struct RelroSegment {
+    pub vaddr: VirtAddr,
+    pub mem_size: usize,
+}
+
 impl ElfFile {
     pub fn parse<P: ArchLinuxElfPlatform>(bytes: &[u8]) -> Result<Self, LinuxLoadError> {
         let header = ElfHeader::parse::<P>(bytes)?;
         let mut segments = Vec::new();
+        let mut dynamic = None;
+        let mut relro = None;
+        let mut phdr_vaddr = None;
+        let mut interp = None;
         let phoff = usize::try_from(header.ph_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
         let ent_size = usize::from(header.ph_entry_size);
         let count = usize::from(header.ph_count);
@@ -58,6 +92,43 @@ impl ElfFile {
                     mem_size: usize::try_from(ph.mem_size)
                         .map_err(|_| LinuxLoadError::SizeOverflow)?,
                 });
+            } else if ph.typ == PT_DYNAMIC {
+                dynamic = Some(DynamicSegment {
+                    vaddr: VirtAddr::new(
+                        usize::try_from(ph.vaddr).map_err(|_| LinuxLoadError::SizeOverflow)?,
+                    ),
+                    mem_size: usize::try_from(ph.mem_size)
+                        .map_err(|_| LinuxLoadError::SizeOverflow)?,
+                });
+            } else if ph.typ == PT_GNU_RELRO {
+                relro = Some(RelroSegment {
+                    vaddr: VirtAddr::new(
+                        usize::try_from(ph.vaddr).map_err(|_| LinuxLoadError::SizeOverflow)?,
+                    ),
+                    mem_size: usize::try_from(ph.mem_size)
+                        .map_err(|_| LinuxLoadError::SizeOverflow)?,
+                });
+            } else if ph.typ == PT_INTERP {
+                let offset =
+                    usize::try_from(ph.offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
+                let size =
+                    usize::try_from(ph.file_size).map_err(|_| LinuxLoadError::SizeOverflow)?;
+                let end = offset
+                    .checked_add(size)
+                    .ok_or(LinuxLoadError::SizeOverflow)?;
+                let slice = bytes
+                    .get(offset..end)
+                    .ok_or(LinuxLoadError::InvalidElf("interp segment out of range"))?;
+                let len = slice.iter().position(|b| *b == 0).unwrap_or(slice.len());
+                interp = Some(
+                    core::str::from_utf8(&slice[..len])
+                        .map_err(|_| LinuxLoadError::InvalidElf("interp not utf-8"))?
+                        .to_string(),
+                );
+            } else if ph.typ == PT_PHDR {
+                phdr_vaddr = Some(VirtAddr::new(
+                    usize::try_from(ph.vaddr).map_err(|_| LinuxLoadError::SizeOverflow)?,
+                ));
             }
         }
 
@@ -66,6 +137,14 @@ impl ElfFile {
                 usize::try_from(header.entry).map_err(|_| LinuxLoadError::SizeOverflow)?,
             ),
             segments,
+            elf_type: header.elf_type,
+            ph_offset: phoff,
+            ph_entry_size: header.ph_entry_size,
+            ph_count: header.ph_count,
+            dynamic,
+            relro,
+            phdr_vaddr,
+            interp,
         })
     }
 }
@@ -75,6 +154,7 @@ struct ElfHeader {
     ph_offset: u64,
     ph_entry_size: u16,
     ph_count: u16,
+    elf_type: ElfType,
 }
 
 impl ElfHeader {
@@ -96,9 +176,11 @@ impl ElfHeader {
         }
         let e_type = u16::from_le_bytes([bytes[16], bytes[17]]);
         let e_machine = u16::from_le_bytes([bytes[18], bytes[19]]);
-        if e_type != ELF_TYPE_EXEC {
-            return Err(LinuxLoadError::InvalidElf("unsupported type"));
-        }
+        let elf_type = match e_type {
+            ELF_TYPE_EXEC => ElfType::Exec,
+            ELF_TYPE_DYN => ElfType::Dyn,
+            _ => return Err(LinuxLoadError::InvalidElf("unsupported type")),
+        };
         if e_machine != P::machine_id() {
             return Err(LinuxLoadError::InvalidElf("unsupported machine"));
         }
@@ -115,6 +197,7 @@ impl ElfHeader {
             ph_offset,
             ph_entry_size,
             ph_count,
+            elf_type,
         })
     }
 }

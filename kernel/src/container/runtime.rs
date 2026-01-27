@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 
+use crate::arch::api::ArchPageTableAccess;
 use crate::container::{CONTAINER_TABLE, Container, ContainerError, ContainerStatus};
 use crate::fs::VfsPath;
 use crate::loader::linux::{self, LinuxLoadError};
@@ -66,6 +67,12 @@ pub fn start_container(container: Arc<Container>) -> Result<ProcessId, Container
         .first()
         .map(String::as_str)
         .ok_or(ContainerStartError::MissingEntrypoint)?;
+    let argv_refs: alloc::vec::Vec<&str> = args.iter().map(String::as_str).collect();
+    let envp_refs: alloc::vec::Vec<&str> = process_spec
+        .env()
+        .as_ref()
+        .map(|env| env.iter().map(String::as_str).collect())
+        .unwrap_or_default();
 
     let cwd_raw = process_spec.cwd();
     let cwd = parse_cwd(cwd_raw)?;
@@ -80,12 +87,27 @@ pub fn start_container(container: Arc<Container>) -> Result<ProcessId, Container
     process.set_cwd(cwd);
 
     let program = linux::load_elf(pid, entry)?;
+    let auxv = linux::build_auxv(&program, crate::mem::addr::PageSize::SIZE_4K.bytes());
+    let stack_top =
+        <crate::arch::Arch as crate::arch::api::ArchThread>::user_stack_top(&program.user_stack);
+    let stack_pointer = PROCESS_TABLE
+        .address_space(pid)
+        .ok_or(ContainerStartError::Process(ProcessError::NotFound))?
+        .with_page_table(|table, _| {
+            linux::initialise_stack_with_args_in_table(
+                table, stack_top, &argv_refs, &envp_refs, &auxv,
+            )
+        })
+        .map_err(|err| ContainerStartError::Loader(LinuxLoadError::from(err)))?;
+    if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+        process.set_brk_base(program.heap_base);
+    }
     let _tid = SCHEDULER.spawn_user_thread_with_stack(
         pid,
         "container-main",
         program.entry,
         program.user_stack,
-        program.stack_pointer,
+        stack_pointer,
     )?;
 
     container.mark_running(pid)?;
