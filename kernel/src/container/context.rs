@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use crate::fs::{Directory, Vfs};
+use crate::fs::{Node, Vfs};
 
 #[derive(Clone)]
 pub struct ContainerContext {
@@ -12,7 +12,7 @@ impl ContainerContext {
         Self { vfs }
     }
 
-    pub fn rootfs(&self) -> Arc<dyn Directory> {
+    pub fn rootfs(&self) -> Arc<dyn Node> {
         self.vfs.root()
     }
 

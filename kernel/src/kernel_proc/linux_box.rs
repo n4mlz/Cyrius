@@ -3,7 +3,7 @@
 use alloc::string::{String, ToString};
 
 use crate::arch::api::ArchPageTableAccess;
-use crate::fs::{VfsError, VfsPath};
+use crate::fs::{Path, VfsError};
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
@@ -105,17 +105,17 @@ fn wait_for_exit(pid: ProcessId) {
 
 fn absolute_path(origin_pid: ProcessId, raw: &str) -> Result<String, RunError> {
     let cwd = proc_fs::cwd(origin_pid)?;
-    let abs = VfsPath::resolve(raw, &cwd)?;
+    let abs = Path::resolve(raw, &cwd)?;
     Ok(abs.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Directory;
+    use crate::device::tty::global_tty;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
-    use crate::fs::tty::global_tty;
     use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
     use crate::println;
     use crate::process::PROCESS_TABLE;
@@ -151,10 +151,12 @@ mod tests {
         force_replace_root(root.clone());
 
         let file = root.create_file("msg.txt").expect("create msg.txt");
-        let _ = file.write_at(0, b"FILE\n").expect("write msg.txt");
+        let handle = file.open(crate::fs::OpenOptions::new(0)).expect("open msg");
+        let _ = handle.write(b"FILE\n").expect("write msg.txt");
 
         let bin = root.create_file("demo").expect("create demo");
-        let _ = bin.write_at(0, LINUX_SYSCALL_ELF).expect("write demo");
+        let handle = bin.open(crate::fs::OpenOptions::new(0)).expect("open demo");
+        let _ = handle.write(LINUX_SYSCALL_ELF).expect("write demo");
 
         let tty = global_tty();
         tty.clear_output();
@@ -191,15 +193,20 @@ mod tests {
         force_replace_root(root.clone());
 
         let stat_file = root.create_file("stat.txt").expect("create stat.txt");
-        let _ = stat_file.write_at(0, b"STATDATA").expect("write stat.txt");
+        let handle = stat_file
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open stat.txt");
+        let _ = handle.write(b"STATDATA").expect("write stat.txt");
 
         let adv = root.create_file("adv").expect("create adv");
-        let _ = adv.write_at(0, LINUX_SYSCALL_ADV_ELF).expect("write adv");
+        let handle = adv.open(crate::fs::OpenOptions::new(0)).expect("open adv");
+        let _ = handle.write(LINUX_SYSCALL_ADV_ELF).expect("write adv");
 
         let child = root.create_file("child").expect("create child");
-        let _ = child
-            .write_at(0, LINUX_SYSCALL_CHILD_ELF)
-            .expect("write child");
+        let handle = child
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open child");
+        let _ = handle.write(LINUX_SYSCALL_CHILD_ELF).expect("write child");
 
         let tty = global_tty();
         tty.clear_output();
@@ -210,7 +217,7 @@ mod tests {
         let output = tty.drain_output();
         assert_eq!(
             output,
-            b"WRITEV\nSTAT:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+            b"WRITEV\nSTAT:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
         );
 
         if started {

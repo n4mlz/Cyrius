@@ -20,7 +20,8 @@
   userland separation exists.
 - Linux dispatch implements a minimal set of process/syscall plumbing needed by static busybox:
   `read`, `write`, `open`, `close`, `writev`, `stat`, `brk`, `fork`, `execve`, `wait4`, `arch_prctl`,
-  plus stubbed signal/ioctl calls. Unsupported numbers map to `ENOSYS`.
+  `ioctl` (routed through `ControlOps`), plus stubbed signal calls. Unsupported numbers map to
+  `ENOSYS`, while unsupported ioctls map to `ENOTTY`.
 
 ## Extension Points / TODO
 - Add architecture-specific fast paths (`syscall`/`sysret`) once MSR programming is available.

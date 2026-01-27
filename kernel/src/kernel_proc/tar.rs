@@ -1,4 +1,4 @@
-use crate::fs::{PathComponent, VfsError, VfsPath};
+use crate::fs::{Path, PathComponent, VfsError};
 use crate::process::ProcessId;
 use crate::process::fs as proc_fs;
 use alloc::string::{String, ToString};
@@ -24,7 +24,7 @@ pub enum TarError {
 /// # Notes
 /// - Assumes the current working directory is backed by a writable filesystem such as the in-memory ramfs.
 /// - Regular files, directories, symlinks, and hard links are supported. Other entry types fail with `UnsupportedType`.
-/// - Archive paths must be relative; absolute paths or `..` segments are rejected by `VfsPath`.
+/// - Archive paths must be relative; absolute paths or `..` segments are rejected by `Path`.
 pub fn extract_to_ramfs(
     pid: ProcessId,
     archive_path: &str,
@@ -32,12 +32,12 @@ pub fn extract_to_ramfs(
 ) -> Result<(), TarError> {
     let cwd = proc_fs::cwd(pid).map_err(TarError::Fs)?;
     let base = match dest {
-        Some(path) => VfsPath::resolve(path, &cwd).map_err(TarError::Fs)?,
+        Some(path) => Path::resolve(path, &cwd).map_err(TarError::Fs)?,
         None => cwd,
     };
     TarExtractor::ensure_dir_chain_static(pid, &base)?;
 
-    let fd = proc_fs::open_path(pid, archive_path).map_err(TarError::Fs)?;
+    let fd = proc_fs::open_path(pid, archive_path, 0).map_err(TarError::Fs)?;
     let mut reader = TarReader::new(pid, fd);
     let result = TarExtractor {
         pid,
@@ -51,13 +51,13 @@ pub fn extract_to_ramfs(
 
 struct TarExtractor {
     pid: ProcessId,
-    base: VfsPath,
+    base: Path,
     pending_hardlinks: Vec<PendingHardLink>,
 }
 
 struct PendingHardLink {
-    link: VfsPath,
-    parent: VfsPath,
+    link: Path,
+    parent: Path,
     target: String,
 }
 
@@ -103,19 +103,19 @@ impl TarExtractor {
         Ok(())
     }
 
-    fn target_path(&self, path: &VfsPath) -> Result<VfsPath, TarError> {
+    fn target_path(&self, path: &Path) -> Result<Path, TarError> {
         if path.is_absolute() {
             return Err(TarError::InvalidArchive);
         }
         self.base.join(path).map_err(TarError::Fs)
     }
 
-    fn ensure_dir_chain(&self, target: &VfsPath) -> Result<(), TarError> {
+    fn ensure_dir_chain(&self, target: &Path) -> Result<(), TarError> {
         Self::ensure_dir_chain_static(self.pid, target)
     }
 
-    fn ensure_dir_chain_static(pid: ProcessId, target: &VfsPath) -> Result<(), TarError> {
-        let mut current = VfsPath::root();
+    fn ensure_dir_chain_static(pid: ProcessId, target: &Path) -> Result<(), TarError> {
+        let mut current = Path::root();
         for component in target.components() {
             current.push(component.clone());
             let raw = current.to_string();
@@ -124,7 +124,7 @@ impl TarExtractor {
         Ok(())
     }
 
-    fn write_file(&self, path: &VfsPath, data: &[u8]) -> Result<(), TarError> {
+    fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), TarError> {
         proc_fs::write_path(self.pid, path.to_string().as_str(), data).map_err(TarError::Fs)
     }
 
@@ -234,9 +234,9 @@ impl TarReader {
                 }
                 _ => {
                     let path = if let Some(override_path) = self.pending_path.take() {
-                        VfsPath::parse(&override_path).map_err(TarError::Fs)?
+                        Path::parse(&override_path).map_err(TarError::Fs)?
                     } else {
-                        VfsPath::parse(&name).map_err(TarError::Fs)?
+                        Path::parse(&name).map_err(TarError::Fs)?
                     };
 
                     return Ok(Some(TarEntry { path, size, kind }));
@@ -317,7 +317,7 @@ impl TarReader {
 }
 
 struct TarEntry {
-    path: VfsPath,
+    path: Path,
     size: usize,
     kind: TarEntryKind,
 }
@@ -451,10 +451,10 @@ fn trim_nul(field: &[u8]) -> Vec<u8> {
 }
 
 fn resolve_link_target(
-    base_root: &VfsPath,
-    link_parent: &VfsPath,
+    base_root: &Path,
+    link_parent: &Path,
     target: &str,
-) -> Result<VfsPath, TarError> {
+) -> Result<Path, TarError> {
     let mut comps: Vec<PathComponent> = if target.starts_with('/') {
         base_root.components().to_vec()
     } else {
@@ -480,10 +480,10 @@ fn resolve_link_target(
         comps.push(PathComponent::new(part));
     }
 
-    Ok(VfsPath::from_components(true, comps))
+    Ok(Path::from_components(true, comps))
 }
 
-fn debug_log(label: &str, kind: &TarEntryKind, target: &VfsPath) {
+fn debug_log(label: &str, kind: &TarEntryKind, target: &Path) {
     if !TAR_VERBOSE {
         return;
     }
@@ -505,7 +505,7 @@ mod tests {
     use crate::fs::fat32::FatFileSystem;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
-    use crate::fs::{VfsPath, mount_at};
+    use crate::fs::{Path, mount_at};
     use crate::kernel_proc::shell;
     use crate::println;
     use crate::process::PROCESS_TABLE;
@@ -536,7 +536,7 @@ mod tests {
     }
 
     fn read_all(pid: ProcessId, path: &str) -> Vec<u8> {
-        let fd = proc_fs::open_path(pid, path).expect("open path");
+        let fd = proc_fs::open_path(pid, path, 0).expect("open path");
         let mut buf = [0u8; 512];
         let mut out = Vec::new();
         loop {
@@ -558,19 +558,19 @@ mod tests {
     }
 
     fn mount_host_tar(pid: ProcessId, file: &str) -> bool {
-        let mount_path = VfsPath::parse("/mnt").expect("mount path");
+        let mount_path = Path::parse("/mnt").expect("mount path");
         let mut mounted = false;
         with_devices(|devices| {
             for dev in devices {
                 let shared = SharedBlockDevice::from_arc(dev.clone());
                 if let Ok(fs) = FatFileSystem::new(shared) {
                     force_replace_root(MemDirectory::new());
-                    let root: Arc<dyn crate::fs::Directory> = fs.root_dir();
+                    let root: Arc<dyn crate::fs::Node> = fs.root_dir();
                     if mount_at(mount_path.clone(), root).is_err() {
                         continue;
                     }
                     let target_path = alloc::format!("/mnt/{file}");
-                    if proc_fs::open_path(pid, target_path.as_str()).is_ok() {
+                    if proc_fs::open_path(pid, target_path.as_str(), 0).is_ok() {
                         mounted = true;
                         break;
                     }

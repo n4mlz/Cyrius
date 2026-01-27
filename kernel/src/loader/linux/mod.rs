@@ -1,5 +1,5 @@
 use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
-use crate::fs::{VfsError, VfsPath};
+use crate::fs::{Path, VfsError};
 use crate::loader::DefaultLinuxElfPlatform;
 use crate::mem::addr::{Addr, VirtAddr, align_up};
 use crate::mem::paging::MapError;
@@ -151,9 +151,9 @@ where
     })
 }
 
-fn resolve_path(pid: ProcessId, raw: &str) -> Result<VfsPath, LinuxLoadError> {
+fn resolve_path(pid: ProcessId, raw: &str) -> Result<Path, LinuxLoadError> {
     let cwd = proc_fs::cwd(pid)?;
-    VfsPath::resolve(raw, &cwd).map_err(LinuxLoadError::from)
+    Path::resolve(raw, &cwd).map_err(LinuxLoadError::from)
 }
 
 fn compute_heap_base<P: ArchLinuxElfPlatform>(
@@ -223,28 +223,28 @@ fn compute_phdr_address(
 }
 
 pub fn build_auxv<S>(program: &LinuxProgram<S>, page_size: usize) -> Vec<AuxvEntry> {
-    let mut auxv = Vec::with_capacity(5);
-    auxv.push(AuxvEntry {
-        key: AT_PAGESZ,
-        value: page_size as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_PHDR,
-        value: program.phdr.as_raw() as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_PHENT,
-        value: program.phent as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_PHNUM,
-        value: program.phnum as u64,
-    });
-    auxv.push(AuxvEntry {
-        key: AT_ENTRY,
-        value: program.entry.as_raw() as u64,
-    });
-    auxv
+    alloc::vec![
+        AuxvEntry {
+            key: AT_PAGESZ,
+            value: page_size as u64,
+        },
+        AuxvEntry {
+            key: AT_PHDR,
+            value: program.phdr.as_raw() as u64,
+        },
+        AuxvEntry {
+            key: AT_PHENT,
+            value: program.phent as u64,
+        },
+        AuxvEntry {
+            key: AT_PHNUM,
+            value: program.phnum as u64,
+        },
+        AuxvEntry {
+            key: AT_ENTRY,
+            value: program.entry.as_raw() as u64,
+        },
+    ]
 }
 
 pub(crate) fn add_base(base: VirtAddr, addr: VirtAddr) -> Result<VirtAddr, LinuxLoadError> {
@@ -267,7 +267,8 @@ mod tests {
         Arch,
         api::{ArchPageTableAccess, ArchThread},
     };
-    use crate::fs::{Directory, memfs::MemDirectory};
+    use crate::fs::DirNode;
+    use crate::fs::memfs::MemDirectory;
     use crate::mem::addr::{Addr, VirtIntoPtr};
     use crate::mem::paging::{MapError, PageTableOps, PhysMapper};
     use crate::println;
@@ -294,7 +295,10 @@ mod tests {
 
         let elf = test_elf_image();
         let file = root.create_file("demo").expect("create file");
-        let _ = file.write_at(0, &elf).expect("write image");
+        let handle = file
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open file");
+        let _ = handle.write(&elf).expect("write image");
 
         let program = load_elf(pid, "/demo").expect("load ELF");
         assert_eq!(program.entry.as_raw(), 0x400100);
@@ -374,7 +378,10 @@ mod tests {
 
         let elf = test_pie_image();
         let file = root.create_file("pie").expect("create file");
-        let _ = file.write_at(0, &elf).expect("write image");
+        let handle = file
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open file");
+        let _ = handle.write(&elf).expect("write image");
 
         let program = load_elf(pid, "/pie").expect("load PIE");
         assert_eq!(program.load_bias.as_raw(), 0x400000);

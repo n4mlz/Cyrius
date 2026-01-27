@@ -7,12 +7,12 @@ use core::fmt;
 use super::VfsError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VfsPath {
+pub struct Path {
     absolute: bool,
     components: Vec<PathComponent>,
 }
 
-impl VfsPath {
+impl Path {
     pub fn parse(raw: &str) -> Result<Self, VfsError> {
         if raw.is_empty() {
             return Err(VfsError::InvalidPath);
@@ -40,7 +40,7 @@ impl VfsPath {
         })
     }
 
-    pub fn resolve(raw: &str, base: &VfsPath) -> Result<Self, VfsError> {
+    pub fn resolve(raw: &str, base: &Path) -> Result<Self, VfsError> {
         if raw.is_empty() {
             return Err(VfsError::InvalidPath);
         }
@@ -81,7 +81,7 @@ impl VfsPath {
         }
     }
 
-    pub fn join(&self, other: &VfsPath) -> Result<Self, VfsError> {
+    pub fn join(&self, other: &Path) -> Result<Self, VfsError> {
         if other.is_absolute() {
             return Ok(other.clone());
         }
@@ -140,7 +140,7 @@ pub(crate) fn normalize_components(
     Ok(components)
 }
 
-impl fmt::Display for VfsPath {
+impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.absolute {
             write!(f, "/")?;

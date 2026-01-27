@@ -18,7 +18,9 @@ use alloc::{
 use crate::device::block::BlockDevice;
 use crate::util::spinlock::SpinLock;
 
-use super::{DirEntry, Directory, File, FileType, Metadata, NodeRef, PathComponent, VfsError};
+use crate::fs::{
+    DirEntry, DirNode, File, Node, NodeKind, NodeStat, OpenOptions, PathComponent, VfsError,
+};
 
 const FAT32_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const ATTR_LONG_NAME: u8 = 0x0F;
@@ -89,7 +91,7 @@ impl<D: BlockDevice + Send> FatFileSystem<D> {
     }
 }
 
-impl<D: BlockDevice + Send + 'static> From<FatFileSystem<D>> for Arc<dyn Directory> {
+impl<D: BlockDevice + Send + 'static> From<FatFileSystem<D>> for Arc<dyn Node> {
     fn from(fs: FatFileSystem<D>) -> Self {
         fs.root_dir()
     }
@@ -376,14 +378,48 @@ pub struct FatDirectory<D: BlockDevice + Send> {
     chain: Vec<u32>,
 }
 
-impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
-    fn metadata(&self) -> Result<Metadata, VfsError> {
-        Ok(Metadata {
-            file_type: FileType::Directory,
+struct FatDirFile<D: BlockDevice + Send> {
+    node: Arc<FatDirectory<D>>,
+}
+
+impl<D: BlockDevice + Send> FatDirFile<D> {
+    fn new(node: Arc<FatDirectory<D>>) -> Self {
+        Self { node }
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> File for FatDirFile<D> {
+    fn read(&self, _buf: &mut [u8]) -> Result<usize, VfsError> {
+        Err(VfsError::NotFile)
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
+        self.node.read_dir()
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> Node for FatDirectory<D> {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Directory
+    }
+
+    fn stat(&self) -> Result<NodeStat, VfsError> {
+        Ok(NodeStat {
+            kind: NodeKind::Directory,
             size: u64::from(self.chain.len() as u32) * u64::from(self.volume.cluster_size),
         })
     }
 
+    fn open(self: Arc<Self>, _options: OpenOptions) -> Result<Arc<dyn File>, VfsError> {
+        Ok(Arc::new(FatDirFile::new(self)))
+    }
+
+    fn as_dir(&self) -> Option<&dyn DirNode> {
+        Some(self)
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> DirNode for FatDirectory<D> {
     fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError> {
         let mut entries = Vec::new();
         for cluster in &self.chain {
@@ -401,14 +437,14 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
                 }
                 entries.push(DirEntry {
                     name: entry.name.clone(),
-                    metadata: entry.metadata(),
+                    stat: entry.stat(),
                 });
             }
         }
         Ok(entries)
     }
 
-    fn lookup(&self, name: &PathComponent) -> Result<NodeRef, VfsError> {
+    fn lookup(&self, name: &PathComponent) -> Result<Arc<dyn Node>, VfsError> {
         let target = normalise_name(name.as_str());
         for cluster in &self.chain {
             let data = self
@@ -425,22 +461,22 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
                 }
                 if entry.cmp_name == target {
                     return match entry.kind {
-                        FileType::Directory => Ok(NodeRef::Directory(Arc::new(FatDirectory {
+                        NodeKind::Directory => Ok(Arc::new(FatDirectory {
                             volume: self.volume.clone(),
                             chain: self
                                 .volume
                                 .cluster_chain(entry.first_cluster)
                                 .map_err(|_| VfsError::Corrupted)?,
-                        }))),
-                        FileType::File => Ok(NodeRef::File(Arc::new(FatFile {
+                        })),
+                        NodeKind::Regular => Ok(Arc::new(FatFileNode {
                             volume: self.volume.clone(),
                             clusters: self
                                 .volume
                                 .cluster_chain(entry.first_cluster)
                                 .map_err(|_| VfsError::Corrupted)?,
                             size: entry.file_size,
-                        }))),
-                        FileType::Symlink => Err(VfsError::NotFound),
+                        })),
+                        _ => Err(VfsError::NotFound),
                     };
                 }
             }
@@ -449,20 +485,53 @@ impl<D: BlockDevice + Send + 'static> Directory for FatDirectory<D> {
     }
 }
 
-pub struct FatFile<D: BlockDevice + Send> {
+pub struct FatFileNode<D: BlockDevice + Send> {
     volume: Arc<FatVolume<D>>,
     clusters: Vec<u32>,
     size: u32,
 }
 
-impl<D: BlockDevice + Send + 'static> File for FatFile<D> {
-    fn metadata(&self) -> Result<Metadata, VfsError> {
-        Ok(Metadata {
-            file_type: FileType::File,
+struct FatFileHandle<D: BlockDevice + Send> {
+    node: Arc<FatFileNode<D>>,
+    pos: SpinLock<usize>,
+}
+
+impl<D: BlockDevice + Send> FatFileHandle<D> {
+    fn new(node: Arc<FatFileNode<D>>) -> Self {
+        Self {
+            node,
+            pos: SpinLock::new(0),
+        }
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> File for FatFileHandle<D> {
+    fn read(&self, buf: &mut [u8]) -> Result<usize, VfsError> {
+        let mut guard = self.pos.lock();
+        let read = self.node.read_at(*guard, buf)?;
+        *guard = guard.checked_add(read).ok_or(VfsError::Corrupted)?;
+        Ok(read)
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> Node for FatFileNode<D> {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Regular
+    }
+
+    fn stat(&self) -> Result<NodeStat, VfsError> {
+        Ok(NodeStat {
+            kind: NodeKind::Regular,
             size: u64::from(self.size),
         })
     }
 
+    fn open(self: Arc<Self>, _options: OpenOptions) -> Result<Arc<dyn File>, VfsError> {
+        Ok(Arc::new(FatFileHandle::new(self)))
+    }
+}
+
+impl<D: BlockDevice + Send + 'static> FatFileNode<D> {
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
         if offset as u64 >= u64::from(self.size) {
             return Ok(0);
@@ -500,16 +569,16 @@ impl<D: BlockDevice + Send + 'static> File for FatFile<D> {
 struct ParsedDirEntry {
     name: String,
     cmp_name: String,
-    kind: FileType,
+    kind: NodeKind,
     first_cluster: u32,
     file_size: u32,
     attr: u8,
 }
 
 impl ParsedDirEntry {
-    fn metadata(&self) -> Metadata {
-        Metadata {
-            file_type: self.kind,
+    fn stat(&self) -> NodeStat {
+        NodeStat {
+            kind: self.kind,
             size: u64::from(self.file_size),
         }
     }
@@ -569,9 +638,9 @@ impl<'a> Iterator for DirectoryEntries<'a> {
             let first_cluster = (cluster_high << 16) | cluster_low;
             let file_size = u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]);
             let kind = if attr & ATTR_DIRECTORY != 0 {
-                FileType::Directory
+                NodeKind::Directory
             } else {
-                FileType::File
+                NodeKind::Regular
             };
 
             self.long_name.clear();

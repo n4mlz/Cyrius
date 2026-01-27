@@ -58,6 +58,18 @@ void _start(void) {
         write_str("STAT:BAD\n");
     }
 
+    struct {
+        u16 ws_row;
+        u16 ws_col;
+        u16 ws_xpixel;
+        u16 ws_ypixel;
+    } winsz;
+    if (sys_ioctl(0, 0x5413, &winsz) == 0 && winsz.ws_row > 0 && winsz.ws_col > 0) {
+        write_str("IOCTL:OK\n");
+    } else {
+        write_str("IOCTL:BAD\n");
+    }
+
     void *map = (void *)sys_mmap(0, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if ((isize)map < 0) {
         write_str("MMAP:BAD\n");

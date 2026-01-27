@@ -1,7 +1,10 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use crate::fs::{DirEntry, Fd, NodeRef, Vfs, VfsError, VfsPath, read_to_end_with_vfs, with_vfs};
+use crate::fs::{
+    DirEntry, Fd, NodeKind, OpenOptions, Path, Vfs, VfsError, read_to_end_with_vfs, with_vfs,
+};
+use crate::util::stream::{ControlError, ControlRequest};
 
 use super::{PROCESS_TABLE, ProcessHandle, ProcessId, ProcessVfs};
 
@@ -24,22 +27,22 @@ fn with_process_vfs<R>(
     }
 }
 
-pub fn open_path(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
+pub fn open_path(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
-    let file = with_process_vfs(&process, |vfs| match vfs.open_absolute(&abs)? {
-        NodeRef::File(file) => Ok(file),
-        NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    let file = with_process_vfs(&process, |vfs| {
+        vfs.open_absolute(&abs, OpenOptions::new(flags))
     })?;
     process.fd_table().open_file(file)
 }
 
-pub fn open_path_with_create(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsError> {
+pub fn open_path_with_create(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
-    match with_process_vfs(&process, |vfs| vfs.open_absolute(&abs)) {
-        Ok(NodeRef::File(file)) => process.fd_table().open_file(file),
-        Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    match with_process_vfs(&process, |vfs| {
+        vfs.open_absolute(&abs, OpenOptions::new(flags))
+    }) {
+        Ok(file) => process.fd_table().open_file(file),
         Err(VfsError::NotFound) => {
             let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
             let name = abs
@@ -48,11 +51,10 @@ pub fn open_path_with_create(pid: ProcessId, raw_path: &str) -> Result<Fd, VfsEr
                 .ok_or(VfsError::InvalidPath)?
                 .as_str()
                 .to_string();
-            let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
-                NodeRef::Directory(dir) => Ok(dir),
-                NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-            })?;
-            let file = dir.create_file(&name)?;
+            let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
+            let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+            let file_node = dir_view.create_file(&name)?;
+            let file = file_node.clone().open(OpenOptions::new(flags))?;
             process.fd_table().open_file(file)
         }
         Err(err) => Err(err),
@@ -74,28 +76,44 @@ pub fn close_fd(pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
     process.fd_table().close(fd)
 }
 
+pub fn control_fd(
+    pid: ProcessId,
+    fd: Fd,
+    request: &ControlRequest<'_>,
+) -> Result<u64, ControlError> {
+    let process = process_handle(pid).map_err(|_| ControlError::Invalid)?;
+    let entry = process
+        .fd_table()
+        .entry(fd)
+        .map_err(|_| ControlError::Invalid)?;
+    entry.file().ioctl(request)
+}
+
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
-    let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&abs)? {
-        NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-    })?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&abs))?;
+    let _dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
     process.set_cwd(abs);
-    // Keep dir alive by ensuring mount lookup remains valid; cwd path suffices.
     drop(dir);
     Ok(())
 }
 
 pub fn list_dir(pid: ProcessId, raw_path: &str) -> Result<Vec<DirEntry>, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     with_process_vfs(&process, |vfs| vfs.read_dir(&abs))
+}
+
+pub fn stat_path(pid: ProcessId, raw_path: &str) -> Result<crate::fs::NodeStat, VfsError> {
+    let process = process_handle(pid)?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    with_process_vfs(&process, |vfs| vfs.stat_absolute(&abs))
 }
 
 pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = abs
         .components()
@@ -103,23 +121,19 @@ pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
         .ok_or(VfsError::InvalidPath)?
         .as_str()
         .to_string();
-    let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
-        NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-    })?;
-    dir.remove(&name)
+    let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    dir_view.unlink(&name)
 }
 
 pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
-    match with_process_vfs(&process, |vfs| vfs.open_absolute(&abs)) {
-        Ok(NodeRef::File(f)) => {
-            f.truncate(0)?;
-            let _ = f.write_at(0, data)?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    match with_process_vfs(&process, |vfs| vfs.open_absolute(&abs, OpenOptions::new(0))) {
+        Ok(file) => {
+            let _ = file.write(data)?;
             Ok(())
         }
-        Ok(NodeRef::Directory(_)) | Ok(NodeRef::Symlink(_)) => Err(VfsError::NotFile),
         Err(VfsError::NotFound) => {
             let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
             let name = abs
@@ -128,13 +142,11 @@ pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), Vfs
                 .ok_or(VfsError::InvalidPath)?
                 .as_str()
                 .to_string();
-            let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
-                NodeRef::Directory(dir) => Ok(dir),
-                NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-            })?;
-            let file = dir.create_file(&name)?;
-            file.truncate(0)?;
-            let _ = file.write_at(0, data)?;
+            let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
+            let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+            let file_node = dir_view.create_file(&name)?;
+            let file = file_node.clone().open(OpenOptions::new(0))?;
+            let _ = file.write(data)?;
             Ok(())
         }
         Err(e) => Err(e),
@@ -143,7 +155,7 @@ pub fn write_path(pid: ProcessId, raw_path: &str, data: &[u8]) -> Result<(), Vfs
 
 pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = abs
         .components()
@@ -151,11 +163,9 @@ pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
         .ok_or(VfsError::InvalidPath)?
         .as_str()
         .to_string();
-    let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
-        NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-    })?;
-    match dir.create_dir(&name) {
+    let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    match dir_view.create_dir(&name) {
         Ok(_) => Ok(()),
         Err(VfsError::AlreadyExists) => Ok(()),
         Err(err) => Err(err),
@@ -164,7 +174,7 @@ pub fn create_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
 
 pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let link_abs = VfsPath::resolve(link_path, &process.cwd())?;
+    let link_abs = Path::resolve(link_path, &process.cwd())?;
     let parent = link_abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = link_abs
         .components()
@@ -173,19 +183,16 @@ pub fn symlink(pid: ProcessId, target: &str, link_path: &str) -> Result<(), VfsE
         .as_str()
         .to_string();
 
-    let dir = with_process_vfs(&process, |vfs| match vfs.open_absolute(&parent)? {
-        NodeRef::Directory(dir) => Ok(dir),
-        NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-    })?;
-
-    dir.create_symlink(&name, target)?;
+    let dir = with_process_vfs(&process, |vfs| vfs.resolve_node(&parent))?;
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    dir_view.create_symlink(&name, target)?;
     Ok(())
 }
 
 pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
-    let src_abs = VfsPath::resolve(existing_path, &process.cwd())?;
-    let link_abs = VfsPath::resolve(link_path, &process.cwd())?;
+    let src_abs = Path::resolve(existing_path, &process.cwd())?;
+    let link_abs = Path::resolve(link_path, &process.cwd())?;
 
     let parent = link_abs.parent().ok_or(VfsError::InvalidPath)?;
     let name = link_abs
@@ -196,33 +203,31 @@ pub fn hard_link(pid: ProcessId, existing_path: &str, link_path: &str) -> Result
         .to_string();
 
     let (node, dir) = with_process_vfs(&process, |vfs| {
-        let node = match vfs.open_absolute(&src_abs)? {
-            NodeRef::File(f) => NodeRef::File(f),
-            NodeRef::Directory(_) => return Err(VfsError::NotDirectory),
-            NodeRef::Symlink(_) => return Err(VfsError::NotFile),
-        };
-        let dir = match vfs.open_absolute(&parent)? {
-            NodeRef::Directory(dir) => Ok(dir),
-            NodeRef::File(_) | NodeRef::Symlink(_) => Err(VfsError::NotDirectory),
-        }?;
+        let node = vfs.resolve_node(&src_abs)?;
+        if node.kind() == NodeKind::Directory {
+            return Err(VfsError::NotDirectory);
+        }
+        let dir = vfs.resolve_node(&parent)?;
+        let _dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
         Ok((node, dir))
     })?;
 
-    dir.link(&name, node)
+    let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+    dir_view.link(&name, node)
 }
 
 pub fn read_to_end(pid: ProcessId, raw_path: &str) -> Result<Vec<u8>, VfsError> {
     let process = process_handle(pid)?;
-    let abs = VfsPath::resolve(raw_path, &process.cwd())?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
     read_to_end_at(pid, &abs)
 }
 
-pub fn read_to_end_at(pid: ProcessId, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+pub fn read_to_end_at(pid: ProcessId, path: &Path) -> Result<Vec<u8>, VfsError> {
     let process = process_handle(pid)?;
     with_process_vfs(&process, |vfs| read_to_end_with_vfs(vfs, path))
 }
 
-pub fn cwd(pid: ProcessId) -> Result<VfsPath, VfsError> {
+pub fn cwd(pid: ProcessId) -> Result<Path, VfsError> {
     let process = process_handle(pid)?;
     Ok(process.cwd())
 }
@@ -231,7 +236,7 @@ pub fn cwd(pid: ProcessId) -> Result<VfsPath, VfsError> {
 mod tests {
     use super::*;
     use crate::container::CONTAINER_TABLE;
-    use crate::fs::Directory;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -247,40 +252,52 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let rootfs_dir = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let container_file = rootfs_dir
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let rootfs_dir = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let rootfs_dir_view = rootfs_dir.as_dir().expect("rootfs is dir");
+        let container_file = rootfs_dir_view
             .create_file("shadow.txt")
             .expect("create container file");
-        let _ = container_file
-            .write_at(0, b"container")
-            .expect("write container file");
+        let file = container_file
+            .open(OpenOptions::new(0))
+            .expect("open container file");
+        let _ = file.write(b"container").expect("write container file");
 
         let host_file = root.create_file("shadow.txt").expect("create host file");
-        let _ = host_file.write_at(0, b"host").expect("write host file");
+        let host_handle = host_file.open(OpenOptions::new(0)).expect("open host file");
+        let _ = host_handle.write(b"host").expect("write host file");
 
-        let config = bundle_dir
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
-        config
-            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
+        let handle = config.open(OpenOptions::new(0)).expect("open config");
+        handle
+            .write(br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
+        let host_pid = PROCESS_TABLE.init_kernel().expect("kernel pid");
         let container = CONTAINER_TABLE
-            .create("demo", "/bundle")
+            .create("test", "/bundle")
             .expect("create container");
-
-        let _ = PROCESS_TABLE.init_kernel();
         let pid = PROCESS_TABLE
             .create_user_process(
-                "cont-proc",
+                "container-proc",
                 crate::process::ProcessDomain::Container(container),
             )
             .expect("create container process");
+        assert_ne!(host_pid, pid);
 
-        let fd = open_path(pid, "/shadow.txt").expect("open container file");
+        let fd = open_path(pid, "/shadow.txt", 0).expect("open container file");
         let mut buf = [0u8; 16];
         let read = read_fd(pid, fd, &mut buf).expect("read container file");
-        let _ = close_fd(pid, fd);
         assert_eq!(&buf[..read], b"container");
+        close_fd(pid, fd).expect("close container fd");
+
+        let fd = open_path(host_pid, "/shadow.txt", 0).expect("open host file");
+        let read = read_fd(host_pid, fd, &mut buf).expect("read host file");
+        assert_eq!(&buf[..read], b"host");
+        close_fd(host_pid, fd).expect("close host fd");
     }
 }

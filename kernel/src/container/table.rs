@@ -2,7 +2,7 @@ use alloc::string::ToString;
 use alloc::sync::Arc;
 
 use crate::container::{Container, ContainerContext, ContainerState, ContainerStatus};
-use crate::fs::VfsPath;
+use crate::fs::Path;
 
 use super::ContainerError;
 use super::repository::ContainerRepository;
@@ -29,7 +29,7 @@ impl ContainerTable {
             return Err(ContainerError::InvalidId);
         }
 
-        let bundle = VfsPath::parse(bundle_path)?;
+        let bundle = Path::parse(bundle_path)?;
         if !bundle.is_absolute() {
             return Err(ContainerError::BundlePathNotAbsolute);
         }
@@ -72,8 +72,8 @@ pub static CONTAINER_TABLE: ContainerTable = ContainerTable::new();
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Directory;
-    use crate::fs::VfsPath;
+    use crate::fs::DirNode;
+    use crate::fs::Path;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -88,25 +88,34 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let rootfs_dir = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let _ = rootfs_dir.create_file("probe").expect("create probe file");
-        let config = bundle_dir
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let rootfs_dir = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let rootfs_dir_view = rootfs_dir.as_dir().expect("rootfs is dir");
+        let _ = rootfs_dir_view
+            .create_file("probe")
+            .expect("create probe file");
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
         let json =
             br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"},"annotations":{"org.example/foo":"bar"}}"#;
-        config.write_at(0, json).expect("write config");
+        let handle = config
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open config");
+        handle.write(json).expect("write config");
 
         let container = CONTAINER_TABLE
             .create("demo", "/bundle")
             .expect("create container");
         assert_eq!(container.id(), "demo");
-        let _ = rootfs_dir
+        let _ = rootfs_dir_view
             .create_file("host-only")
             .expect("create host-only file");
         let root_entries = container
             .vfs()
-            .read_dir(&VfsPath::parse("/").expect("parse root"))
+            .read_dir(&Path::parse("/").expect("parse root"))
             .expect("read rootfs");
         assert!(root_entries.iter().any(|entry| entry.name == "probe"));
         assert!(!root_entries.iter().any(|entry| entry.name == "host-only"));
@@ -131,12 +140,18 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let config = bundle_dir
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let _ = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
-        config
-            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
+        let handle = config
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open config");
+        handle
+            .write(br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
         CONTAINER_TABLE

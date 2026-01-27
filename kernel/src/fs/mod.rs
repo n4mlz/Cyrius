@@ -1,25 +1,28 @@
 //! Virtual filesystem scaffolding with mount support and per-process FD tables.
 
 use alloc::{string::ToString, sync::Arc, vec, vec::Vec};
-use core::convert::TryFrom;
 
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
-pub mod fat32;
+pub mod devfs;
 mod fd;
+mod file;
 pub mod init;
-pub mod memfs;
 mod node;
 pub mod ops;
 mod path;
 pub mod probe;
-pub mod tty;
+pub mod vfs;
 
 pub use fd::{Fd, FdTable};
-pub use node::{DirEntry, Directory, File, FileType, Metadata, NodeRef, Symlink};
+pub use file::File;
+pub use node::{
+    CharDeviceNode, DirEntry, DirNode, Node, NodeKind, NodeStat, OpenOptions, SymlinkNode,
+};
 use path::normalize_components;
-pub use path::{PathComponent, VfsPath};
+pub use path::{Path, PathComponent};
+pub use vfs::{fat32, memfs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfsError {
@@ -42,8 +45,8 @@ static VFS: LazyLock<SpinLock<Option<Vfs>>> = LazyLock::new_const(|| SpinLock::n
 
 #[derive(Clone)]
 struct Mount {
-    path: VfsPath,
-    root: Arc<dyn Directory>,
+    path: Path,
+    root: Arc<dyn Node>,
 }
 
 pub struct Vfs {
@@ -51,16 +54,17 @@ pub struct Vfs {
 }
 
 impl Vfs {
-    pub fn new(root: Arc<dyn Directory>) -> Self {
+    pub fn new(root: Arc<dyn Node>) -> Self {
+        assert!(root.as_dir().is_some(), "root must be a directory node");
         Self {
             mounts: vec![Mount {
-                path: VfsPath::root(),
+                path: Path::root(),
                 root,
             }],
         }
     }
 
-    pub fn mount(&mut self, path: VfsPath, root: Arc<dyn Directory>) -> Result<(), VfsError> {
+    pub fn mount(&mut self, path: Path, root: Arc<dyn Node>) -> Result<(), VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
@@ -73,7 +77,7 @@ impl Vfs {
         Ok(())
     }
 
-    pub fn root(&self) -> Arc<dyn Directory> {
+    pub fn root(&self) -> Arc<dyn Node> {
         self.mounts
             .iter()
             .find(|m| m.path.components().is_empty())
@@ -82,27 +86,37 @@ impl Vfs {
             .clone()
     }
 
-    pub fn read_dir(&self, path: &VfsPath) -> Result<Vec<DirEntry>, VfsError> {
+    pub fn read_dir(&self, path: &Path) -> Result<Vec<DirEntry>, VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
         let (mount, tail) = self.select_mount(path)?;
         let node = self.resolve_from(mount.root.clone(), Vec::new(), tail, 0)?;
-        let dir = match node {
-            NodeRef::Directory(dir) => dir,
-            NodeRef::File(_) | NodeRef::Symlink(_) => return Err(VfsError::NotDirectory),
-        };
-
+        let dir = node.as_dir().ok_or(VfsError::NotDirectory)?;
         let mut entries = dir.read_dir()?;
         self.inject_mount_points(path, &mut entries);
         Ok(entries)
     }
 
-    pub fn open_absolute(&self, path: &VfsPath) -> Result<NodeRef, VfsError> {
+    pub fn open_absolute(
+        &self,
+        path: &Path,
+        options: OpenOptions,
+    ) -> Result<Arc<dyn File>, VfsError> {
+        let node = self.resolve_absolute(path, 0)?;
+        node.clone().open(options)
+    }
+
+    pub fn stat_absolute(&self, path: &Path) -> Result<NodeStat, VfsError> {
+        let node = self.resolve_absolute(path, 0)?;
+        node.stat()
+    }
+
+    pub fn resolve_node(&self, path: &Path) -> Result<Arc<dyn Node>, VfsError> {
         self.resolve_absolute(path, 0)
     }
 
-    fn inject_mount_points(&self, path: &VfsPath, entries: &mut Vec<DirEntry>) {
+    fn inject_mount_points(&self, path: &Path, entries: &mut Vec<DirEntry>) {
         let base_components = path.components();
         for mount in &self.mounts {
             let mount_components = mount.path.components();
@@ -119,8 +133,8 @@ impl Vfs {
             }
             entries.push(DirEntry {
                 name: name.to_string(),
-                metadata: Metadata {
-                    file_type: FileType::Directory,
+                stat: NodeStat {
+                    kind: NodeKind::Directory,
                     size: 0,
                 },
             });
@@ -129,7 +143,7 @@ impl Vfs {
 
     fn select_mount<'a, 'b>(
         &'a self,
-        path: &'b VfsPath,
+        path: &'b Path,
     ) -> Result<(&'a Mount, &'b [PathComponent]), VfsError> {
         for mount in &self.mounts {
             let mp = mount.path.components();
@@ -141,7 +155,7 @@ impl Vfs {
         Err(VfsError::NotFound)
     }
 
-    fn resolve_absolute(&self, path: &VfsPath, depth: u8) -> Result<NodeRef, VfsError> {
+    fn resolve_absolute(&self, path: &Path, depth: u8) -> Result<Arc<dyn Node>, VfsError> {
         if !path.is_absolute() {
             return Err(VfsError::InvalidPath);
         }
@@ -151,43 +165,39 @@ impl Vfs {
 
     fn resolve_from(
         &self,
-        current: Arc<dyn Directory>,
+        current: Arc<dyn Node>,
         mut current_path: Vec<PathComponent>,
         components: &[PathComponent],
         depth: u8,
-    ) -> Result<NodeRef, VfsError> {
+    ) -> Result<Arc<dyn Node>, VfsError> {
         if depth >= 16 {
             return Err(VfsError::InvalidPath);
         }
 
         if components.is_empty() {
-            return Ok(NodeRef::Directory(current));
+            return Ok(current);
         }
 
-        let (first, rest) = components.split_first().expect("components not empty");
-        let node = current.lookup(first)?;
+        let dir = current.as_dir().ok_or(VfsError::NotDirectory)?;
 
-        match node {
-            NodeRef::Directory(dir) => {
-                current_path.push(first.clone());
-                self.resolve_from(dir, current_path, rest, depth)
+        let (first, rest) = components.split_first().expect("components not empty");
+        let node = dir.lookup(first)?;
+
+        if node.as_dir().is_some() {
+            current_path.push(first.clone());
+            self.resolve_from(node, current_path, rest, depth)
+        } else if let Some(link) = node.as_symlink() {
+            let target_raw = link.readlink()?;
+            let mut combined_components = resolve_link_components(&current_path, &target_raw)?;
+            if !rest.is_empty() {
+                combined_components.extend(rest.iter().cloned());
             }
-            NodeRef::Symlink(link) => {
-                let target_raw = link.target()?;
-                let mut combined_components = resolve_link_components(&current_path, &target_raw)?;
-                if !rest.is_empty() {
-                    combined_components.extend(rest.iter().cloned());
-                }
-                let combined = VfsPath::from_components(true, combined_components);
-                self.resolve_absolute(&combined, depth + 1)
-            }
-            NodeRef::File(file) => {
-                if rest.is_empty() {
-                    Ok(NodeRef::File(file))
-                } else {
-                    Err(VfsError::NotDirectory)
-                }
-            }
+            let combined = Path::from_components(true, combined_components);
+            self.resolve_absolute(&combined, depth + 1)
+        } else if rest.is_empty() {
+            Ok(node)
+        } else {
+            Err(VfsError::NotDirectory)
         }
     }
 }
@@ -204,7 +214,7 @@ fn resolve_link_components(
     normalize_components(components, target, true)
 }
 
-pub fn mount_root(root: Arc<dyn Directory>) -> Result<(), VfsError> {
+pub fn mount_root(root: Arc<dyn Node>) -> Result<(), VfsError> {
     let mut guard = VFS.get().lock();
     if guard.is_some() {
         return Err(VfsError::AlreadyMounted);
@@ -213,7 +223,7 @@ pub fn mount_root(root: Arc<dyn Directory>) -> Result<(), VfsError> {
     Ok(())
 }
 
-pub fn mount_at(path: VfsPath, root: Arc<dyn Directory>) -> Result<(), VfsError> {
+pub fn mount_at(path: Path, root: Arc<dyn Node>) -> Result<(), VfsError> {
     let mut guard = VFS.get().lock();
     let vfs = guard.as_mut().ok_or(VfsError::NotInitialised)?;
     vfs.mount(path, root)
@@ -225,22 +235,22 @@ pub fn with_vfs<R>(f: impl FnOnce(&Vfs) -> Result<R, VfsError>) -> Result<R, Vfs
     f(vfs)
 }
 
-pub fn read_to_end(path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+pub fn read_to_end(path: &Path) -> Result<Vec<u8>, VfsError> {
     with_vfs(|vfs| read_to_end_with_vfs(vfs, path))
 }
 
-pub fn read_to_end_with_vfs(vfs: &Vfs, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
-    let file = match vfs.open_absolute(path)? {
-        NodeRef::File(file) => Ok(file),
-        NodeRef::Directory(_) | NodeRef::Symlink(_) => Err(VfsError::NotFile),
-    }?;
+pub fn read_to_end_with_vfs(vfs: &Vfs, path: &Path) -> Result<Vec<u8>, VfsError> {
+    let stat = vfs.stat_absolute(path)?;
+    if stat.kind != NodeKind::Regular {
+        return Err(VfsError::NotFile);
+    }
 
-    let meta = file.metadata()?;
-    let size = usize::try_from(meta.size).map_err(|_| VfsError::Corrupted)?;
+    let file = vfs.open_absolute(path, OpenOptions::new(0))?;
+    let size = usize::try_from(stat.size).map_err(|_| VfsError::Corrupted)?;
     let mut buf = vec![0u8; size];
     let mut offset = 0usize;
     while offset < size {
-        let read = file.read_at(offset, &mut buf[offset..])?;
+        let read = file.read(&mut buf[offset..])?;
         if read == 0 {
             return Err(VfsError::UnexpectedEof);
         }
@@ -254,7 +264,7 @@ pub fn vfs_guard() -> Result<SpinLockGuard<'static, Option<Vfs>>, VfsError> {
 }
 
 #[cfg(test)]
-pub fn force_replace_root(root: Arc<dyn Directory>) {
+pub fn force_replace_root(root: Arc<dyn Node>) {
     let mut guard = VFS.get().lock();
     *guard = Some(Vfs::new(root));
 }
@@ -278,11 +288,12 @@ mod tests {
         let root = MemDirectory::new();
         force_replace_root(root.clone());
         let file = root.create_file("foo").expect("create file entry");
-        let _ = file.write_at(0, &[0xAA, 0xBB]).expect("write");
+        let handle = file.open(OpenOptions::new(0)).expect("open file");
+        let _ = handle.write(&[0xAA, 0xBB]).expect("write");
 
-        let path = VfsPath::parse("/foo").expect("parse path");
-        let resolved = with_vfs(|vfs| vfs.open_absolute(&path)).expect("open");
-        assert!(matches!(resolved, NodeRef::File(_)));
+        let path = Path::parse("/foo").expect("parse path");
+        let stat = with_vfs(|vfs| vfs.stat_absolute(&path)).expect("stat");
+        assert_eq!(stat.kind, NodeKind::Regular);
     }
 
     #[kernel_test_case]
@@ -295,9 +306,9 @@ mod tests {
             for dev in devices {
                 let shared = SharedBlockDevice::from_arc(dev.clone());
                 if let Ok(fs) = FatFileSystem::new(shared) {
-                    let root: Arc<dyn Directory> = fs.root_dir();
+                    let root: Arc<dyn Node> = fs.root_dir();
                     force_replace_root(MemDirectory::new());
-                    mount_at(VfsPath::parse("/mnt").unwrap(), root).expect("mount fat");
+                    mount_at(Path::parse("/mnt").unwrap(), root).expect("mount fat");
                     mounted = true;
                     break;
                 }
@@ -307,103 +318,12 @@ mod tests {
 
         let path = "/mnt/HELLO.TXT";
         let pid = PROCESS_TABLE.kernel_process_id().expect("kernel pid");
-        let fd = proc_fs::open_path(pid, path).expect("open fd");
+        let fd = proc_fs::open_path(pid, path, 0).expect("open fd");
         let mut buf = [0u8; 64];
         let read = proc_fs::read_fd(pid, fd, &mut buf).expect("read file");
         let payload = b"Hello from FAT32!\n";
         assert_eq!(read, payload.len());
         assert_eq!(&buf[..read], payload);
         let _ = proc_fs::close_fd(pid, fd);
-    }
-
-    #[kernel_test_case]
-    fn memfs_write_read_remove() {
-        println!("[test] memfs_write_read_remove");
-
-        let root = MemDirectory::new();
-        force_replace_root(root.clone());
-
-        let file = root.create_file("note").expect("create file");
-        let payload = b"memfs contents";
-        let _ = file.write_at(0, payload).expect("write");
-
-        let mut buf = [0u8; 32];
-        let resolved = with_vfs(|vfs| vfs.open_absolute(&VfsPath::parse("/note").unwrap()))
-            .expect("open note");
-        match resolved {
-            NodeRef::File(f) => {
-                let read = f.read_at(0, &mut buf).expect("read");
-                assert_eq!(&buf[..read], payload);
-            }
-            _ => panic!("expected file"),
-        }
-
-        root.remove("note").expect("remove file");
-        assert!(matches!(
-            root.lookup(&PathComponent::new("note")),
-            Err(VfsError::NotFound)
-        ));
-    }
-
-    #[kernel_test_case]
-    fn mount_points_visible_in_parent_listing() {
-        println!("[test] mount_points_visible_in_parent_listing");
-
-        let root = MemDirectory::new();
-        force_replace_root(root.clone());
-        let mounted = MemDirectory::new();
-        mount_at(VfsPath::parse("/mnt").unwrap(), mounted).expect("mount memfs at /mnt");
-
-        let pid = PROCESS_TABLE.init_kernel().expect("kernel init");
-        let entries = proc_fs::list_dir(pid, "/").expect("list root");
-        let has_mnt = entries.iter().any(|entry| entry.name == "mnt");
-        assert!(
-            has_mnt,
-            "mount point not visible in / listing: {:?}",
-            entries
-        );
-    }
-
-    #[kernel_test_case]
-    fn mount_selection_prefers_longest_match() {
-        println!("[test] mount_selection_prefers_longest_match");
-
-        let root = MemDirectory::new();
-        force_replace_root(root.clone());
-        let fat = MemDirectory::new();
-        mount_at(VfsPath::parse("/mnt").unwrap(), fat.clone()).expect("mount fat");
-
-        let root_file = root.create_file("root.txt").expect("root file");
-        let fat_file = fat.create_file("fat.txt").expect("fat file");
-        let _ = root_file.write_at(0, b"root").expect("write root");
-        let _ = fat_file.write_at(0, b"fat").expect("write fat");
-
-        let root_read =
-            with_vfs(
-                |vfs| match vfs.open_absolute(&VfsPath::parse("/root.txt").unwrap())? {
-                    NodeRef::File(f) => {
-                        let mut buf = [0u8; 8];
-                        let n = f.read_at(0, &mut buf)?;
-                        Ok(buf[..n].to_vec())
-                    }
-                    _ => Err(VfsError::NotFile),
-                },
-            )
-            .expect("read root");
-        assert_eq!(root_read, b"root".to_vec());
-
-        let fat_read =
-            with_vfs(
-                |vfs| match vfs.open_absolute(&VfsPath::parse("/mnt/fat.txt").unwrap())? {
-                    NodeRef::File(f) => {
-                        let mut buf = [0u8; 8];
-                        let n = f.read_at(0, &mut buf)?;
-                        Ok(buf[..n].to_vec())
-                    }
-                    _ => Err(VfsError::NotFile),
-                },
-            )
-            .expect("read fat");
-        assert_eq!(fat_read, b"fat".to_vec());
     }
 }

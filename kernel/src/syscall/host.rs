@@ -54,6 +54,7 @@ fn encode_error(err: SysError) -> u64 {
         SysError::InvalidArgument => HostErrno::InvalidArgument as u64,
         SysError::NotFound => HostErrno::NotFound as u64,
         SysError::BadAddress => HostErrno::BadAddress as u64,
+        SysError::NotTty => HostErrno::InvalidArgument as u64,
     }
 }
 
@@ -97,7 +98,7 @@ fn read_str(ptr: u64, len: u64) -> Result<String, SysError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::Directory;
+    use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::println;
@@ -112,12 +113,18 @@ mod tests {
         CONTAINER_TABLE.clear_for_tests();
 
         let bundle_dir = root.create_dir("bundle").expect("create bundle dir");
-        let _ = bundle_dir.create_dir("rootfs").expect("create rootfs dir");
-        let config = bundle_dir
+        let bundle_dir_view = bundle_dir.as_dir().expect("bundle is dir");
+        let _ = bundle_dir_view
+            .create_dir("rootfs")
+            .expect("create rootfs dir");
+        let config = bundle_dir_view
             .create_file("config.json")
             .expect("create config");
-        config
-            .write_at(0, br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
+        let handle = config
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open config");
+        handle
+            .write(br#"{"ociVersion":"1.0.2","root":{"path":"rootfs"}}"#)
             .expect("write config");
 
         let id = "syscall-demo";

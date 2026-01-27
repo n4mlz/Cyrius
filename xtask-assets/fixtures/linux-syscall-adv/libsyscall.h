@@ -4,6 +4,7 @@
 typedef unsigned long usize;
 typedef long isize;
 typedef unsigned int u32;
+typedef unsigned short u16;
 typedef unsigned long long u64;
 typedef long long i64;
 
@@ -16,6 +17,7 @@ enum {
     SYS_mmap = 9,
     SYS_munmap = 11,
     SYS_brk = 12,
+    SYS_ioctl = 16,
     SYS_writev = 20,
     SYS_fork = 57,
     SYS_execve = 59,
@@ -64,6 +66,7 @@ isize sys_call6(isize num, isize arg1, isize arg2, isize arg3, isize arg4, isize
 isize sys_write(int fd, const void *buf, usize len);
 isize sys_writev(int fd, const struct iovec *iov, int iovcnt);
 isize sys_stat(const char *path, struct linux_stat *statbuf);
+isize sys_ioctl(int fd, isize request, void *argp);
 isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset);
 isize sys_munmap(void *addr, usize len);
 isize sys_brk(void *addr);

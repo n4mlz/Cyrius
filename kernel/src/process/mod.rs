@@ -5,7 +5,7 @@ use atomic_enum::atomic_enum;
 
 use crate::arch::{Arch, api::ArchThread};
 use crate::container::Container;
-use crate::fs::{FdTable, VfsPath};
+use crate::fs::{FdTable, Path};
 use crate::mem::addr::VirtAddr;
 use crate::syscall::Abi;
 use crate::thread::ThreadId;
@@ -28,36 +28,42 @@ pub enum ProcessError {
 
 pub struct ProcessFs {
     pub fd_table: FdTable,
-    cwd: SpinLock<VfsPath>,
+    cwd: SpinLock<Path>,
 }
 
 impl ProcessFs {
     pub fn new() -> Self {
         let fs = Self {
             fd_table: FdTable::new(),
-            cwd: SpinLock::new(VfsPath::root()),
+            cwd: SpinLock::new(Path::root()),
         };
         fs.install_stdio();
         fs
     }
 
     fn install_stdio(&self) {
-        let tty = crate::fs::tty::global_tty();
+        let tty = crate::fs::devfs::global_tty_node();
+        let tty_file = tty
+            .clone()
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open tty");
         self.fd_table
-            .open_fixed(0, tty.clone())
+            .open_fixed(0, tty_file.clone())
             .expect("install stdin");
         self.fd_table
-            .open_fixed(1, tty.clone())
+            .open_fixed(1, tty_file.clone())
             .expect("install stdout");
-        self.fd_table.open_fixed(2, tty).expect("install stderr");
+        self.fd_table
+            .open_fixed(2, tty_file)
+            .expect("install stderr");
     }
 
-    pub fn set_cwd(&self, path: VfsPath) {
+    pub fn set_cwd(&self, path: Path) {
         let mut guard = self.cwd.lock();
         *guard = path;
     }
 
-    pub fn cwd(&self) -> VfsPath {
+    pub fn cwd(&self) -> Path {
         let guard = self.cwd.lock();
         guard.clone()
     }
@@ -448,11 +454,11 @@ impl Process {
         Ok(empty)
     }
 
-    pub fn cwd(&self) -> VfsPath {
+    pub fn cwd(&self) -> Path {
         self.fs.cwd()
     }
 
-    pub fn set_cwd(&self, path: VfsPath) {
+    pub fn set_cwd(&self, path: Path) {
         self.fs.set_cwd(path);
     }
 

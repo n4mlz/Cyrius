@@ -3,7 +3,7 @@ use alloc::string::{String, ToString};
 
 use crate::container::runtime::{ContainerStartError, start_container_by_id};
 use crate::container::{CONTAINER_TABLE, ContainerError};
-use crate::fs::VfsPath;
+use crate::fs::Path;
 use crate::process::ProcessId;
 use crate::process::fs as proc_fs;
 
@@ -54,6 +54,6 @@ pub fn state_container(id: &str) -> Result<String, OciRuntimeError> {
 
 fn resolve_abs_path(pid: ProcessId, raw: &str) -> Result<String, OciRuntimeError> {
     let cwd = proc_fs::cwd(pid).map_err(OciRuntimeError::Fs)?;
-    let abs = VfsPath::resolve(raw, &cwd).map_err(OciRuntimeError::Fs)?;
+    let abs = Path::resolve(raw, &cwd).map_err(OciRuntimeError::Fs)?;
     Ok(abs.to_string())
 }

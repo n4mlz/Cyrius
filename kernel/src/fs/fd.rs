@@ -8,25 +8,29 @@ use crate::util::spinlock::SpinLock;
 pub type Fd = u32;
 
 #[derive(Clone)]
-pub struct OpenFile {
+pub struct FdEntry {
     file: Arc<dyn File>,
-    offset: usize,
+    close_on_exec: bool,
 }
 
-impl OpenFile {
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, VfsError> {
-        let read = self.file.read_at(self.offset, buf)?;
-        self.offset = self.offset.checked_add(read).ok_or(VfsError::Corrupted)?;
-        Ok(read)
+impl FdEntry {
+    pub fn new(file: Arc<dyn File>) -> Self {
+        Self {
+            file,
+            close_on_exec: false,
+        }
     }
 
-    pub fn write(&mut self, data: &[u8]) -> Result<usize, VfsError> {
-        let written = self.file.write_at(self.offset, data)?;
-        self.offset = self
-            .offset
-            .checked_add(written)
-            .ok_or(VfsError::Corrupted)?;
-        Ok(written)
+    pub fn file(&self) -> &Arc<dyn File> {
+        &self.file
+    }
+
+    pub fn close_on_exec(&self) -> bool {
+        self.close_on_exec
+    }
+
+    pub fn set_close_on_exec(&mut self, value: bool) {
+        self.close_on_exec = value;
     }
 }
 
@@ -46,7 +50,7 @@ impl FdTable {
     pub fn open_file(&self, file: Arc<dyn File>) -> Result<Fd, VfsError> {
         let mut guard = self.inner.lock();
         let fd = guard.allocate_fd(self.next_fd.fetch_add(1, Ordering::AcqRel));
-        guard.set(fd, OpenFile { file, offset: 0 })?;
+        guard.set(fd, FdEntry::new(file))?;
         Ok(fd)
     }
 
@@ -55,25 +59,30 @@ impl FdTable {
         if guard.exists(fd) {
             return Err(VfsError::AlreadyExists);
         }
-        guard.set(fd, OpenFile { file, offset: 0 })?;
+        guard.set(fd, FdEntry::new(file))?;
         Ok(())
     }
 
     pub fn read(&self, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError> {
-        let mut guard = self.inner.lock();
-        let file = guard.get_mut(fd)?;
-        file.read(buf)
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        entry.file().read(buf)
     }
 
     pub fn write(&self, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
-        let mut guard = self.inner.lock();
-        let file = guard.get_mut(fd)?;
-        file.write(data)
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        entry.file().write(data)
     }
 
     pub fn close(&self, fd: Fd) -> Result<(), VfsError> {
         let mut guard = self.inner.lock();
         guard.clear(fd)
+    }
+
+    pub fn entry(&self, fd: Fd) -> Result<FdEntry, VfsError> {
+        let guard = self.inner.lock();
+        guard.get(fd).cloned()
     }
 }
 
@@ -84,7 +93,7 @@ impl Default for FdTable {
 }
 
 struct FdTableInner {
-    slots: Vec<Option<OpenFile>>,
+    slots: Vec<Option<FdEntry>>,
 }
 
 impl FdTableInner {
@@ -103,7 +112,7 @@ impl FdTableInner {
         fd as Fd
     }
 
-    fn set(&mut self, fd: Fd, entry: OpenFile) -> Result<(), VfsError> {
+    fn set(&mut self, fd: Fd, entry: FdEntry) -> Result<(), VfsError> {
         let index = fd as usize;
         if index >= self.slots.len() {
             self.slots.resize(index + 1, None);
@@ -119,10 +128,10 @@ impl FdTableInner {
             .is_some()
     }
 
-    fn get_mut(&mut self, fd: Fd) -> Result<&mut OpenFile, VfsError> {
+    fn get(&self, fd: Fd) -> Result<&FdEntry, VfsError> {
         self.slots
-            .get_mut(fd as usize)
-            .and_then(|entry| entry.as_mut())
+            .get(fd as usize)
+            .and_then(|entry| entry.as_ref())
             .ok_or(VfsError::NotFound)
     }
 
