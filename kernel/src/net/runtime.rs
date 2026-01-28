@@ -155,17 +155,25 @@ impl NetworkDevice for NetDevice {
 
     fn transmit_frame(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
         match self {
-            NetDevice::Virtio(device) => device.transmit_frame(frame).map_err(NetDeviceError::Virtio),
+            NetDevice::Virtio(device) => {
+                device.transmit_frame(frame).map_err(NetDeviceError::Virtio)
+            }
             #[cfg(test)]
-            NetDevice::Test(device) => device.transmit_frame(frame).map_err(|_| NetDeviceError::Test(())),
+            NetDevice::Test(device) => device
+                .transmit_frame(frame)
+                .map_err(|_| NetDeviceError::Test(())),
         }
     }
 
     fn receive_frame(&mut self, buffer: &mut [u8]) -> Result<Option<usize>, Self::Error> {
         match self {
-            NetDevice::Virtio(device) => device.receive_frame(buffer).map_err(NetDeviceError::Virtio),
+            NetDevice::Virtio(device) => {
+                device.receive_frame(buffer).map_err(NetDeviceError::Virtio)
+            }
             #[cfg(test)]
-            NetDevice::Test(device) => device.receive_frame(buffer).map_err(|_| NetDeviceError::Test(())),
+            NetDevice::Test(device) => device
+                .receive_frame(buffer)
+                .map_err(|_| NetDeviceError::Test(())),
         }
     }
 }

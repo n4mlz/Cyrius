@@ -296,7 +296,7 @@ fn to_smoltcp_listen_endpoint(addr: SocketAddr) -> Result<IpListenEndpoint, TcpE
 
 fn next_port() -> u16 {
     let current = NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::AcqRel);
-    if current >= EPHEMERAL_END {
+    if current == EPHEMERAL_END || current < EPHEMERAL_START {
         NEXT_EPHEMERAL_PORT.store(EPHEMERAL_START, Ordering::Release);
         EPHEMERAL_START
     } else {
@@ -349,9 +349,11 @@ mod tests {
 
         client_stack
             .with_context_and_sockets(|cx, sockets| {
-                sockets
-                    .get_mut::<RawTcpSocket>(client_handle)
-                    .connect(cx, remote_endpoint, local_endpoint)
+                sockets.get_mut::<RawTcpSocket>(client_handle).connect(
+                    cx,
+                    remote_endpoint,
+                    local_endpoint,
+                )
             })
             .expect("client connect");
 

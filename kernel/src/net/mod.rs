@@ -1,6 +1,6 @@
-pub mod smoltcp;
 pub mod consts;
 pub mod runtime;
+pub mod smoltcp;
 pub mod tcp;
 
 #[cfg(not(test))]
@@ -49,11 +49,9 @@ pub fn spawn_background_tasks() {
     };
     NET_PID.store(pid, Ordering::Release);
 
-    if let Err(err) = crate::thread::SCHEDULER.spawn_kernel_thread_for_process(
-        pid,
-        "net-poll",
-        net_poll_loop,
-    ) {
+    if let Err(err) =
+        crate::thread::SCHEDULER.spawn_kernel_thread_for_process(pid, "net-poll", net_poll_loop)
+    {
         crate::println!("[net] failed to spawn net poll thread: {err:?}");
     }
 }

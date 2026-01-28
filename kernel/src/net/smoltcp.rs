@@ -1,11 +1,10 @@
+use alloc::vec;
 use alloc::vec::Vec;
 
 use smoltcp::iface::{Config, Context, Interface, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
-use smoltcp::wire::{
-    EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address,
-};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
 use crate::device::net::NetworkDevice;
 use crate::interrupt::SYSTEM_TIMER;
@@ -28,10 +27,8 @@ pub struct SmoltcpDevice<D: NetworkDevice> {
 impl<D: NetworkDevice> SmoltcpDevice<D> {
     pub fn new(device: D) -> Self {
         let frame_len = device.mtu().saturating_add(ETHERNET_HEADER_LEN);
-        let mut rx_buffer = Vec::new();
-        rx_buffer.resize(frame_len, 0);
-        let mut tx_buffer = Vec::new();
-        tx_buffer.resize(frame_len, 0);
+        let rx_buffer = vec![0; frame_len];
+        let tx_buffer = vec![0; frame_len];
         Self {
             device,
             rx_buffer,
@@ -115,8 +112,8 @@ impl<D: NetworkDevice> SmoltcpStack<D> {
     ) -> R {
         let iface = &mut self.iface;
         let sockets = &mut self.sockets;
-        let mut cx = iface.context();
-        f(&mut cx, sockets)
+        let cx = iface.context();
+        f(cx, sockets)
     }
 
     pub fn device(&self) -> &SmoltcpDevice<D> {
@@ -179,7 +176,6 @@ pub(crate) fn to_no_std_endpoint(endpoint: IpEndpoint) -> Option<crate::net::Soc
     Some(crate::net::SocketAddr::new(ip, endpoint.port))
 }
 
-
 pub struct SmoltcpRxToken<'a> {
     buffer: &'a [u8],
 }
@@ -213,8 +209,14 @@ impl<'a, D: NetworkDevice> TxToken for SmoltcpTxToken<'a, D> {
 }
 
 impl<D: NetworkDevice> Device for SmoltcpDevice<D> {
-    type RxToken<'a> = SmoltcpRxToken<'a> where D: 'a;
-    type TxToken<'a> = SmoltcpTxToken<'a, D> where D: 'a;
+    type RxToken<'a>
+        = SmoltcpRxToken<'a>
+    where
+        D: 'a;
+    type TxToken<'a>
+        = SmoltcpTxToken<'a, D>
+    where
+        D: 'a;
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let frame_len = match self.device.receive_frame(&mut self.rx_buffer) {
@@ -259,9 +261,9 @@ mod tests {
     use smoltcp::phy::{Device as SmoltcpPhyDevice, RxToken, TxToken};
     use smoltcp::time::Instant;
 
+    use crate::device::net::{LinkState, NetworkDevice};
     use crate::println;
     use crate::test::kernel_test_case;
-    use crate::device::net::{LinkState, NetworkDevice};
 
     use super::{SmoltcpDevice, SmoltcpStack};
     use crate::net::{IpAddr, Ipv4Addr, NetCidr};
@@ -295,10 +297,7 @@ mod tests {
         println!("[test] smoltcp_stack_poll_smoke");
 
         let device = TestDevice::new();
-        let addr = NetCidr::new(
-            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 15)),
-            24,
-        );
+        let addr = NetCidr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 15)), 24);
         let mut stack = SmoltcpStack::new(device, &[addr]);
         let _ = stack.poll();
     }
@@ -318,10 +317,7 @@ mod tests {
                 "smoltcp integration test requires a network device"
             );
             let shared = crate::device::net::SharedNetworkDevice::from_arc(devices[0].clone());
-            let addr = NetCidr::new(
-                IpAddr::V4(Ipv4Addr::new(10, 0, 2, 15)),
-                24,
-            );
+            let addr = NetCidr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 15)), 24);
             let mut stack = SmoltcpStack::new(shared, &[addr]);
             let _ = stack.poll();
         });
