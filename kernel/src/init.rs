@@ -102,6 +102,14 @@ pub fn initialise_scheduler() {
 }
 
 fn init_shell() {
+    #[cfg(not(test))]
+    {
+        crate::net::spawn_background_tasks();
+        if let Err(err) = crate::kernel_proc::web_server::spawn_web_server() {
+            crate::println!("[web] failed to start web server: {err:?}");
+        }
+    }
+
     if let Err(err) = crate::kernel_proc::shell::spawn_shell() {
         crate::println!("[shell] failed to start shell: {err:?}");
     }

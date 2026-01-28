@@ -22,6 +22,7 @@
 - Defines the `NetworkDevice` trait for raw Ethernet frame I/O (MAC/MTU/link state + transmit/receive).
 - Mirrors the block provider pattern so network devices can be discovered during boot without binding to a transport.
 - The trait remains synchronous for deterministic bring-up; async adapters will be layered later with the TCP/IP stack.
+- The smoltcp adapter lives under `net::smoltcp` and consumes `NetworkDevice` implementations.
 
 ## Future Work
 - Introduce registry infrastructure to enumerate devices discovered during boot.
