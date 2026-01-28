@@ -17,6 +17,8 @@ use crate::process::{ControllingTty, PROCESS_TABLE, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 
+const DEBUG_LINUX_SYSCALL: bool = true;
+
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxErrno {
@@ -105,6 +107,18 @@ pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
+    if DEBUG_LINUX_SYSCALL {
+        crate::println!(
+            "[linux-syscall] nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
+            invocation.number,
+            invocation.args[0],
+            invocation.args[1],
+            invocation.args[2],
+            invocation.args[3],
+            invocation.args[4],
+            invocation.args[5],
+        );
+    }
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -138,7 +152,12 @@ pub fn dispatch(
         Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
         Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
-        None => DispatchResult::Completed(Err(SysError::NotImplemented)),
+        None => {
+            if DEBUG_LINUX_SYSCALL {
+                crate::println!("[linux-syscall] nr={} -> ENOSYS", invocation.number);
+            }
+            DispatchResult::Completed(Err(SysError::NotImplemented))
+        }
     }
 }
 
@@ -171,6 +190,9 @@ fn handle_read(invocation: &SyscallInvocation) -> SysResult {
         .map_err(|_| SysError::InvalidArgument)?;
     let user_ptr = VirtAddr::new(ptr as usize);
     copy_to_user(user_ptr, &buf[..read]).map_err(|_| SysError::InvalidArgument)?;
+    if DEBUG_LINUX_SYSCALL {
+        crate::println!("[linux-syscall] read fd={} len={} -> {}", fd, read_len, read);
+    }
     Ok(read as u64)
 }
 
@@ -193,6 +215,12 @@ fn handle_write(invocation: &SyscallInvocation) -> SysResult {
     copy_from_user(&mut buf[..read_len], user_ptr).map_err(|_| SysError::InvalidArgument)?;
     let written = proc_fs::write_fd(pid, fd as u32, &buf[..read_len])
         .map_err(|_| SysError::InvalidArgument)?;
+    if DEBUG_LINUX_SYSCALL {
+        crate::println!(
+            "[linux-syscall] write fd={} len={} -> {}",
+            fd, read_len, written
+        );
+    }
     Ok(written as u64)
 }
 
@@ -271,6 +299,9 @@ fn handle_fcntl(invocation: &SyscallInvocation) -> SysResult {
     let cmd = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let arg = invocation.arg(2).unwrap_or(0);
 
+    if DEBUG_LINUX_SYSCALL {
+        crate::println!("[linux-syscall] fcntl fd={} cmd={} arg={}", fd, cmd, arg);
+    }
     match cmd {
         F_DUPFD => {
             let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
@@ -307,6 +338,9 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
 
+    if DEBUG_LINUX_SYSCALL {
+        crate::println!("[linux-syscall] ioctl fd={} cmd=0x{:x} arg=0x{:x}", fd, cmd, arg);
+    }
     process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
