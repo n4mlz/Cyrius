@@ -1,9 +1,11 @@
 use alloc::vec::Vec;
 
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Context, Interface, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{
+    EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address,
+};
 
 use crate::device::net::NetworkDevice;
 use crate::interrupt::SYSTEM_TIMER;
@@ -107,6 +109,16 @@ impl<D: NetworkDevice> SmoltcpStack<D> {
         &mut self.sockets
     }
 
+    pub fn with_context_and_sockets<R>(
+        &mut self,
+        f: impl FnOnce(&mut Context, &mut SocketSet<'static>) -> R,
+    ) -> R {
+        let iface = &mut self.iface;
+        let sockets = &mut self.sockets;
+        let mut cx = iface.context();
+        f(&mut cx, sockets)
+    }
+
     pub fn device(&self) -> &SmoltcpDevice<D> {
         &self.device
     }
@@ -132,16 +144,39 @@ fn to_smoltcp_cidr(cidr: NetCidr) -> Option<IpCidr> {
     Some(IpCidr::new(addr, cidr.prefix()))
 }
 
-fn to_smoltcp_ip(addr: IpAddr) -> Option<IpAddress> {
+pub(crate) fn to_smoltcp_ip(addr: IpAddr) -> Option<IpAddress> {
     match addr {
         IpAddr::V4(addr) => Some(IpAddress::Ipv4(to_smoltcp_ipv4(addr))),
         IpAddr::V6(_) => None,
     }
 }
 
-fn to_smoltcp_ipv4(addr: Ipv4Addr) -> Ipv4Address {
+pub(crate) fn to_smoltcp_ipv4(addr: Ipv4Addr) -> Ipv4Address {
     let octets = addr.octets();
     Ipv4Address::new(octets[0], octets[1], octets[2], octets[3])
+}
+
+pub(crate) fn to_smoltcp_endpoint(addr: crate::net::SocketAddr) -> Option<IpEndpoint> {
+    let ip = to_smoltcp_ip(addr.ip())?;
+    Some(IpEndpoint::new(ip, addr.port()))
+}
+
+#[allow(unreachable_patterns)]
+pub(crate) fn to_no_std_ip(addr: IpAddress) -> Option<IpAddr> {
+    match addr {
+        IpAddress::Ipv4(addr) => {
+            let octets = addr.octets();
+            Some(IpAddr::V4(Ipv4Addr::new(
+                octets[0], octets[1], octets[2], octets[3],
+            )))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn to_no_std_endpoint(endpoint: IpEndpoint) -> Option<crate::net::SocketAddr> {
+    let ip = to_no_std_ip(endpoint.addr)?;
+    Some(crate::net::SocketAddr::new(ip, endpoint.port))
 }
 
 

@@ -1,4 +1,4 @@
-# Kernel Processes (Shell / Linux Box)
+# Kernel Processes (Shell / Linux Box / Web Server)
 
 ## Role and Scope
 - Groups kernel-resident processes such as the interactive shell and the Linux ELF launcher.
@@ -25,6 +25,11 @@
   `linux-syscall-child.elf`, built via `xtask-assets` from `xtask-assets/fixtures`.
 - `xtask` also runs the linux-syscall binary on the host to confirm Linux and Cyrius produce the
   same stdout for the stdin/file I/O scenario.
+
+## Web Server
+- `web_server` demonstrates a kernel-resident TCP service built on the smoltcp-backed TCP wrapper.
+- The server is a simple echo loop bound to `0.0.0.0:12345`, mirroring the std example while staying `no_std`.
+- It is spawned during scheduler initialisation alongside the shell and depends on `net::spawn_background_tasks` polling the runtime for progress.
 
 ## Future Work
 - Add richer status reporting (exit code, stdout capture) once process lifecycle management and IPC mature.
