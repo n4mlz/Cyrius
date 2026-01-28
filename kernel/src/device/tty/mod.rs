@@ -11,8 +11,6 @@ use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
 use crate::util::stream::{ControlError, ControlOps, ControlRequest, ReadOps, WriteOps};
 
-const DEBUG_TTY: bool = true;
-
 const TTY_BUFFER_LIMIT: usize = 4096;
 
 const IOCTL_TCGETS: u64 = 0x5401;
@@ -339,9 +337,6 @@ impl ReadOps for TtyDevice {
 
         if icanon {
             let read = self.read_canonical(buf, echo, termios.c_cc);
-            if DEBUG_TTY && read > 0 {
-                crate::println!("[tty] read canonical {} byte(s)", read);
-            }
             return Ok(read);
         }
 
@@ -367,9 +362,6 @@ impl ReadOps for TtyDevice {
                 }
             }
         }
-        if DEBUG_TTY && total > 0 {
-            crate::println!("[tty] read raw {} byte(s)", total);
-        }
         Ok(total)
     }
 }
@@ -381,9 +373,6 @@ impl WriteOps for TtyDevice {
         let console = Arch::console();
         let written = console.write(data).unwrap_or(0);
         self.record_output(&data[..written]);
-        if DEBUG_TTY && written > 0 {
-            crate::println!("[tty] write {} byte(s)", written);
-        }
         Ok(written)
     }
 }
@@ -394,13 +383,6 @@ impl CharDevice for TtyDevice {
 
 impl ControlOps for TtyDevice {
     fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
-        if DEBUG_TTY {
-            crate::println!(
-                "[tty] ioctl cmd=0x{:x} arg=0x{:x}",
-                request.command,
-                request.arg
-            );
-        }
         match request.command {
             IOCTL_TCGETS => {
                 let termios = self.termios_snapshot();

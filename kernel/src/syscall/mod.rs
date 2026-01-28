@@ -28,6 +28,7 @@ pub enum SysError {
     NotFound,
     BadAddress,
     NotTty,
+    IllegalSeek,
 }
 
 pub type SysResult = Result<u64, SysError>;

@@ -1,11 +1,12 @@
 use super::{DispatchResult, SysError, SysResult, SyscallInvocation};
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
 use crate::fs::NodeKind;
+use crate::interrupt::INTERRUPTS;
 use crate::mem::addr::{
     Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up,
 };
@@ -20,8 +21,6 @@ use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 
-const DEBUG_LINUX_SYSCALL: bool = true;
-
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxErrno {
@@ -30,6 +29,7 @@ pub enum LinuxErrno {
     InvalidArgument = 22,
     BadAddress = 14,
     NotTty = 25,
+    IllegalSeek = 29,
 }
 
 #[repr(u64)]
@@ -40,6 +40,8 @@ pub enum LinuxSyscall {
     Open = 2,
     Close = 3,
     Stat = 4,
+    Poll = 7,
+    Lseek = 8,
     Mmap = 9,
     Munmap = 11,
     Brk = 12,
@@ -49,7 +51,8 @@ pub enum LinuxSyscall {
     Writev = 20,
     GetPid = 39,
     Fcntl = 72,
-    Poll = 7,
+    GetCwd = 79,
+    Chdir = 80,
     SetPgid = 109,
     GetPpid = 110,
     GetPgrp = 111,
@@ -77,6 +80,7 @@ impl LinuxSyscall {
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
             7 => Some(Self::Poll),
+            8 => Some(Self::Lseek),
             9 => Some(Self::Mmap),
             11 => Some(Self::Munmap),
             12 => Some(Self::Brk),
@@ -86,6 +90,8 @@ impl LinuxSyscall {
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
             72 => Some(Self::Fcntl),
+            79 => Some(Self::GetCwd),
+            80 => Some(Self::Chdir),
             109 => Some(Self::SetPgid),
             110 => Some(Self::GetPpid),
             111 => Some(Self::GetPgrp),
@@ -112,18 +118,6 @@ pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
-    if DEBUG_LINUX_SYSCALL {
-        crate::println!(
-            "[linux-syscall] nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
-            invocation.number,
-            invocation.args[0],
-            invocation.args[1],
-            invocation.args[2],
-            invocation.args[3],
-            invocation.args[4],
-            invocation.args[5],
-        );
-    }
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -132,10 +126,13 @@ pub fn dispatch(
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
         Some(LinuxSyscall::Poll) => DispatchResult::Completed(handle_poll(invocation)),
+        Some(LinuxSyscall::Lseek) => DispatchResult::Completed(handle_lseek(invocation)),
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
         Some(LinuxSyscall::Munmap) => DispatchResult::Completed(handle_munmap(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
         Some(LinuxSyscall::Fcntl) => DispatchResult::Completed(handle_fcntl(invocation)),
+        Some(LinuxSyscall::GetCwd) => DispatchResult::Completed(handle_getcwd(invocation)),
+        Some(LinuxSyscall::Chdir) => DispatchResult::Completed(handle_chdir(invocation)),
         Some(LinuxSyscall::SetPgid) => DispatchResult::Completed(handle_setpgid(invocation)),
         Some(LinuxSyscall::GetPpid) => DispatchResult::Completed(handle_getppid(invocation)),
         Some(LinuxSyscall::GetPgrp) => DispatchResult::Completed(handle_getpgrp(invocation)),
@@ -158,12 +155,7 @@ pub fn dispatch(
         Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
         Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
-        None => {
-            if DEBUG_LINUX_SYSCALL {
-                crate::println!("[linux-syscall] nr={} -> ENOSYS", invocation.number);
-            }
-            DispatchResult::Completed(Err(SysError::NotImplemented))
-        }
+        None => DispatchResult::Completed(Err(SysError::NotImplemented)),
     }
 }
 
@@ -196,9 +188,6 @@ fn handle_read(invocation: &SyscallInvocation) -> SysResult {
         .map_err(|_| SysError::InvalidArgument)?;
     let user_ptr = VirtAddr::new(ptr as usize);
     copy_to_user(user_ptr, &buf[..read]).map_err(|_| SysError::InvalidArgument)?;
-    if DEBUG_LINUX_SYSCALL {
-        crate::println!("[linux-syscall] read fd={} len={} -> {}", fd, read_len, read);
-    }
     Ok(read as u64)
 }
 
@@ -221,12 +210,6 @@ fn handle_write(invocation: &SyscallInvocation) -> SysResult {
     copy_from_user(&mut buf[..read_len], user_ptr).map_err(|_| SysError::InvalidArgument)?;
     let written = proc_fs::write_fd(pid, fd as u32, &buf[..read_len])
         .map_err(|_| SysError::InvalidArgument)?;
-    if DEBUG_LINUX_SYSCALL {
-        crate::println!(
-            "[linux-syscall] write fd={} len={} -> {}",
-            fd, read_len, written
-        );
-    }
     Ok(written as u64)
 }
 
@@ -305,9 +288,6 @@ fn handle_fcntl(invocation: &SyscallInvocation) -> SysResult {
     let cmd = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let arg = invocation.arg(2).unwrap_or(0);
 
-    if DEBUG_LINUX_SYSCALL {
-        crate::println!("[linux-syscall] fcntl fd={} cmd={} arg={}", fd, cmd, arg);
-    }
     match cmd {
         F_DUPFD => {
             let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
@@ -344,9 +324,6 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
 
-    if DEBUG_LINUX_SYSCALL {
-        crate::println!("[linux-syscall] ioctl fd={} cmd=0x{:x} arg=0x{:x}", fd, cmd, arg);
-    }
     process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
@@ -478,6 +455,58 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
     Ok(0)
 }
 
+fn handle_lseek(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let offset = invocation.arg(1).ok_or(SysError::InvalidArgument)? as i64;
+    let whence = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let whence = u32::try_from(whence).map_err(|_| SysError::InvalidArgument)?;
+    match proc_fs::seek_fd(pid, fd as u32, offset, whence) {
+        Ok(pos) => Ok(pos),
+        Err(crate::fs::VfsError::NotFile) => Err(SysError::IllegalSeek),
+        Err(crate::fs::VfsError::NotDirectory) => Err(SysError::IllegalSeek),
+        Err(crate::fs::VfsError::InvalidPath) => Err(SysError::InvalidArgument),
+        Err(crate::fs::VfsError::NotFound) => Err(SysError::InvalidArgument),
+        Err(_) => Err(SysError::InvalidArgument),
+    }
+}
+
+fn handle_getcwd(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let buf_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let size = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let size = usize::try_from(size).map_err(|_| SysError::InvalidArgument)?;
+    if size == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let cwd = proc_fs::cwd(pid).map_err(|_| SysError::InvalidArgument)?;
+    let text = cwd.to_string();
+    let bytes = text.as_bytes();
+    if bytes.len().saturating_add(1) > size {
+        return Err(SysError::InvalidArgument);
+    }
+    let user_ptr = VirtAddr::new(buf_ptr as usize);
+    copy_to_user(user_ptr, bytes).map_err(|_| SysError::InvalidArgument)?;
+    let nul = VirtAddr::new(user_ptr.as_raw() + bytes.len());
+    copy_to_user(nul, &[0]).map_err(|_| SysError::InvalidArgument)?;
+    Ok(buf_ptr)
+}
+
+fn handle_chdir(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, ptr)
+    })?;
+    proc_fs::change_dir(pid, &path).map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
+}
+
 fn handle_poll(invocation: &SyscallInvocation) -> SysResult {
     const POLLIN: i16 = 0x0001;
     const POLLNVAL: i16 = 0x0020;
@@ -502,8 +531,9 @@ fn handle_poll(invocation: &SyscallInvocation) -> SysResult {
     let ptr = VirtAddr::new(fds_ptr as usize);
 
     loop {
-        let ready = with_user_slice_mut(ptr, nfds, |fds| poll_once(fds, &process, POLLIN, POLLNVAL))
-            .map_err(|_| SysError::BadAddress)?;
+        let ready =
+            with_user_slice_mut(ptr, nfds, |fds| poll_once(fds, &process, POLLIN, POLLNVAL))
+                .map_err(|_| SysError::BadAddress)?;
         if ready > 0 || timeout_ms == 0 {
             return Ok(ready as u64);
         }
@@ -831,9 +861,9 @@ fn handle_wait4(invocation: &SyscallInvocation) -> SysResult {
             return Ok(0);
         }
 
-        #[cfg(target_arch = "x86_64")]
-        crate::arch::x86_64::halt();
-        #[cfg(not(target_arch = "x86_64"))]
+        // NOTE: Syscalls may run with interrupts disabled; enable them so the scheduler can
+        // observe child exits while we wait.
+        INTERRUPTS.enable();
         core::hint::spin_loop();
     }
 }
@@ -1048,6 +1078,7 @@ fn errno_for(err: SysError) -> u16 {
         SysError::NotFound => LinuxErrno::NoEntry as u16,
         SysError::BadAddress => LinuxErrno::BadAddress as u16,
         SysError::NotTty => LinuxErrno::NotTty as u16,
+        SysError::IllegalSeek => LinuxErrno::IllegalSeek as u16,
     }
 }
 
@@ -1398,8 +1429,8 @@ impl LinuxStat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::DirNode;
     use crate::device::tty::global_tty;
+    use crate::fs::DirNode;
     use crate::mem::addr::VirtAddr;
     use crate::println;
     use crate::process::PROCESS_TABLE;
@@ -1502,6 +1533,28 @@ mod tests {
             DispatchResult::Completed(Ok(ready)) => {
                 assert_eq!(ready, 1);
                 assert_eq!(fds[0].revents & 0x0001, 0x0001);
+            }
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn getcwd_returns_root_path() {
+        println!("[test] getcwd_returns_root_path");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+
+        let mut buf = [0u8; 8];
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::GetCwd as u64,
+            [buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0],
+        );
+        match dispatch(&invocation, None) {
+            DispatchResult::Completed(Ok(ptr)) => {
+                assert_eq!(ptr, buf.as_ptr() as u64);
+                assert_eq!(buf[0], b'/');
+                assert_eq!(buf[1], 0);
             }
             other => panic!("unexpected dispatch result: {:?}", other),
         }

@@ -71,6 +71,12 @@ pub fn write_fd(pid: ProcessId, fd: Fd, data: &[u8]) -> Result<usize, VfsError> 
     process.fd_table().write(fd, data)
 }
 
+pub fn seek_fd(pid: ProcessId, fd: Fd, offset: i64, whence: u32) -> Result<u64, VfsError> {
+    let process = process_handle(pid)?;
+    let entry = process.fd_table().entry(fd)?;
+    entry.file().seek(offset, whence)
+}
+
 pub fn close_fd(pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
     process.fd_table().close(fd)

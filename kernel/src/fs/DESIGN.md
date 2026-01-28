@@ -33,6 +33,8 @@
   at the root so callers (process VFS ops, tar extraction, loader) share consistent behaviour.
 - Process FDs advance offsets on successful reads/writes. Write support is provided by filesystems
   that opt in (e.g. memfs); read-only filesystems return `ReadOnly`.
+- `File::seek` allows per-open offsets to be repositioned; regular file handles implement it while
+  character devices and directories report `NotFile`.
 - Control-plane operations (ioctl-style) are routed through `File::ioctl` and only device-backed
   `File` implementations opt in, keeping ioctl out of regular file nodes.
 - `FileSystemProbe` abstracts per-filesystem probing so boot-time selection can iterate through
