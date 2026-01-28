@@ -5,7 +5,6 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::device::{Device, DeviceType};
-use crate::println;
 use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle};
 use crate::thread::SCHEDULER;
 use crate::util::lazylock::LazyLock;
@@ -284,12 +283,7 @@ impl CharDevice for TtyDevice {
 
 impl ControlOps for TtyDevice {
     fn control(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
-        println!(
-            "[tty ioctl] pid={} cmd=0x{:x}",
-            SCHEDULER.current_process_id().unwrap_or(0),
-            request.command
-        );
-        let result = match request.command {
+        match request.command {
             IOCTL_TCGETS => {
                 let termios = self.termios_snapshot();
                 request.write_struct(&termios)?;
@@ -326,11 +320,11 @@ impl ControlOps for TtyDevice {
             IOCTL_TIOCGPGRP => {
                 let _ = self.require_controlling_tty()?;
                 let mut pgrp = self.pgrp();
-                if pgrp == 0 {
-                    if let Some(current) = self.current_process_pgrp() {
-                        pgrp = current;
-                        self.set_pgrp(pgrp);
-                    }
+                if pgrp == 0
+                    && let Some(current) = self.current_process_pgrp()
+                {
+                    pgrp = current;
+                    self.set_pgrp(pgrp);
                 }
                 let pgrp = pgrp as i32;
                 request.write_struct(&pgrp)?;
@@ -349,17 +343,7 @@ impl ControlOps for TtyDevice {
                 Ok(0)
             }
             _ => Err(ControlError::Unsupported),
-        };
-        println!(
-            "[tty ioctl] pid={} cmd=0x{:x} ret={}",
-            SCHEDULER.current_process_id().unwrap_or(0),
-            request.command,
-            match &result {
-                Ok(val) => alloc::format!("ok({})", val),
-                Err(err) => alloc::format!("err({:?})", err),
-            }
-        );
-        result
+        }
     }
 }
 

@@ -12,7 +12,6 @@ use crate::mem::addr::{
 use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
 use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
-use crate::println;
 use crate::process::fs as proc_fs;
 use crate::process::{ControllingTty, PROCESS_TABLE, ProcessId};
 use crate::thread::SCHEDULER;
@@ -106,10 +105,6 @@ pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
-    println!(
-        "Linux syscall invoked: number={}, args={:?}",
-        invocation.number, invocation.args
-    );
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -222,25 +217,9 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
         proc_fs::open_path(pid, &path, flags)
     };
 
-    if path == "/dev/tty" || path == "/dev/console" {
-        println!(
-            "[open] pid={} path={} flags=0x{:x} => {}",
-            pid,
-            path,
-            flags,
-            match &result {
-                Ok(fd) => alloc::format!("fd={}", fd),
-                Err(_) => "err".into(),
-            }
-        );
-    }
-
     let fd = result.map_err(|_| SysError::InvalidArgument)?;
-    if path == "/dev/tty" {
-        if process.session_id() == pid && !process.has_controlling_tty() {
-            process.set_controlling_tty(ControllingTty::Global);
-            println!("[ctty] pid={} acquired=tty", pid);
-        }
+    if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
+        process.set_controlling_tty(ControllingTty::Global);
     }
     Ok(fd as u64)
 }
@@ -292,7 +271,7 @@ fn handle_fcntl(invocation: &SyscallInvocation) -> SysResult {
     let cmd = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let arg = invocation.arg(2).unwrap_or(0);
 
-    let result = match cmd {
+    match cmd {
         F_DUPFD => {
             let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
             proc_fs::dup_fd_min(pid, fd, min, false)
@@ -315,21 +294,7 @@ fn handle_fcntl(invocation: &SyscallInvocation) -> SysResult {
                 .map_err(|_| SysError::InvalidArgument)
         }
         _ => Err(SysError::NotImplemented),
-    };
-
-    println!(
-        "[fcntl] pid={} fd={} cmd={} arg={} => {}",
-        pid,
-        fd,
-        cmd,
-        arg,
-        match &result {
-            Ok(val) => alloc::format!("ok({})", val),
-            Err(err) => alloc::format!("err({:?})", err),
-        }
-    );
-
-    result
+    }
 }
 
 fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
@@ -341,24 +306,12 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
-    let result = process.address_space().with_page_table(|table, _| {
+
+    process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
         proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
-    });
-
-    println!(
-        "[ioctl] pid={} fd={} cmd=0x{:x} => {}",
-        pid,
-        fd,
-        cmd,
-        match &result {
-            Ok(val) => alloc::format!("ok({})", val),
-            Err(err) => alloc::format!("err({:?})", err),
-        }
-    );
-
-    result
+    })
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -389,12 +342,6 @@ fn handle_setsid(_invocation: &SyscallInvocation) -> SysResult {
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
-    println!(
-        "[setsid] pid={} old_sid={} old_pgrp={}",
-        pid,
-        process.session_id(),
-        process.pgrp_id()
-    );
     if process.session_id() == pid {
         return Err(SysError::InvalidArgument);
     }
@@ -445,10 +392,6 @@ fn handle_setpgid(invocation: &SyscallInvocation) -> SysResult {
         return Err(SysError::InvalidArgument);
     }
 
-    println!(
-        "[setpgid] caller={} target={} new_pgrp={}",
-        caller_pid, target_pid, target_pgid
-    );
     target.set_pgrp_id(target_pgid);
     Ok(0)
 }
@@ -743,13 +686,6 @@ fn handle_execve(
 
     if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
         process.set_brk_base(program.heap_base);
-        println!(
-            "[proc] pid={} sid={} pgrp={} ctty={}",
-            pid,
-            process.session_id(),
-            process.pgrp_id(),
-            process.has_controlling_tty()
-        );
     }
 
     frame.rip = program.entry.as_raw() as u64;
