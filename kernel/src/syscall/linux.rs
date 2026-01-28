@@ -11,11 +11,14 @@ use crate::mem::addr::{
 };
 use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
-use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
+use crate::mem::user::{
+    UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice, with_user_slice_mut,
+};
 use crate::process::fs as proc_fs;
-use crate::process::{ControllingTty, PROCESS_TABLE, ProcessId};
+use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
+use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 
 const DEBUG_LINUX_SYSCALL: bool = true;
 
@@ -46,6 +49,7 @@ pub enum LinuxSyscall {
     Writev = 20,
     GetPid = 39,
     Fcntl = 72,
+    Poll = 7,
     SetPgid = 109,
     GetPpid = 110,
     GetPgrp = 111,
@@ -72,6 +76,7 @@ impl LinuxSyscall {
             2 => Some(Self::Open),
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
+            7 => Some(Self::Poll),
             9 => Some(Self::Mmap),
             11 => Some(Self::Munmap),
             12 => Some(Self::Brk),
@@ -126,6 +131,7 @@ pub fn dispatch(
         Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
+        Some(LinuxSyscall::Poll) => DispatchResult::Completed(handle_poll(invocation)),
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
         Some(LinuxSyscall::Munmap) => DispatchResult::Completed(handle_munmap(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
@@ -470,6 +476,42 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
         Ok::<(), SysError>(())
     })?;
     Ok(0)
+}
+
+fn handle_poll(invocation: &SyscallInvocation) -> SysResult {
+    const POLLIN: i16 = 0x0001;
+    const POLLNVAL: i16 = 0x0020;
+
+    let pid = current_pid()?;
+    let fds_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let nfds = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let timeout_raw = invocation.arg(2).unwrap_or(0);
+    let timeout_ms = if timeout_raw == u64::MAX {
+        -1
+    } else {
+        i64::try_from(timeout_raw).map_err(|_| SysError::InvalidArgument)?
+    };
+    let nfds = usize::try_from(nfds).map_err(|_| SysError::InvalidArgument)?;
+    if nfds == 0 {
+        return Ok(0);
+    }
+
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let ptr = VirtAddr::new(fds_ptr as usize);
+
+    loop {
+        let ready = with_user_slice_mut(ptr, nfds, |fds| poll_once(fds, &process, POLLIN, POLLNVAL))
+            .map_err(|_| SysError::BadAddress)?;
+        if ready > 0 || timeout_ms == 0 {
+            return Ok(ready as u64);
+        }
+        // NOTE: Timeout handling is intentionally simplified; any non-zero timeout blocks
+        // until an event arrives. We spin here instead of halting because syscalls may run
+        // with interrupts disabled, making `halt` non-resumable.
+        core::hint::spin_loop();
+    }
 }
 
 fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
@@ -1141,6 +1183,84 @@ fn writev_from_iovecs(
     Ok(())
 }
 
+fn poll_once(
+    fds: &mut [LinuxPollFd],
+    process: &ProcessHandle,
+    pollin: i16,
+    pollnval: i16,
+) -> usize {
+    let mut wants_input = false;
+    let mut tty_flags = Vec::with_capacity(fds.len());
+    for fd in fds.iter_mut() {
+        fd.revents = 0;
+        if fd.fd < 0 {
+            tty_flags.push(false);
+            continue;
+        }
+        if process.fd_table().entry(fd.fd as u32).is_err() {
+            fd.revents = pollnval;
+            tty_flags.push(false);
+            continue;
+        }
+        let is_tty = file_is_tty(process, fd.fd);
+        tty_flags.push(is_tty);
+        if (fd.events & pollin) != 0 {
+            if is_tty {
+                wants_input = true;
+            } else {
+                fd.revents |= pollin;
+            }
+        }
+    }
+
+    let input_ready = if wants_input {
+        crate::device::tty::global_tty().input_available()
+    } else {
+        false
+    };
+
+    let mut ready = 0usize;
+    for (fd, is_tty) in fds.iter_mut().zip(tty_flags.iter()) {
+        if fd.revents != 0 {
+            ready += 1;
+            continue;
+        }
+        if *is_tty && (fd.events & pollin) != 0 && input_ready {
+            fd.revents |= pollin;
+        }
+        if fd.revents != 0 {
+            ready += 1;
+        }
+    }
+    ready
+}
+
+fn file_is_tty(process: &ProcessHandle, fd: i32) -> bool {
+    const IOCTL_TIOCGWINSZ: u64 = 0x5413;
+
+    let entry = match process.fd_table().entry(fd as u32) {
+        Ok(entry) => entry,
+        Err(_) => return false,
+    };
+    let mut winsize = LinuxWinsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let access = KernelControlAccess;
+    let request = ControlRequest::new(
+        IOCTL_TIOCGWINSZ,
+        core::ptr::addr_of_mut!(winsize) as u64,
+        &access,
+    );
+    match entry.file().ioctl(&request) {
+        Ok(_) => true,
+        Err(ControlError::Unsupported) => false,
+        Err(_) => false,
+    }
+}
+
 fn encode_wait_status(code: i32) -> u32 {
     ((code as u32) & 0xFF) << 8
 }
@@ -1164,6 +1284,55 @@ enum LinuxOpenFlags {
 struct LinuxIovec {
     base: u64,
     len: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxPollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxWinsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+struct KernelControlAccess;
+
+impl ControlAccess for KernelControlAccess {
+    fn read(&self, addr: u64, dst: &mut [u8]) -> Result<(), ControlError> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let ptr = addr as *const u8;
+        if ptr.is_null() {
+            return Err(ControlError::BadAddress);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr, dst.as_mut_ptr(), dst.len());
+        }
+        Ok(())
+    }
+
+    fn write(&self, addr: u64, src: &[u8]) -> Result<(), ControlError> {
+        if src.is_empty() {
+            return Ok(());
+        }
+        let ptr = addr as *mut u8;
+        if ptr.is_null() {
+            return Err(ControlError::BadAddress);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), ptr, src.len());
+        }
+        Ok(())
+    }
 }
 
 #[repr(C)]
@@ -1230,6 +1399,7 @@ impl LinuxStat {
 mod tests {
     use super::*;
     use crate::fs::DirNode;
+    use crate::device::tty::global_tty;
     use crate::mem::addr::VirtAddr;
     use crate::println;
     use crate::process::PROCESS_TABLE;
@@ -1305,6 +1475,33 @@ mod tests {
         match dispatch(&invocation, None) {
             DispatchResult::Completed(Ok(written)) => {
                 assert_eq!(written, (a.len() + b.len()) as u64)
+            }
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn poll_reports_tty_input() {
+        println!("[test] poll_reports_tty_input");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+        let tty = global_tty();
+        tty.push_input(b"X");
+
+        let mut fds = [LinuxPollFd {
+            fd: 0,
+            events: 0x0001,
+            revents: 0,
+        }];
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::Poll as u64,
+            [fds.as_mut_ptr() as u64, fds.len() as u64, 0, 0, 0, 0],
+        );
+        match dispatch(&invocation, None) {
+            DispatchResult::Completed(Ok(ready)) => {
+                assert_eq!(ready, 1);
+                assert_eq!(fds[0].revents & 0x0001, 0x0001);
             }
             other => panic!("unexpected dispatch result: {:?}", other),
         }

@@ -171,6 +171,19 @@ impl TtyDevice {
         guard.clear();
     }
 
+    pub fn input_available(&self) -> bool {
+        if !self.input.lock().is_empty() {
+            return true;
+        }
+        let console = Arch::console();
+        let mut byte = [0u8; 1];
+        if console.read(&mut byte).unwrap_or(0) == 1 {
+            self.input.lock().push_back(byte[0]);
+            return true;
+        }
+        false
+    }
+
     fn record_output(&self, data: &[u8]) {
         let mut guard = self.output.lock();
         for byte in data {
