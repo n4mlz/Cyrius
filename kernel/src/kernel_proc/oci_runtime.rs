@@ -4,8 +4,8 @@ use alloc::string::{String, ToString};
 use crate::container::runtime::{ContainerStartError, start_container_by_id};
 use crate::container::{CONTAINER_TABLE, ContainerError};
 use crate::fs::Path;
-use crate::process::ProcessId;
 use crate::process::fs as proc_fs;
+use crate::process::{PROCESS_TABLE, ProcessId};
 
 #[derive(Debug)]
 pub enum OciRuntimeError {
@@ -23,9 +23,21 @@ pub fn create_container(pid: ProcessId, id: &str, bundle: &str) -> Result<String
     Ok(format!("container {id} created"))
 }
 
-pub fn start_container(id: &str) -> Result<String, OciRuntimeError> {
-    let pid = start_container_by_id(id).map_err(OciRuntimeError::Start)?;
-    Ok(format!("container {id} started (pid {pid})"))
+pub fn start_container(id: &str) -> Result<ProcessId, OciRuntimeError> {
+    start_container_by_id(id).map_err(OciRuntimeError::Start)
+}
+
+pub fn wait_for_exit(pid: ProcessId) {
+    while PROCESS_TABLE
+        .thread_count(pid)
+        .map(|count| count > 0)
+        .unwrap_or(false)
+    {
+        #[cfg(target_arch = "x86_64")]
+        crate::arch::x86_64::halt();
+        #[cfg(not(target_arch = "x86_64"))]
+        core::hint::spin_loop();
+    }
 }
 
 pub fn state_container(id: &str) -> Result<String, OciRuntimeError> {
