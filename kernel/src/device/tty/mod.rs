@@ -11,6 +11,8 @@ use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
 use crate::util::stream::{ControlError, ControlOps, ControlRequest, ReadOps, WriteOps};
 
+const DEBUG_TTY: bool = true;
+
 const TTY_BUFFER_LIMIT: usize = 4096;
 
 const IOCTL_TCGETS: u64 = 0x5401;
@@ -301,6 +303,14 @@ impl TtyDevice {
     fn require_controlling_tty(&self) -> Result<ProcessHandle, ControlError> {
         let proc = self.current_process().ok_or(ControlError::Invalid)?;
         if !proc.has_controlling_tty() {
+            if DEBUG_TTY {
+                crate::println!(
+                    "[tty] missing controlling tty pid={} pgrp={} sid={}",
+                    proc.id(),
+                    proc.pgrp_id(),
+                    proc.session_id()
+                );
+            }
             return Err(ControlError::Invalid);
         }
         Ok(proc)
@@ -407,6 +417,14 @@ impl ControlOps for TtyDevice {
             IOCTL_TIOCSCTTY => {
                 let proc = self.current_process().ok_or(ControlError::Invalid)?;
                 let pid = proc.id();
+                if DEBUG_TTY {
+                    crate::println!(
+                        "[tty] TIOCSCTTY pid={} sid={} has_ctty={}",
+                        pid,
+                        proc.session_id(),
+                        proc.has_controlling_tty()
+                    );
+                }
                 if proc.session_id() != pid {
                     return Err(ControlError::Invalid);
                 }
@@ -426,6 +444,9 @@ impl ControlOps for TtyDevice {
                     pgrp = current;
                     self.set_pgrp(pgrp);
                 }
+                if DEBUG_TTY {
+                    crate::println!("[tty] TIOCGPGRP -> {}", pgrp);
+                }
                 let pgrp = pgrp as i32;
                 request.write_struct(&pgrp)?;
                 Ok(0)
@@ -433,6 +454,9 @@ impl ControlOps for TtyDevice {
             IOCTL_TIOCSPGRP => {
                 let _ = self.require_controlling_tty()?;
                 let pgrp = request.read_struct::<i32>()?;
+                if DEBUG_TTY {
+                    crate::println!("[tty] TIOCSPGRP set pgrp {}", pgrp);
+                }
                 if pgrp < 0 {
                     return Err(ControlError::Invalid);
                 }

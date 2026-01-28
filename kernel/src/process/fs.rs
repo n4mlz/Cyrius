@@ -103,11 +103,25 @@ pub fn control_fd(
     request: &ControlRequest<'_>,
 ) -> Result<u64, ControlError> {
     let process = process_handle(pid).map_err(|_| ControlError::Invalid)?;
-    let entry = process
-        .fd_table()
-        .entry(fd)
-        .map_err(|_| ControlError::Invalid)?;
-    entry.file().ioctl(request)
+    let entry = match process.fd_table().entry(fd) {
+        Ok(entry) => entry,
+        Err(_) => {
+            if request.command == 0x5410 {
+                crate::println!("[proc-fs] ioctl fd not found pid={} fd={}", pid, fd);
+            }
+            return Err(ControlError::Invalid);
+        }
+    };
+    let result = entry.file().ioctl(request);
+    if request.command == 0x5410 {
+        crate::println!(
+            "[proc-fs] ioctl fd={} cmd=0x{:x} -> {:?}",
+            fd,
+            request.command,
+            result
+        );
+    }
+    result
 }
 
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {

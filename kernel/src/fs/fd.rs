@@ -111,6 +111,14 @@ impl FdTable {
         let guard = self.inner.lock();
         guard.get(fd).cloned()
     }
+
+    pub fn clone_from(&self, other: &FdTable) {
+        let other_guard = other.inner.lock();
+        let mut guard = self.inner.lock();
+        guard.slots = other_guard.slots.clone();
+        self.next_fd
+            .store(other.next_fd.load(Ordering::Acquire), Ordering::Release);
+    }
 }
 
 impl Default for FdTable {
@@ -186,5 +194,28 @@ impl FdTableInner {
         } else {
             Err(VfsError::NotFound)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::devfs::global_tty_node;
+    use crate::println;
+    use crate::test::kernel_test_case;
+
+    #[kernel_test_case]
+    fn fd_table_clone_copies_entries() {
+        println!("[test] fd_table_clone_copies_entries");
+
+        let src = FdTable::new();
+        let dst = FdTable::new();
+        let tty = global_tty_node()
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open tty");
+        src.open_fixed(10, tty).expect("open fixed");
+
+        dst.clone_from(&src);
+        assert!(dst.entry(10).is_ok(), "cloned fd missing");
     }
 }

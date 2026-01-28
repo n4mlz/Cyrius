@@ -21,6 +21,10 @@ use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 
+const DEBUG_LS_SYSCALL: bool = true;
+const DEBUG_LINUX_ENOSYS: bool = true;
+const DEBUG_LINUX_EXECVE: bool = true;
+
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxErrno {
@@ -49,6 +53,7 @@ pub enum LinuxSyscall {
     RtSigprocmask = 14,
     Ioctl = 16,
     Writev = 20,
+    Uname = 63,
     GetPid = 39,
     Fcntl = 72,
     GetCwd = 79,
@@ -60,9 +65,11 @@ pub enum LinuxSyscall {
     Fork = 57,
     Execve = 59,
     Exit = 60,
+    ExitGroup = 231,
     Wait4 = 61,
     GetUid = 102,
     GetGid = 104,
+    GetEuid = 107,
     SetUid = 105,
     SetGid = 106,
     GetPgid = 121,
@@ -73,6 +80,7 @@ pub enum LinuxSyscall {
 
 impl LinuxSyscall {
     pub fn from_raw(value: u64) -> Option<Self> {
+        let value = value as u32 as u64;
         match value {
             0 => Some(Self::Read),
             1 => Some(Self::Write),
@@ -89,6 +97,7 @@ impl LinuxSyscall {
             16 => Some(Self::Ioctl),
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
+            63 => Some(Self::Uname),
             72 => Some(Self::Fcntl),
             79 => Some(Self::GetCwd),
             80 => Some(Self::Chdir),
@@ -99,9 +108,11 @@ impl LinuxSyscall {
             57 => Some(Self::Fork),
             59 => Some(Self::Execve),
             60 => Some(Self::Exit),
+            231 => Some(Self::ExitGroup),
             61 => Some(Self::Wait4),
             102 => Some(Self::GetUid),
             104 => Some(Self::GetGid),
+            107 => Some(Self::GetEuid),
             105 => Some(Self::SetUid),
             106 => Some(Self::SetGid),
             121 => Some(Self::GetPgid),
@@ -118,6 +129,23 @@ pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
+    if DEBUG_LS_SYSCALL {
+        match invocation.number {
+            217 | 257 | 262 => {
+                crate::println!(
+                    "[linux-ls] nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
+                    invocation.number,
+                    invocation.args[0],
+                    invocation.args[1],
+                    invocation.args[2],
+                    invocation.args[3],
+                    invocation.args[4],
+                    invocation.args[5],
+                );
+            }
+            _ => {}
+        }
+    }
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -131,6 +159,7 @@ pub fn dispatch(
         Some(LinuxSyscall::Munmap) => DispatchResult::Completed(handle_munmap(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
         Some(LinuxSyscall::Fcntl) => DispatchResult::Completed(handle_fcntl(invocation)),
+        Some(LinuxSyscall::Uname) => DispatchResult::Completed(handle_uname(invocation)),
         Some(LinuxSyscall::GetCwd) => DispatchResult::Completed(handle_getcwd(invocation)),
         Some(LinuxSyscall::Chdir) => DispatchResult::Completed(handle_chdir(invocation)),
         Some(LinuxSyscall::SetPgid) => DispatchResult::Completed(handle_setpgid(invocation)),
@@ -149,13 +178,29 @@ pub fn dispatch(
         // NOTE: UID/GID syscalls are stubbed to 0 for now; user/cred support is not implemented yet.
         Some(LinuxSyscall::GetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetGid) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::GetEuid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetGid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
         Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
         Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
-        None => DispatchResult::Completed(Err(SysError::NotImplemented)),
+        Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
+        None => {
+            if DEBUG_LINUX_ENOSYS {
+                crate::println!(
+                    "[linux-syscall] ENOSYS nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
+                    invocation.number,
+                    invocation.args[0],
+                    invocation.args[1],
+                    invocation.args[2],
+                    invocation.args[3],
+                    invocation.args[4],
+                    invocation.args[5],
+                );
+            }
+            DispatchResult::Completed(Err(SysError::NotImplemented))
+        }
     }
 }
 
@@ -324,11 +369,21 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
 
-    process.address_space().with_page_table(|table, _| {
+    let result = process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
         proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
-    })
+    });
+    if cmd == 0x540e || cmd == 0x540f || cmd == 0x5410 {
+        crate::println!(
+            "[linux-ioctl] pid={} fd={} cmd=0x{:x} -> {:?}",
+            pid,
+            fd,
+            cmd,
+            result
+        );
+    }
+    result
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -507,6 +562,23 @@ fn handle_chdir(invocation: &SyscallInvocation) -> SysResult {
     Ok(0)
 }
 
+fn handle_uname(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let addr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let uts = LinuxUtsName::new();
+    let dst = VirtAddr::new(addr as usize);
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, uts.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
+    Ok(0)
+}
+
 fn handle_poll(invocation: &SyscallInvocation) -> SysResult {
     const POLLIN: i16 = 0x0001;
     const POLLNVAL: i16 = 0x0020;
@@ -676,6 +748,7 @@ fn handle_fork(
         child_proc.set_parent(pid);
         child_proc.set_session_id(parent_proc.session_id());
         child_proc.set_pgrp_id(parent_proc.pgrp_id());
+        child_proc.clone_fs_from(&parent_proc);
         if let Some(tty) = parent_proc.controlling_tty() {
             child_proc.set_controlling_tty(tty);
         }
@@ -739,6 +812,10 @@ fn handle_execve(
     };
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
+
+    if DEBUG_LINUX_EXECVE {
+        crate::println!("[linux-execve] path={path}");
+    }
 
     let argv = match process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
@@ -1332,6 +1409,52 @@ struct LinuxWinsize {
     ws_col: u16,
     ws_xpixel: u16,
     ws_ypixel: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxUtsName {
+    sysname: [u8; 65],
+    nodename: [u8; 65],
+    release: [u8; 65],
+    version: [u8; 65],
+    machine: [u8; 65],
+    domainname: [u8; 65],
+}
+
+impl LinuxUtsName {
+    fn new() -> Self {
+        fn write_field(dst: &mut [u8; 65], src: &[u8]) {
+            let len = dst.len().saturating_sub(1).min(src.len());
+            dst[..len].copy_from_slice(&src[..len]);
+            dst[len] = 0;
+        }
+
+        let mut uts = Self {
+            sysname: [0; 65],
+            nodename: [0; 65],
+            release: [0; 65],
+            version: [0; 65],
+            machine: [0; 65],
+            domainname: [0; 65],
+        };
+        write_field(&mut uts.sysname, b"Linux");
+        write_field(&mut uts.nodename, b"cyrius");
+        write_field(&mut uts.release, b"5.10.0");
+        write_field(&mut uts.version, b"cyrius");
+        write_field(&mut uts.machine, b"x86_64");
+        write_field(&mut uts.domainname, b"");
+        uts
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(
+                (self as *const LinuxUtsName) as *const u8,
+                core::mem::size_of::<LinuxUtsName>(),
+            )
+        }
+    }
 }
 
 struct KernelControlAccess;

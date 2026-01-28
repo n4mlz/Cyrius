@@ -67,6 +67,11 @@ impl ProcessFs {
         let guard = self.cwd.lock();
         guard.clone()
     }
+
+    pub fn clone_from(&self, other: &ProcessFs) {
+        self.fd_table.clone_from(&other.fd_table);
+        self.set_cwd(other.cwd());
+    }
 }
 
 impl Default for ProcessFs {
@@ -473,6 +478,10 @@ impl Process {
 
     pub fn fd_table(&self) -> &FdTable {
         &self.fs.fd_table
+    }
+
+    pub fn clone_fs_from(&self, other: &Process) {
+        self.fs.clone_from(&other.fs);
     }
 
     pub fn parent(&self) -> Option<ProcessId> {
