@@ -10,6 +10,10 @@
 - `TtyDevice` is a character device backed by the architecture console (`Arch::console()`).
 - Input/output buffers are maintained for tests and for cases where caller-supplied input should
   be consumed before touching hardware.
+- Reads block (via halt/spin) until at least one byte is available, so interactive programs do not
+  observe spurious EOF when no input is pending.
+- Canonical reads perform basic line editing (erase, EOF) and map carriage return to newline to
+  keep serial console input usable without a full line discipline.
 - Control operations (`ControlOps`) implement the minimal ioctl set required by BusyBox: termios
   getters/setters, window size queries, foreground process-group access, and controlling TTY
   acquisition.

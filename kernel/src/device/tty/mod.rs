@@ -217,6 +217,64 @@ impl TtyDevice {
         self.state.lock().pgrp = pgrp;
     }
 
+    fn read_byte_blocking(&self) -> u8 {
+        loop {
+            let mut byte = [0u8; 1];
+            if self.read_from_input(&mut byte) == 1 {
+                return byte[0];
+            }
+            let console = Arch::console();
+            if console.read(&mut byte).unwrap_or(0) == 1 {
+                return byte[0];
+            }
+            #[cfg(target_arch = "x86_64")]
+            crate::arch::x86_64::halt();
+            #[cfg(not(target_arch = "x86_64"))]
+            core::hint::spin_loop();
+        }
+    }
+
+    fn read_canonical(&self, buf: &mut [u8], echo: bool, c_cc: [u8; NCCS]) -> usize {
+        let mut total = 0usize;
+        let mut eof_seen = false;
+        while total < buf.len() {
+            let mut b = self.read_byte_blocking();
+            if b == b'\r' {
+                b = b'\n';
+            }
+            if b == c_cc[VERASE] {
+                if total > 0 {
+                    total -= 1;
+                    if echo {
+                        let _ = Arch::console().write(b"\x08 \x08");
+                    }
+                }
+                continue;
+            }
+            if b == c_cc[VEOF] {
+                eof_seen = true;
+                break;
+            }
+            buf[total] = b;
+            total += 1;
+            if echo {
+                let out = if b == b'\n' && (self.termios_snapshot().c_oflag & OF_ONLCR) != 0 {
+                    b"\r\n"
+                } else {
+                    core::slice::from_ref(&b)
+                };
+                let _ = Arch::console().write(out);
+            }
+            if b == b'\n' {
+                break;
+            }
+        }
+        if eof_seen && total == 0 {
+            return 0;
+        }
+        total
+    }
+
     fn current_process(&self) -> Option<ProcessHandle> {
         let pid = SCHEDULER.current_process_id()?;
         PROCESS_TABLE.process_handle(pid).ok()
@@ -256,11 +314,39 @@ impl ReadOps for TtyDevice {
     type Error = core::convert::Infallible;
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let mut total = self.read_from_input(buf);
-        if total == 0 {
-            let console = Arch::console();
-            let read = console.read(&mut buf[total..]).unwrap_or(0);
-            total += read;
+        let termios = self.termios_snapshot();
+        let icrnl = (termios.c_iflag & IF_ICRNL) != 0;
+        let icanon = (termios.c_lflag & LF_ICANON) != 0;
+        let echo = (termios.c_lflag & LF_ECHO) != 0;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        if icanon {
+            return Ok(self.read_canonical(buf, echo, termios.c_cc));
+        }
+
+        let mut total = 0usize;
+        while total == 0 {
+            total = self.read_from_input(buf);
+            if total == 0 {
+                let console = Arch::console();
+                let read = console.read(&mut buf[total..]).unwrap_or(0);
+                total += read;
+            }
+            if total == 0 {
+                #[cfg(target_arch = "x86_64")]
+                crate::arch::x86_64::halt();
+                #[cfg(not(target_arch = "x86_64"))]
+                core::hint::spin_loop();
+            }
+        }
+        if icrnl {
+            for byte in &mut buf[..total] {
+                if *byte == b'\r' {
+                    *byte = b'\n';
+                }
+            }
         }
         Ok(total)
     }
