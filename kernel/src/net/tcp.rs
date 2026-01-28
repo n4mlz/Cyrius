@@ -3,11 +3,11 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp::{ConnectError, ListenError, RecvError, SendError, Socket, SocketBuffer};
-use smoltcp::wire::IpEndpoint;
+use smoltcp::wire::{IpEndpoint, IpListenEndpoint};
 
 use crate::net::runtime::{self, NetError};
-use crate::net::smoltcp::{to_no_std_endpoint, to_smoltcp_endpoint};
-use crate::net::SocketAddr;
+use crate::net::smoltcp::{to_no_std_endpoint, to_smoltcp_endpoint, to_smoltcp_ipv4};
+use crate::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 const TCP_RX_BUFFER: usize = 16 * 1024;
 const TCP_TX_BUFFER: usize = 16 * 1024;
@@ -42,7 +42,7 @@ pub struct TcpListener {
 impl TcpListener {
     pub fn bind(addr: SocketAddr) -> Result<Self, TcpError> {
         ensure_runtime()?;
-        let local = to_smoltcp_endpoint(addr).ok_or(TcpError::UnsupportedAddressFamily)?;
+        let local = to_smoltcp_listen_endpoint(addr)?;
 
         let handle = runtime::with_runtime(|rt| {
             let sockets = rt.stack_mut().sockets_mut();
@@ -274,10 +274,24 @@ fn listen_on(
     sockets: &mut smoltcp::iface::SocketSet<'static>,
     addr: SocketAddr,
 ) -> Result<SocketHandle, TcpError> {
-    let local = to_smoltcp_endpoint(addr).ok_or(TcpError::UnsupportedAddressFamily)?;
+    let local = to_smoltcp_listen_endpoint(addr)?;
     let mut socket = new_tcp_socket();
     socket.listen(local).map_err(TcpError::Listen)?;
     Ok(sockets.add(socket))
+}
+
+fn to_smoltcp_listen_endpoint(addr: SocketAddr) -> Result<IpListenEndpoint, TcpError> {
+    let port = addr.port();
+    match addr.ip() {
+        IpAddr::V4(v4) => {
+            if v4 == Ipv4Addr::UNSPECIFIED {
+                Ok(IpListenEndpoint::from(port))
+            } else {
+                Ok(IpListenEndpoint::from((to_smoltcp_ipv4(v4), port)))
+            }
+        }
+        IpAddr::V6(_) => Err(TcpError::UnsupportedAddressFamily),
+    }
 }
 
 fn next_port() -> u16 {
