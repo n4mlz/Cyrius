@@ -234,7 +234,9 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
     ]);
     qemu.args([
         "-netdev",
-        "user,id=net0",
+        // Implicit dependency: hostfwd exposes the kernel web server on the host.
+        // Host access: tcp://127.0.0.1:12345 -> guest 0.0.0.0:12345.
+        "user,id=net0,hostfwd=tcp::12345-:12345",
         "-device",
         "virtio-net-pci,netdev=net0,disable-legacy=on",
     ]);
