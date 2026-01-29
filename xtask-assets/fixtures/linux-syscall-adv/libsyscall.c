@@ -72,6 +72,14 @@ isize sys_writev(int fd, const struct iovec *iov, int iovcnt) {
     return sys_call3(SYS_writev, fd, (isize)iov, iovcnt);
 }
 
+isize sys_open(const char *path, int flags, int mode) {
+    return sys_call3(SYS_open, (isize)path, flags, mode);
+}
+
+isize sys_close(int fd) {
+    return sys_call1(SYS_close, fd);
+}
+
 isize sys_stat(const char *path, struct linux_stat *statbuf) {
     return sys_call3(SYS_stat, (isize)path, (isize)statbuf, 0);
 }
@@ -106,6 +114,10 @@ isize sys_execve(const char *path, const char *const *argv, const char *const *e
 
 isize sys_wait4(isize pid, int *status, int options, void *rusage) {
     return sys_call4(SYS_wait4, pid, (isize)status, options, (isize)rusage);
+}
+
+isize sys_getdents64(int fd, void *dirp, usize count) {
+    return sys_call3(SYS_getdents64, fd, (isize)dirp, (isize)count);
 }
 
 __attribute__((noreturn)) void sys_exit(int code) {

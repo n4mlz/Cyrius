@@ -34,6 +34,41 @@ static void write_u32(u32 value) {
     }
 }
 
+static int str_eq(const char *a, const char *b) {
+    usize i = 0;
+    while (a[i] || b[i]) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return 1;
+}
+
+struct linux_dirent64 {
+    u64 d_ino;
+    u64 d_off;
+    u16 d_reclen;
+    unsigned char d_type;
+    char d_name[];
+} __attribute__((packed));
+
+static int scan_dirents(const char *buf, usize len, const char *target) {
+    usize off = 0;
+    int found = 0;
+    while (off + 19 <= len) {
+        const struct linux_dirent64 *ent = (const struct linux_dirent64 *)(buf + off);
+        if (ent->d_reclen < 19 || off + ent->d_reclen > len) {
+            break;
+        }
+        if (str_eq(ent->d_name, target)) {
+            found = 1;
+        }
+        off += ent->d_reclen;
+    }
+    return found;
+}
+
 void _start(void) {
     enum {
         PROT_READ = 0x1,
@@ -56,6 +91,34 @@ void _start(void) {
         write_str("STAT:OK\n");
     } else {
         write_str("STAT:BAD\n");
+    }
+
+    int dir_fd = (int)sys_open("/", 0, 0);
+    if (dir_fd < 0) {
+        write_str("DENTS:BAD\n");
+    } else {
+        char dents[512];
+        int found = 0;
+        int ok = 1;
+        for (int i = 0; i < 8; i++) {
+            isize read = sys_getdents64(dir_fd, dents, sizeof(dents));
+            if (read == 0) {
+                break;
+            }
+            if (read < 0) {
+                ok = 0;
+                break;
+            }
+            if (scan_dirents(dents, (usize)read, stat_path)) {
+                found = 1;
+            }
+        }
+        sys_close(dir_fd);
+        if (ok && found) {
+            write_str("DENTS:OK\n");
+        } else {
+            write_str("DENTS:BAD\n");
+        }
     }
 
     struct {

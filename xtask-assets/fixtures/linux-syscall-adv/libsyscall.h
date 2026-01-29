@@ -24,6 +24,7 @@ enum {
     SYS_exit = 60,
     SYS_wait4 = 61,
     SYS_arch_prctl = 158,
+    SYS_getdents64 = 217,
 };
 
 enum {
@@ -65,6 +66,8 @@ isize sys_call6(isize num, isize arg1, isize arg2, isize arg3, isize arg4, isize
 
 isize sys_write(int fd, const void *buf, usize len);
 isize sys_writev(int fd, const struct iovec *iov, int iovcnt);
+isize sys_open(const char *path, int flags, int mode);
+isize sys_close(int fd);
 isize sys_stat(const char *path, struct linux_stat *statbuf);
 isize sys_ioctl(int fd, isize request, void *argp);
 isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset);
@@ -74,6 +77,7 @@ isize sys_arch_prctl(isize code, isize addr);
 isize sys_fork(void);
 isize sys_execve(const char *path, const char *const *argv, const char *const *envp);
 isize sys_wait4(isize pid, int *status, int options, void *rusage);
+isize sys_getdents64(int fd, void *dirp, usize count);
 __attribute__((noreturn)) void sys_exit(int code);
 
 #endif

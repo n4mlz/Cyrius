@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
-use crate::fs::NodeKind;
+use crate::fs::{DirEntry, NodeKind};
 use crate::interrupt::INTERRUPTS;
 use crate::mem::addr::{
     Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up,
@@ -79,6 +79,7 @@ pub enum LinuxSyscall {
     GetPgid = 121,
     GetSid = 124,
     ArchPrctl = 158,
+    GetDents64 = 217,
     SetTidAddress = 218,
     ClockGetTime = 228,
 }
@@ -124,6 +125,7 @@ impl LinuxSyscall {
             121 => Some(Self::GetPgid),
             124 => Some(Self::GetSid),
             158 => Some(Self::ArchPrctl),
+            217 => Some(Self::GetDents64),
             218 => Some(Self::SetTidAddress),
             228 => Some(Self::ClockGetTime),
             _ => None,
@@ -198,6 +200,7 @@ pub fn dispatch(
         }
         Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
         Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
+        Some(LinuxSyscall::GetDents64) => DispatchResult::Completed(handle_getdents64(invocation)),
         Some(LinuxSyscall::ClockGetTime) => {
             DispatchResult::Completed(handle_clock_gettime(invocation))
         }
@@ -566,6 +569,66 @@ fn handle_getcwd(invocation: &SyscallInvocation) -> SysResult {
     Ok((bytes.len() + 1) as u64)
 }
 
+/// Encode directory entries for `getdents64` using the per-fd cursor in `FdTable`.
+///
+/// Implicit dependencies:
+/// - The backing `File::readdir` returns entries in a stable order for the lifetime of the open
+///   directory handle so the offset cursor remains valid across calls.
+/// - Directory entries fit in the caller-provided buffer; if the buffer is too small for the
+///   next entry, the syscall returns `EINVAL` instead of looping forever.
+fn handle_getdents64(invocation: &SyscallInvocation) -> SysResult {
+    const ALIGN: usize = 8;
+    const HEADER_LEN: usize = 8 + 8 + 2 + 1;
+
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let dir_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let count = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let count = usize::try_from(count).map_err(|_| SysError::InvalidArgument)?;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let entries = proc_fs::read_dir_fd(pid, fd as u32).map_err(|_| SysError::InvalidArgument)?;
+    let mut index = proc_fs::dir_offset(pid, fd as u32)
+        .map_err(|_| SysError::InvalidArgument)? as usize;
+    if index >= entries.len() {
+        return Ok(0);
+    }
+
+    let base = VirtAddr::new(dir_ptr as usize);
+    let mut written = 0usize;
+    while index < entries.len() {
+        let entry = &entries[index];
+        let reclen = dirent64_reclen(entry.name.as_bytes().len(), HEADER_LEN, ALIGN)?;
+        if written + reclen > count {
+            break;
+        }
+        write_dirent64(
+            base,
+            written,
+            entry,
+            (index + 1) as u64,
+            reclen,
+            HEADER_LEN,
+        )?;
+        written += reclen;
+        index += 1;
+    }
+
+    if written == 0 && index < entries.len() {
+        let entry = &entries[index];
+        let min = dirent64_reclen(entry.name.as_bytes().len(), HEADER_LEN, ALIGN)?;
+        if min > count {
+            return Err(SysError::InvalidArgument);
+        }
+    }
+
+    proc_fs::set_dir_offset(pid, fd as u32, index as u64)
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(written as u64)
+}
+
 fn handle_chdir(invocation: &SyscallInvocation) -> SysResult {
     let pid = current_pid()?;
     let ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
@@ -578,6 +641,65 @@ fn handle_chdir(invocation: &SyscallInvocation) -> SysResult {
     })?;
     proc_fs::change_dir(pid, &path).map_err(|_| SysError::InvalidArgument)?;
     Ok(0)
+}
+
+fn dirent64_reclen(name_len: usize, header_len: usize, align: usize) -> Result<usize, SysError> {
+    let base = header_len
+        .checked_add(name_len)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SysError::InvalidArgument)?;
+    let reclen = align_up(base, align);
+    if reclen > u16::MAX as usize {
+        return Err(SysError::InvalidArgument);
+    }
+    Ok(reclen)
+}
+
+fn write_dirent64(
+    base: VirtAddr,
+    offset: usize,
+    entry: &DirEntry,
+    next_offset: u64,
+    reclen: usize,
+    header_len: usize,
+) -> Result<(), SysError> {
+    let dst = base.checked_add(offset).ok_or(SysError::BadAddress)?;
+    let mut header = [0u8; 8 + 8 + 2 + 1];
+    header[0..8].copy_from_slice(&0u64.to_ne_bytes());
+    header[8..16].copy_from_slice(&next_offset.to_ne_bytes());
+    header[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+    header[18] = dirent_type(entry.stat.kind);
+    copy_to_user(dst, &header).map_err(|_| SysError::BadAddress)?;
+
+    let name = entry.name.as_bytes();
+    let name_dst = dst
+        .checked_add(header_len)
+        .ok_or(SysError::BadAddress)?;
+    copy_to_user(name_dst, name).map_err(|_| SysError::BadAddress)?;
+    let nul_dst = name_dst
+        .checked_add(name.len())
+        .ok_or(SysError::BadAddress)?;
+    copy_to_user(nul_dst, &[0]).map_err(|_| SysError::BadAddress)?;
+
+    let pad = reclen.saturating_sub(header_len + name.len() + 1);
+    if pad > 0 {
+        let pad_dst = nul_dst.checked_add(1).ok_or(SysError::BadAddress)?;
+        let zeros = [0u8; 8];
+        copy_to_user(pad_dst, &zeros[..pad]).map_err(|_| SysError::BadAddress)?;
+    }
+    Ok(())
+}
+
+fn dirent_type(kind: NodeKind) -> u8 {
+    match kind {
+        NodeKind::Regular => 8,
+        NodeKind::Directory => 4,
+        NodeKind::Symlink => 10,
+        NodeKind::CharDevice => 2,
+        NodeKind::BlockDevice => 6,
+        NodeKind::Pipe => 1,
+        NodeKind::Socket => 12,
+    }
 }
 
 fn handle_uname(invocation: &SyscallInvocation) -> SysResult {

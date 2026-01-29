@@ -66,6 +66,22 @@ pub fn read_fd(pid: ProcessId, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError
     process.fd_table().read(fd, buf)
 }
 
+pub fn read_dir_fd(pid: ProcessId, fd: Fd) -> Result<Vec<DirEntry>, VfsError> {
+    let process = process_handle(pid)?;
+    let entry = process.fd_table().entry(fd)?;
+    entry.file().readdir()
+}
+
+pub fn dir_offset(pid: ProcessId, fd: Fd) -> Result<u64, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().dir_offset(fd)
+}
+
+pub fn set_dir_offset(pid: ProcessId, fd: Fd, offset: u64) -> Result<(), VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().set_dir_offset(fd, offset)
+}
+
 pub fn write_fd(pid: ProcessId, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
     let process = process_handle(pid)?;
     process.fd_table().write(fd, data)

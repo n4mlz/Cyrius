@@ -11,6 +11,7 @@ pub type Fd = u32;
 pub struct FdEntry {
     file: Arc<dyn File>,
     close_on_exec: bool,
+    dir_offset: u64,
 }
 
 impl FdEntry {
@@ -18,6 +19,7 @@ impl FdEntry {
         Self {
             file,
             close_on_exec: false,
+            dir_offset: 0,
         }
     }
 
@@ -31,6 +33,14 @@ impl FdEntry {
 
     pub fn set_close_on_exec(&mut self, value: bool) {
         self.close_on_exec = value;
+    }
+
+    pub fn dir_offset(&self) -> u64 {
+        self.dir_offset
+    }
+
+    pub fn set_dir_offset(&mut self, value: u64) {
+        self.dir_offset = value;
     }
 }
 
@@ -110,6 +120,23 @@ impl FdTable {
     pub fn entry(&self, fd: Fd) -> Result<FdEntry, VfsError> {
         let guard = self.inner.lock();
         guard.get(fd).cloned()
+    }
+
+    pub fn dir_offset(&self, fd: Fd) -> Result<u64, VfsError> {
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        Ok(entry.dir_offset())
+    }
+
+    pub fn set_dir_offset(&self, fd: Fd, offset: u64) -> Result<(), VfsError> {
+        let mut guard = self.inner.lock();
+        let entry = guard
+            .slots
+            .get_mut(fd as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or(VfsError::NotFound)?;
+        entry.set_dir_offset(offset);
+        Ok(())
     }
 
     pub fn clone_from(&self, other: &FdTable) {
