@@ -21,9 +21,6 @@ const DT_RELRSZ: i64 = 35;
 const DT_RELR: i64 = 36;
 const DT_RELRENT: i64 = 37;
 
-const R_X86_64_64: u32 = 1;
-const R_X86_64_GLOB_DAT: u32 = 6;
-const R_X86_64_JUMP_SLOT: u32 = 7;
 const R_X86_64_RELATIVE: u32 = 8;
 
 
@@ -422,7 +419,7 @@ fn resolve_dynamic_ptr<T: PageTableOps>(
     if table.translate(abs_addr).is_ok() {
         return Ok(abs_addr);
     }
-    Ok(base_addr)
+    Err(LinuxLoadError::InvalidElf("dynamic pointer out of range"))
 }
 
 fn resolve_relative_value(
@@ -456,13 +453,12 @@ fn resolve_symbol_reloc(
     addend: i64,
     segments: &[MappedSegment],
 ) -> Result<u64, LinuxLoadError> {
+    // Symbol resolution is not implemented yet; only RELATIVE/RELR are supported.
     if sym != 0 {
         return Err(LinuxLoadError::UnsupportedRelocation(reloc_type));
     }
     match reloc_type {
-        R_X86_64_RELATIVE | R_X86_64_64 | R_X86_64_GLOB_DAT | R_X86_64_JUMP_SLOT => {
-            resolve_relative_value(base, addend, segments)
-        }
+        R_X86_64_RELATIVE => resolve_relative_value(base, addend, segments),
         _ => Err(LinuxLoadError::UnsupportedRelocation(reloc_type)),
     }
 }
@@ -481,18 +477,15 @@ pub fn apply_gnu_relro<T: PageTableOps>(
     let relro_end = relro_start
         .checked_add(relro.mem_size)
         .ok_or(LinuxLoadError::SizeOverflow)?;
-    let page_size = PageSize::SIZE_4K.bytes();
+    let page_size = segments
+        .first()
+        .map(|seg| seg.page_size)
+        .unwrap_or(PageSize::SIZE_4K.bytes());
     let start = align_down(relro_start.as_raw(), page_size);
     let end = align_up(relro_end.as_raw(), page_size);
 
+    // Apply RELRO at page granularity: any overlapping page becomes read-only.
     for addr in (start..end).step_by(page_size) {
-        let page_start = addr;
-        let page_end = addr
-            .checked_add(page_size)
-            .ok_or(LinuxLoadError::SizeOverflow)?;
-        if relro_start.as_raw() > page_start || relro_end.as_raw() < page_end {
-            continue;
-        }
         let page = Page::new(VirtAddr::new(addr), PageSize(page_size));
         let perms = segment_perms_for(VirtAddr::new(addr), segments)
             .ok_or(LinuxLoadError::RelocationTargetOutOfRange)?;

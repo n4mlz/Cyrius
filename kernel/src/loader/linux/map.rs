@@ -76,6 +76,8 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     );
 
     let page_sz = PageSize(page_size);
+    // NOTE: This loader assumes a fresh address space and does not validate
+    // that the ELF virtual ranges avoid existing user mappings.
     clear_segment_range(table, allocator, start, end, page_sz);
     for addr in (start..end).step_by(page_size) {
         let virt = VirtAddr::new(addr);
@@ -94,7 +96,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     let file_slice = image
         .get(seg.offset..file_range)
         .ok_or(LinuxLoadError::InvalidElf("segment out of file bounds"))?;
-    copy_into_mapped(table, seg_vaddr, file_slice)?;
+    copy_into_mapped(table, seg_vaddr, file_slice, page_size)?;
 
     // Zero BSS.
     if seg.mem_size > seg.file_size {
@@ -103,7 +105,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
             .checked_add(seg.file_size)
             .ok_or(LinuxLoadError::SizeOverflow)?;
         let bss_len = seg.mem_size - seg.file_size;
-        zero_mapped(table, VirtAddr::new(bss_start), bss_len)?;
+        zero_mapped(table, VirtAddr::new(bss_start), bss_len, page_size)?;
     }
 
     if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
@@ -122,6 +124,7 @@ fn copy_into_mapped<T: PageTableOps>(
     table: &T,
     dst: VirtAddr,
     src: &[u8],
+    page_size: usize,
 ) -> Result<(), LinuxLoadError> {
     let mapper = manager::phys_mapper();
     let mut offset = 0usize;
@@ -132,8 +135,8 @@ fn copy_into_mapped<T: PageTableOps>(
             .ok_or(LinuxLoadError::SizeOverflow)?;
         let virt = VirtAddr::new(addr);
         let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
-        let page_offset = addr % PageSize::SIZE_4K.bytes();
-        let len = (PageSize::SIZE_4K.bytes() - page_offset).min(src.len() - offset);
+        let page_offset = addr % page_size;
+        let len = (page_size - page_offset).min(src.len() - offset);
         unsafe {
             let ptr = mapper.phys_to_virt(phys);
             core::ptr::copy_nonoverlapping(src[offset..].as_ptr(), ptr.into_mut_ptr(), len);
@@ -147,6 +150,7 @@ fn zero_mapped<T: PageTableOps>(
     table: &T,
     dst: VirtAddr,
     len: usize,
+    page_size: usize,
 ) -> Result<(), LinuxLoadError> {
     let mapper = manager::phys_mapper();
     let mut offset = 0usize;
@@ -157,8 +161,8 @@ fn zero_mapped<T: PageTableOps>(
             .ok_or(LinuxLoadError::SizeOverflow)?;
         let virt = VirtAddr::new(addr);
         let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
-        let page_offset = addr % PageSize::SIZE_4K.bytes();
-        let chunk = (PageSize::SIZE_4K.bytes() - page_offset).min(len - offset);
+        let page_offset = addr % page_size;
+        let chunk = (page_size - page_offset).min(len - offset);
         unsafe {
             let ptr = mapper.phys_to_virt(phys);
             core::ptr::write_bytes(ptr.into_mut_ptr(), 0, chunk);

@@ -22,6 +22,7 @@ pub enum StackBuildError {
     UnsupportedPageSize,
 }
 
+/// Build a minimal stack that is not Linux ABI-complete; intended for simple tests only.
 pub fn initialise_minimal_stack<T: PageTableOps>(
     table: &T,
     stack_top: VirtAddr,

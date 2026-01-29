@@ -112,6 +112,8 @@ where
         .address_space(pid)
         .ok_or(LinuxLoadError::Process(ProcessError::NotFound))?;
 
+    // NOTE: The loader does not validate user address ranges; it assumes a fresh
+    // address space (or equivalent) before mapping the ELF image.
     let mapped = map::map_segments::<P>(&space, &elf, &elf_bytes, load_bias)?;
     if let Some(dynamic) = elf.dynamic.as_ref() {
         space.with_page_table(|table, _| {
@@ -223,6 +225,8 @@ fn compute_phdr_address(
     Ok(phdr)
 }
 
+/// Build a minimal auxv set sufficient for static/PIE test binaries.
+/// Dynamic runtimes may require additional entries (AT_BASE/AT_RANDOM/etc.).
 pub fn build_auxv<S>(program: &LinuxProgram<S>, page_size: usize) -> Vec<AuxvEntry> {
     alloc::vec![
         AuxvEntry {
