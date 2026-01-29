@@ -1,6 +1,9 @@
 use crate::mem::addr::{VirtAddr, VirtIntoPtr};
 use crate::mem::manager;
 use crate::mem::paging::{PageTableOps, PhysMapper, TranslationError};
+use crate::util::spinlock::SpinLock;
+use core::fmt;
+use core::mem::MaybeUninit;
 
 /// Translate Linux `syscall` instructions to `int 0x80` so we can reuse the existing software
 /// interrupt handler until `SYSCALL/SYSRET` is wired up.
@@ -25,12 +28,326 @@ pub fn rewrite_syscalls_in_table<T: PageTableOps>(
         let opcode = unsafe { core::ptr::read(ptr) };
         let next = unsafe { core::ptr::read(ptr.add(1)) };
         if opcode == 0x0F && next == 0x05 {
+            let context_start = addr.saturating_sub(CONTEXT_BYTES);
+            let mut before = [0u8; WINDOW_BYTES];
+            let mut after = [0u8; WINDOW_BYTES];
+            let before_ok =
+                read_bytes(table, VirtAddr::new(context_start), &mut before).is_ok();
+
+            let prev_byte = if addr > 0 {
+                read_byte(table, VirtAddr::new(addr - 1)).ok()
+            } else {
+                None
+            };
+            let next_byte = read_byte(table, VirtAddr::new(addr + 2)).ok();
+            let boundary_hint = boundary_hint(prev_byte);
+
             unsafe {
                 core::ptr::write(ptr, 0xCD);
                 core::ptr::write(ptr.add(1), 0x80);
             }
+
+            let after_ok = read_bytes(table, VirtAddr::new(context_start), &mut after).is_ok();
+            record_rewrite(RewriteEntry {
+                vaddr: addr,
+                before,
+                after,
+                opcode_ok: opcode == 0x0F && next == 0x05,
+                before_ok,
+                after_ok,
+                prev: prev_byte.unwrap_or(0),
+                next: next_byte.unwrap_or(0),
+                hint: boundary_hint,
+            });
         }
         offset = offset.saturating_add(1);
     }
     Ok(())
+}
+
+pub fn begin_rewrite_report() {
+    let mut tracker = REWRITE_TRACKER.lock();
+    tracker.reset();
+}
+
+pub fn verify_rewrite_coverage<T: PageTableOps>(
+    base: VirtAddr,
+    size: usize,
+    table: &T,
+) -> Result<(), TranslationError> {
+    const PROBE_START: usize = 0x4d7300;
+    const PROBE_END: usize = 0x4d7400;
+
+    let tracker = REWRITE_TRACKER.lock();
+    if tracker.overflowed() {
+        panic!("[loader] rewrite log overflow; cannot verify cd 80 coverage");
+    }
+    let mut offset = 0usize;
+    while offset + 1 < size {
+        let addr = match base.as_raw().checked_add(offset) {
+            Some(addr) => addr,
+            None => return Err(TranslationError::NotMapped),
+        };
+        if addr < PROBE_START || addr + 1 >= PROBE_END {
+            offset = offset.saturating_add(1);
+            continue;
+        }
+        let opcode = read_byte(table, VirtAddr::new(addr))?;
+        let next = read_byte(table, VirtAddr::new(addr + 1))?;
+        if opcode == 0xCD && next == 0x80 && !tracker.contains(addr) {
+            panic!(
+                "[loader] unexpected cd 80 at vaddr={:#x} (not in rewrite log)",
+                addr
+            );
+        }
+        offset = offset.saturating_add(1);
+    }
+    Ok(())
+}
+
+pub fn emit_rewrite_summary() {
+    const PROBE_START: usize = 0x4d7300;
+    const PROBE_END: usize = 0x4d7400;
+    let tracker = REWRITE_TRACKER.lock();
+    crate::println!(
+        "[loader] rewrite summary total={} stored={} min={:#x} max={:#x}",
+        tracker.total,
+        tracker.stored,
+        tracker.min_addr(),
+        tracker.max_addr()
+    );
+
+    crate::print!("[loader] rewrite vaddrs:");
+    for idx in 0..tracker.stored {
+        let entry = tracker.entry(idx);
+        crate::print!(" {:#x}", entry.vaddr);
+    }
+    if tracker.overflowed() {
+        crate::print!(" ... (truncated)");
+    }
+    crate::print!("\n");
+
+    for idx in 0..tracker.stored {
+        let entry = tracker.entry(idx);
+        if entry.vaddr >= PROBE_START && entry.vaddr < PROBE_END {
+            crate::println!(
+                "[loader] rewrite probe vaddr={:#x} opcode_ok={} before_ok={} after_ok={} prev={:#04x} next={:#04x} hint={}",
+                entry.vaddr,
+                entry.opcode_ok,
+                entry.before_ok,
+                entry.after_ok,
+                entry.prev,
+                entry.next,
+                entry.hint
+            );
+            crate::println!(
+                "[loader] rewrite probe before=[{}] after=[{}]",
+                HexBytes(&entry.before),
+                HexBytes(&entry.after)
+            );
+        }
+    }
+}
+
+pub fn dump_range<T: PageTableOps>(
+    start: VirtAddr,
+    len: usize,
+    table: &T,
+    label: &str,
+) -> Result<(), TranslationError> {
+    const LINE_BYTES: usize = 16;
+    if len == 0 {
+        return Ok(());
+    }
+    crate::println!(
+        "[loader] dump {label} start={:#x} len={:#x}",
+        start.as_raw(),
+        len
+    );
+    let mut offset = 0usize;
+    while offset < len {
+        let line_len = core::cmp::min(LINE_BYTES, len - offset);
+        let mut buf = [0u8; LINE_BYTES];
+        read_bytes(
+            table,
+            VirtAddr::new(start.as_raw().saturating_add(offset)),
+            &mut buf[..line_len],
+        )?;
+        crate::println!(
+            "[loader] dump {:#x}: {}",
+            start.as_raw().saturating_add(offset),
+            HexBytes(&buf[..line_len])
+        );
+        offset = offset.saturating_add(line_len);
+    }
+    Ok(())
+}
+
+const CONTEXT_BYTES: usize = 8;
+const WINDOW_BYTES: usize = 16;
+const REWRITE_LOG_CAPACITY: usize = 4096;
+
+static REWRITE_TRACKER: SpinLock<RewriteTracker> = SpinLock::new(RewriteTracker::new());
+
+fn read_byte<T: PageTableOps>(table: &T, addr: VirtAddr) -> Result<u8, TranslationError> {
+    let mapper = manager::phys_mapper();
+    let phys = table.translate(addr)?;
+    let ptr = unsafe { mapper.phys_to_virt(phys).into_ptr() };
+    Ok(unsafe { core::ptr::read(ptr) })
+}
+
+fn read_bytes<T: PageTableOps>(
+    table: &T,
+    start: VirtAddr,
+    out: &mut [u8],
+) -> Result<(), TranslationError> {
+    for (idx, slot) in out.iter_mut().enumerate() {
+        let addr = start
+            .as_raw()
+            .checked_add(idx)
+            .ok_or(TranslationError::NotMapped)?;
+        *slot = read_byte(table, VirtAddr::new(addr))?;
+    }
+    Ok(())
+}
+
+fn boundary_hint(prev: Option<u8>) -> BoundaryHint {
+    match prev {
+        Some(0xC3) | Some(0xC2) | Some(0xCB) | Some(0xCA) | Some(0xCF) => BoundaryHint::Ret,
+        Some(0x90) => BoundaryHint::Nop,
+        Some(0xCC) => BoundaryHint::Int3,
+        Some(0x0F) => BoundaryHint::Overlap,
+        Some(0xE8) | Some(0xE9) | Some(0xEB) => BoundaryHint::Control,
+        _ => BoundaryHint::Unknown,
+    }
+}
+
+#[derive(Copy, Clone)]
+enum BoundaryHint {
+    Ret,
+    Nop,
+    Int3,
+    Overlap,
+    Control,
+    Unknown,
+}
+
+impl fmt::Display for BoundaryHint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            BoundaryHint::Ret => "prev=ret",
+            BoundaryHint::Nop => "prev=nop",
+            BoundaryHint::Int3 => "prev=int3",
+            BoundaryHint::Overlap => "prev=0f (overlap?)",
+            BoundaryHint::Control => "prev=ctrl",
+            BoundaryHint::Unknown => "prev=unknown",
+        };
+        f.write_str(text)
+    }
+}
+
+struct HexBytes<'a>(&'a [u8]);
+
+impl fmt::Display for HexBytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (idx, byte) in self.0.iter().enumerate() {
+            if idx > 0 {
+                f.write_str(" ")?;
+            }
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone)]
+struct RewriteEntry {
+    vaddr: usize,
+    before: [u8; WINDOW_BYTES],
+    after: [u8; WINDOW_BYTES],
+    opcode_ok: bool,
+    before_ok: bool,
+    after_ok: bool,
+    prev: u8,
+    next: u8,
+    hint: BoundaryHint,
+}
+
+struct RewriteTracker {
+    entries: [MaybeUninit<RewriteEntry>; REWRITE_LOG_CAPACITY],
+    stored: usize,
+    total: usize,
+    min: usize,
+    max: usize,
+}
+
+impl RewriteTracker {
+    const fn new() -> Self {
+        Self {
+            entries: [MaybeUninit::uninit(); REWRITE_LOG_CAPACITY],
+            stored: 0,
+            total: 0,
+            min: usize::MAX,
+            max: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.stored = 0;
+        self.total = 0;
+        self.min = usize::MAX;
+        self.max = 0;
+    }
+
+    fn record(&mut self, entry: RewriteEntry) {
+        self.total = self.total.saturating_add(1);
+        if entry.vaddr < self.min {
+            self.min = entry.vaddr;
+        }
+        if entry.vaddr > self.max {
+            self.max = entry.vaddr;
+        }
+        if self.stored < REWRITE_LOG_CAPACITY {
+            self.entries[self.stored].write(entry);
+            self.stored += 1;
+        }
+    }
+
+    fn entry(&self, idx: usize) -> &RewriteEntry {
+        unsafe { self.entries[idx].assume_init_ref() }
+    }
+
+    fn contains(&self, vaddr: usize) -> bool {
+        for idx in 0..self.stored {
+            if self.entry(idx).vaddr == vaddr {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn overflowed(&self) -> bool {
+        self.total > self.stored
+    }
+
+    fn min_addr(&self) -> usize {
+        if self.total == 0 {
+            0
+        } else {
+            self.min
+        }
+    }
+
+    fn max_addr(&self) -> usize {
+        if self.total == 0 {
+            0
+        } else {
+            self.max
+        }
+    }
+}
+
+fn record_rewrite(entry: RewriteEntry) {
+    let mut tracker = REWRITE_TRACKER.lock();
+    tracker.record(entry);
 }

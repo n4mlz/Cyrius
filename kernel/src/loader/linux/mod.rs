@@ -115,6 +115,7 @@ where
         elf.ph_count,
         load_bias.as_raw()
     );
+    patch::begin_rewrite_report();
 
     let space: P::AddressSpace = PROCESS_TABLE
         .address_space(pid)
@@ -170,6 +171,7 @@ where
         heap_base.as_raw(),
         phdr.as_raw()
     );
+    patch::emit_rewrite_summary();
 
     Ok(LinuxProgram {
         entry: add_base(load_bias, elf.entry)?,
