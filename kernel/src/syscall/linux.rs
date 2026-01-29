@@ -24,6 +24,10 @@ use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 const DEBUG_LS_SYSCALL: bool = true;
 const DEBUG_LINUX_ENOSYS: bool = true;
 
+// NOTE: Error mapping is intentionally coarse right now (many failures collapse
+// to InvalidArgument/BadAddress). This keeps the syscall surface minimal but is
+// not Linux-accurate.
+
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxErrno {
@@ -128,6 +132,9 @@ impl LinuxSyscall {
 }
 
 /// Minimal Linux syscall table supporting write/getpid/exit placeholders.
+///
+/// NOTE: `openat` and related syscalls are not implemented yet; userland that
+/// relies on them will see ENOSYS.
 pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
@@ -174,7 +181,8 @@ pub fn dispatch(
         Some(LinuxSyscall::Wait4) => DispatchResult::Completed(handle_wait4(invocation)),
         Some(LinuxSyscall::ArchPrctl) => DispatchResult::Completed(handle_arch_prctl(invocation)),
         Some(LinuxSyscall::Ioctl) => DispatchResult::Completed(handle_ioctl(invocation)),
-        // These syscalls are currently stubbed and always report success (0).
+        // These syscalls are stubbed and always report success (0). This is risky
+        // because userland may rely on signals/TID state that is not tracked yet.
         Some(LinuxSyscall::RtSigaction) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::RtSigprocmask) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetTidAddress) => DispatchResult::Completed(Ok(0)),
@@ -185,10 +193,14 @@ pub fn dispatch(
         Some(LinuxSyscall::SetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetGid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
-        Some(LinuxSyscall::GetTimeOfDay) => DispatchResult::Completed(handle_gettimeofday(invocation)),
+        Some(LinuxSyscall::GetTimeOfDay) => {
+            DispatchResult::Completed(handle_gettimeofday(invocation))
+        }
         Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
         Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
-        Some(LinuxSyscall::ClockGetTime) => DispatchResult::Completed(handle_clock_gettime(invocation)),
+        Some(LinuxSyscall::ClockGetTime) => {
+            DispatchResult::Completed(handle_clock_gettime(invocation))
+        }
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
         None => {
@@ -544,13 +556,14 @@ fn handle_getcwd(invocation: &SyscallInvocation) -> SysResult {
     let text = cwd.to_string();
     let bytes = text.as_bytes();
     if bytes.len().saturating_add(1) > size {
+        // NOTE: Linux returns ERANGE here; we currently map to InvalidArgument.
         return Err(SysError::InvalidArgument);
     }
     let user_ptr = VirtAddr::new(buf_ptr as usize);
     copy_to_user(user_ptr, bytes).map_err(|_| SysError::InvalidArgument)?;
     let nul = VirtAddr::new(user_ptr.as_raw() + bytes.len());
     copy_to_user(nul, &[0]).map_err(|_| SysError::InvalidArgument)?;
-    Ok(buf_ptr)
+    Ok((bytes.len() + 1) as u64)
 }
 
 fn handle_chdir(invocation: &SyscallInvocation) -> SysResult {
@@ -615,15 +628,18 @@ fn handle_poll(invocation: &SyscallInvocation) -> SysResult {
             return Ok(ready as u64);
         }
         // NOTE: Timeout handling is intentionally simplified; any non-zero timeout blocks
-        // until an event arrives. We spin here instead of halting because syscalls may run
-        // with interrupts disabled, making `halt` non-resumable.
+        // until an event arrives. Poll semantics are coarse (TTY readiness only, others are
+        // treated as immediately readable).
+        //
+        // Syscalls may run with interrupts disabled; enable them so the scheduler can
+        // make progress while we wait.
+        INTERRUPTS.enable();
         core::hint::spin_loop();
     }
 }
 
 fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
-    // TODO: This is a grow-only brk; shrinking does not unmap pages and no heap upper bound
-    // is enforced yet. The behavior is enough for busybox's basic allocator path.
+    // TODO: This is a minimal brk: no heap upper bound is enforced and errors are coarse.
     let requested = invocation.arg(0).unwrap_or(0);
     let pid = current_pid()?;
     let process = PROCESS_TABLE
@@ -672,12 +688,10 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                         return Err(SysError::InvalidArgument);
                     }
                 }
+                let phys = table.translate(page.start).map_err(|_| SysError::InvalidArgument)?;
+                let mapper = manager::phys_mapper();
                 unsafe {
-                    core::ptr::write_bytes(
-                        VirtAddr::new(addr).into_mut_ptr(),
-                        0,
-                        PageSize::SIZE_4K.bytes(),
-                    );
+                    core::ptr::write_bytes(mapper.phys_to_virt(phys).into_mut_ptr(), 0, page_size);
                 }
             }
             Ok::<_, SysError>(())
@@ -772,7 +786,10 @@ fn handle_fork(
     let child_top = <Arch as ArchThread>::user_stack_top(&child_stack);
 
     let parent_rsp = frame.rsp as usize;
-    let offset = parent_rsp.saturating_sub(parent_stack.base.as_raw());
+    if parent_rsp < parent_stack.base.as_raw() {
+        return DispatchResult::Completed(Err(SysError::InvalidArgument));
+    }
+    let offset = parent_rsp - parent_stack.base.as_raw();
     let child_rsp = child_base.checked_add(offset).unwrap_or(child_top).as_raw() as u64;
 
     let mut ctx = <Arch as ArchThread>::save_context(frame);
@@ -818,6 +835,7 @@ fn handle_execve(
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
 
+    // NOTE: Limit argv/envp length to avoid unbounded user input scans.
     let argv = match process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         read_cstring_array_with_user(&user, argv_ptr, 128)
@@ -959,6 +977,7 @@ fn handle_arch_prctl(invocation: &SyscallInvocation) -> SysResult {
         return Err(SysError::InvalidArgument);
     }
 
+    // NOTE: This assumes FS base is part of the thread context and restored on context switches.
     crate::arch::x86_64::set_fs_base(value);
     Ok(0)
 }
@@ -1071,6 +1090,8 @@ fn handle_mmap(invocation: &SyscallInvocation) -> SysResult {
             return Err(SysError::InvalidArgument);
         }
     } else if target == 0 {
+        // NOTE: This reuses the brk state as a simple bump allocator; it can
+        // collide with future brk growth and does not model Linux VMAs.
         let brk = process.brk_state();
         target = align_up(brk.current.as_raw(), page_size);
         let next = VirtAddr::new(target + len);
@@ -1361,6 +1382,8 @@ fn poll_once(
     pollin: i16,
     pollnval: i16,
 ) -> usize {
+    // NOTE: Non-TTY FDs are treated as immediately readable; this is a
+    // compatibility shortcut for regular files, not pipes/sockets.
     let mut wants_input = false;
     let mut tty_flags = Vec::with_capacity(fds.len());
     for fd in fds.iter_mut() {
@@ -1524,6 +1547,7 @@ impl LinuxUtsName {
 struct KernelControlAccess;
 
 impl ControlAccess for KernelControlAccess {
+    // NOTE: Kernel-only access for ioctl helpers; never expose this to user pointers.
     fn read(&self, addr: u64, dst: &mut [u8]) -> Result<(), ControlError> {
         if dst.is_empty() {
             return Ok(());
@@ -1738,8 +1762,8 @@ mod tests {
             [buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0],
         );
         match dispatch(&invocation, None) {
-            DispatchResult::Completed(Ok(ptr)) => {
-                assert_eq!(ptr, buf.as_ptr() as u64);
+            DispatchResult::Completed(Ok(len)) => {
+                assert_eq!(len, 2);
                 assert_eq!(buf[0], b'/');
                 assert_eq!(buf[1], 0);
             }
