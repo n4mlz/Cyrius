@@ -141,6 +141,44 @@ pub fn read_dynamic_info<T: PageTableOps>(
     if info.relr_size > 0 && info.relr_addr.is_none() {
         return Err(LinuxLoadError::InvalidElf("DT_RELR missing"));
     }
+    if let (Some(rela_addr), true) = (info.rela_addr, info.rela_size > 0) {
+        crate::println!(
+            "[loader] rela addr={:#x} size={:#x} ent={:#x}",
+            rela_addr.as_raw(),
+            info.rela_size,
+            info.rela_ent
+        );
+        let entry_size = core::mem::size_of::<Elf64Rela>();
+        if entry_size > 0 && info.rela_size.is_multiple_of(entry_size) {
+            let count = (info.rela_size / entry_size).min(3);
+            for idx in 0..count {
+                let entry_addr = match rela_addr.checked_add(idx * entry_size) {
+                    Some(addr) => addr,
+                    None => break,
+                };
+                let r_offset = match user.read_u64(entry_addr) {
+                    Ok(val) => val,
+                    Err(_) => break,
+                };
+                let r_info = match user.read_u64(entry_addr.checked_add(8).unwrap_or(entry_addr)) {
+                    Ok(val) => val,
+                    Err(_) => break,
+                };
+                let r_addend =
+                    match user.read_u64(entry_addr.checked_add(16).unwrap_or(entry_addr)) {
+                        Ok(val) => val as i64,
+                        Err(_) => break,
+                    };
+                crate::println!(
+                    "[loader] rela[{}] r_offset={:#x} r_info={:#x} r_addend={:#x}",
+                    idx,
+                    r_offset,
+                    r_info,
+                    r_addend
+                );
+            }
+        }
+    }
     Ok(info)
 }
 
@@ -265,6 +303,17 @@ fn apply_rela_table<T: PageTableOps>(
         let raw_offset = usize::try_from(r_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
         let target = resolve_reloc_target(base, raw_offset, segments)?;
         let value_raw = resolve_symbol_reloc(base, reloc_type, sym, r_addend, segments)?;
+        let value_addr = VirtAddr::new(value_raw as usize);
+        if !is_mapped(value_addr, segments) {
+            crate::println!(
+                "[loader] rela[{}] unmapped value r_offset={:#x} target={:#x} addend={:#x} value={:#x}",
+                idx,
+                r_offset,
+                target.as_raw(),
+                r_addend,
+                value_raw
+            );
+        }
         user.write_u64(target, value_raw)?;
     }
 

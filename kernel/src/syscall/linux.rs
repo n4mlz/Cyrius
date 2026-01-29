@@ -993,7 +993,10 @@ fn handle_arch_prctl(invocation: &SyscallInvocation) -> SysResult {
     }
 
     // NOTE: This assumes FS base is part of the thread context and restored on context switches.
+    crate::println!("[arch_prctl] ARCH_SET_FS requested={:#x}", value);
     crate::arch::x86_64::set_fs_base(value);
+    let fs_base = x86_64::registers::model_specific::FsBase::read().as_u64();
+    crate::println!("[arch_prctl] FS base now={:#x}", fs_base);
     Ok(0)
 }
 
