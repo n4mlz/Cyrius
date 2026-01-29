@@ -63,10 +63,29 @@ pub fn dispatch_with_frame(
     invocation: &SyscallInvocation,
     frame: Option<&mut crate::trap::CurrentTrapFrame>,
 ) -> DispatchResult {
-    match abi {
+    crate::println!(
+        "[syscall] abi={:?} nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
+        abi,
+        invocation.number,
+        invocation.args[0],
+        invocation.args[1],
+        invocation.args[2],
+        invocation.args[3],
+        invocation.args[4],
+        invocation.args[5],
+    );
+    let result = match abi {
         Abi::Host => DispatchResult::Completed(host::dispatch(invocation)),
         Abi::Linux => linux::dispatch(invocation, frame),
+    };
+    if matches!(result, DispatchResult::Completed(Err(SysError::NotImplemented))) {
+        crate::println!(
+            "[syscall] unimplemented abi={:?} nr={}",
+            abi,
+            invocation.number
+        );
     }
+    result
 }
 
 /// Encode a syscall result into an ABI-specific return value.

@@ -103,10 +103,18 @@ pub fn load_elf_with_platform<P>(
 where
     P: ArchLinuxElfPlatform<AddressSpace = crate::arch::x86_64::AddressSpace>,
 {
+    crate::println!("[loader] load_elf pid={} path={}", pid, raw_path);
     let abs = resolve_path(pid, raw_path)?;
     let elf_bytes = proc_fs::read_to_end_at(pid, &abs)?;
     let elf = elf::ElfFile::parse::<P>(&elf_bytes)?;
     let load_bias = choose_load_bias::<P>(&elf)?;
+    crate::println!(
+        "[loader] elf type={:?} entry={:#x} phnum={} load_bias={:#x}",
+        elf.elf_type,
+        elf.entry.as_raw(),
+        elf.ph_count,
+        load_bias.as_raw()
+    );
 
     let space: P::AddressSpace = PROCESS_TABLE
         .address_space(pid)
@@ -114,10 +122,19 @@ where
 
     // NOTE: The loader does not validate user address ranges; it assumes a fresh
     // address space (or equivalent) before mapping the ELF image.
+    crate::println!("[loader] mapping segments count={}", elf.segments.len());
     let mapped = map::map_segments::<P>(&space, &elf, &elf_bytes, load_bias)?;
     if let Some(dynamic) = elf.dynamic.as_ref() {
+        crate::println!("[loader] dynamic segment present");
         space.with_page_table(|table, _| {
             let info = reloc::read_dynamic_info(table, load_bias, dynamic)?;
+            crate::println!(
+                "[loader] relocations rela={} rel={} relr={} jmprel={}",
+                info.rela_size,
+                info.rel_size,
+                info.relr_size,
+                info.jmprel_size
+            );
             reloc::apply_relocations(table, load_bias, &info, &mapped)?;
             Ok::<(), LinuxLoadError>(())
         })?;
@@ -126,6 +143,7 @@ where
         map::apply_segment_permissions(table, &mapped)?;
         if elf.interp.is_some() {
             if let Some(relro) = elf.relro.as_ref() {
+                crate::println!("[loader] applying GNU_RELRO");
                 reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
             }
         } else if elf.relro.is_some() {
@@ -136,11 +154,22 @@ where
 
     let user_stack = P::allocate_user_stack(&space, 32 * 1024)?;
     let stack_top = P::user_stack_top(&user_stack);
+    crate::println!(
+        "[loader] allocated user stack top={:#x}",
+        stack_top.as_raw()
+    );
     let stack_pointer = space
         .with_page_table(|table, _| stack::initialise_minimal_stack(table, stack_top))
         .map_err(LinuxLoadError::from)?;
     let heap_base = compute_heap_base::<P>(load_bias, &elf)?;
     let phdr = compute_phdr_address(load_bias, &elf, &mapped)?;
+    crate::println!(
+        "[loader] entry={:#x} stack={:#x} heap_base={:#x} phdr={:#x}",
+        add_base(load_bias, elf.entry)?.as_raw(),
+        stack_pointer.as_raw(),
+        heap_base.as_raw(),
+        phdr.as_raw()
+    );
 
     Ok(LinuxProgram {
         entry: add_base(load_bias, elf.entry)?,

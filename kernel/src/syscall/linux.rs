@@ -735,6 +735,7 @@ fn handle_fork(
         Ok(pid) => pid,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
+    crate::println!("[fork] parent_pid={}", pid);
 
     let parent_stack = match SCHEDULER.current_user_stack_info() {
         Some(info) => info,
@@ -761,6 +762,7 @@ fn handle_fork(
         Ok(pid) => pid,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
+    crate::println!("[fork] created child_pid={}", child_pid);
 
     if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
         child_proc.set_brk_state(parent_proc.brk_state());
@@ -802,6 +804,7 @@ fn handle_fork(
         return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
     }
 
+    crate::println!("[fork] spawned child thread for pid={}", child_pid);
     DispatchResult::Completed(Ok(child_pid))
 }
 
@@ -832,6 +835,7 @@ fn handle_execve(
         Ok(path) => path,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
+    crate::println!("[execve] pid={} path={}", pid, path);
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
 
@@ -850,6 +854,11 @@ fn handle_execve(
         Ok(list) => list,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
+    crate::println!(
+        "[execve] argv_count={} envp_count={}",
+        argv.len(),
+        envp.len()
+    );
 
     // Drop the previous user stack before clearing mappings so we do not unmap the
     // freshly allocated stack on replacement.
@@ -869,6 +878,11 @@ fn handle_execve(
         Ok(program) => program,
         Err(_err) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
+    crate::println!(
+        "[execve] entry={:#x} stack_top={:#x}",
+        program.entry.as_raw(),
+        <Arch as ArchThread>::user_stack_top(&program.user_stack).as_raw()
+    );
 
     let auxv = crate::loader::linux::build_auxv(&program, PageSize::SIZE_4K.bytes());
     let argv_refs: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
@@ -897,6 +911,7 @@ fn handle_execve(
     frame.rip = program.entry.as_raw() as u64;
     frame.rsp = stack_pointer.as_raw() as u64;
     frame.regs.rax = 0;
+    crate::println!("[execve] new rsp={:#x}", frame.rsp);
     DispatchResult::Completed(Ok(0))
 }
 
