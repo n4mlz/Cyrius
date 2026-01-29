@@ -210,6 +210,9 @@ mod tests {
             .open(crate::fs::OpenOptions::new(0))
             .expect("open stat.txt");
         let _ = handle.write(b"STATDATA").expect("write stat.txt");
+        let _ = root
+            .create_symlink("stat-link", "stat.txt")
+            .expect("create stat-link");
 
         let adv = root.create_file("adv").expect("create adv");
         let handle = adv.open(crate::fs::OpenOptions::new(0)).expect("open adv");
@@ -230,7 +233,7 @@ mod tests {
         let output = tty.drain_output();
         assert_eq!(
             output,
-            b"WRITEV\nSTAT:OK\nDENTS:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+            b"WRITEV\nSTAT:OK\nLSTAT:OK\nDENTS:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
         );
 
         if started {

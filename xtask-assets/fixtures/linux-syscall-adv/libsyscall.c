@@ -84,6 +84,10 @@ isize sys_stat(const char *path, struct linux_stat *statbuf) {
     return sys_call3(SYS_stat, (isize)path, (isize)statbuf, 0);
 }
 
+isize sys_lstat(const char *path, struct linux_stat *statbuf) {
+    return sys_call3(SYS_lstat, (isize)path, (isize)statbuf, 0);
+}
+
 isize sys_ioctl(int fd, isize request, void *argp) {
     return sys_call3(SYS_ioctl, fd, request, (isize)argp);
 }

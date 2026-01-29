@@ -19,9 +19,10 @@
   process using the container VFS. Host pointers are treated as kernel-mapped addresses until
   userland separation exists.
 - Linux dispatch implements a minimal set of process/syscall plumbing needed by static busybox:
-  `read`, `write`, `open`, `close`, `writev`, `stat`, `brk`, `poll` (TTY-only, blocking until input),
-  `lseek` (currently reports `ESPIPE`), `getcwd`, `getdents64`, `chdir`, `fork`, `execve`, `wait4`,
-  `arch_prctl`, `ioctl` (routed through `ControlOps`), `fcntl` (dup + FD_CLOEXEC), and basic
+  `read`, `write`, `open`, `close`, `writev`, `stat`, `lstat`, `brk`, `poll` (TTY-only, blocking
+  until input), `lseek` (currently reports `ESPIPE`), `getcwd`, `getdents64`, `chdir`, `fork`,
+  `execve`, `wait4`, `arch_prctl`, `ioctl` (routed through `ControlOps`), `fcntl` (dup + FD_CLOEXEC),
+  and basic
   process/session metadata (`getppid`, `getpgrp`, `getpgid`, `setpgid`, `getsid`, `setsid`), plus
   `uname`, `geteuid`, and stubbed signal
   calls. Unsupported numbers map to `ENOSYS`, while unsupported ioctls map to `ENOTTY`.

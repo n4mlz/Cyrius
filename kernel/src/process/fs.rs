@@ -162,6 +162,29 @@ pub fn stat_path(pid: ProcessId, raw_path: &str) -> Result<crate::fs::NodeStat, 
     with_process_vfs(&process, |vfs| vfs.stat_absolute(&abs))
 }
 
+pub fn stat_path_no_follow(
+    pid: ProcessId,
+    raw_path: &str,
+) -> Result<crate::fs::NodeStat, VfsError> {
+    let process = process_handle(pid)?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    if abs.components().is_empty() {
+        return with_process_vfs(&process, |vfs| vfs.stat_absolute(&abs));
+    }
+    let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+    let name = abs
+        .components()
+        .last()
+        .ok_or(VfsError::InvalidPath)?
+        .clone();
+    with_process_vfs(&process, |vfs| {
+        let dir = vfs.resolve_node(&parent)?;
+        let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+        let node = dir_view.lookup(&name)?;
+        node.stat()
+    })
+}
+
 pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
     let abs = Path::resolve(raw_path, &process.cwd())?;

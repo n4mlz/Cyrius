@@ -14,6 +14,7 @@ enum {
     SYS_open = 2,
     SYS_close = 3,
     SYS_stat = 4,
+    SYS_lstat = 6,
     SYS_mmap = 9,
     SYS_munmap = 11,
     SYS_brk = 12,
@@ -69,6 +70,7 @@ isize sys_writev(int fd, const struct iovec *iov, int iovcnt);
 isize sys_open(const char *path, int flags, int mode);
 isize sys_close(int fd);
 isize sys_stat(const char *path, struct linux_stat *statbuf);
+isize sys_lstat(const char *path, struct linux_stat *statbuf);
 isize sys_ioctl(int fd, isize request, void *argp);
 isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset);
 isize sys_munmap(void *addr, usize len);

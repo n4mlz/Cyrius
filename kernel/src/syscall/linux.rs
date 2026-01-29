@@ -47,6 +47,7 @@ pub enum LinuxSyscall {
     Open = 2,
     Close = 3,
     Stat = 4,
+    Lstat = 6,
     Poll = 7,
     Lseek = 8,
     Mmap = 9,
@@ -93,6 +94,7 @@ impl LinuxSyscall {
             2 => Some(Self::Open),
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
+            6 => Some(Self::Lstat),
             7 => Some(Self::Poll),
             8 => Some(Self::Lseek),
             9 => Some(Self::Mmap),
@@ -165,6 +167,7 @@ pub fn dispatch(
         Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
+        Some(LinuxSyscall::Lstat) => DispatchResult::Completed(handle_lstat(invocation)),
         Some(LinuxSyscall::Poll) => DispatchResult::Completed(handle_poll(invocation)),
         Some(LinuxSyscall::Lseek) => DispatchResult::Completed(handle_lseek(invocation)),
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
@@ -514,6 +517,35 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
         read_cstring_with_user(&user, path_ptr)
     })?;
     let stat = proc_fs::stat_path(pid, &path).map_err(|err| match err {
+        crate::fs::VfsError::NotFound => SysError::NotFound,
+        _ => SysError::InvalidArgument,
+    })?;
+
+    let mode = mode_from_meta(stat.kind);
+    let stat = LinuxStat::from_meta(mode, stat.size);
+    let dst = VirtAddr::new(stat_ptr as usize);
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, stat.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
+    Ok(0)
+}
+
+fn handle_lstat(invocation: &SyscallInvocation) -> SysResult {
+    let path_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let stat_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, path_ptr)
+    })?;
+    let stat = proc_fs::stat_path_no_follow(pid, &path).map_err(|err| match err {
         crate::fs::VfsError::NotFound => SysError::NotFound,
         _ => SysError::InvalidArgument,
     })?;

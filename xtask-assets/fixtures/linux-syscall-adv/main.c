@@ -1,6 +1,7 @@
 #include "libsyscall.h"
 
 static const char stat_path[] = "stat.txt";
+static const char lstat_path[] = "stat-link";
 static const char child_path[] = "/child";
 static const usize page_size = 4096;
 
@@ -91,6 +92,12 @@ void _start(void) {
         write_str("STAT:OK\n");
     } else {
         write_str("STAT:BAD\n");
+    }
+
+    if (sys_lstat(lstat_path, &st) == 0 && (st.st_mode & 0170000) == 0120000) {
+        write_str("LSTAT:OK\n");
+    } else {
+        write_str("LSTAT:BAD\n");
     }
 
     int dir_fd = (int)sys_open("/", 0, 0);
