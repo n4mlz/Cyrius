@@ -79,6 +79,7 @@ impl TrapFrame {
 
 impl TrapFrameTrait for TrapFrame {
     fn error_code(&self) -> Option<u64> {
+        // The stubs push a placeholder even for no-error exceptions, so `0` means "no error".
         Some(self.error_code)
     }
 }

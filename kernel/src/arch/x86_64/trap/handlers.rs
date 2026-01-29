@@ -1,3 +1,4 @@
+use x86_64::instructions::interrupts;
 use x86_64::registers::control::Cr2;
 
 use crate::println;
@@ -8,6 +9,8 @@ use crate::trap::TrapInfo;
 use super::TrapFrame;
 
 pub fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
+    // Be careful with logging/locking here: traps can occur while locks are held or
+    // interrupts are disabled, and double faults must avoid re-entrancy entirely.
     match info.vector {
         14 => {
             handle_page_fault(frame)
@@ -20,10 +23,7 @@ pub fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
             handle_general_protection(frame);
             true
         }
-        8 => {
-            handle_double_fault(frame);
-            true
-        }
+        8 => handle_double_fault(frame),
         _ => false,
     }
 }
@@ -73,10 +73,13 @@ fn handle_invalid_opcode(frame: &TrapFrame) {
     panic!("invalid opcode");
 }
 
-fn handle_double_fault(frame: &TrapFrame) {
-    println!("[#DF] double fault encountered");
-    println!("[#DF] frame={:#?}", frame);
-    panic!("double fault");
+fn handle_double_fault(_frame: &TrapFrame) -> bool {
+    // Double faults are fatal; avoid logging/locking to reduce the chance of
+    // re-faulting and triggering a triple fault.
+    interrupts::disable();
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 #[cfg(test)]

@@ -2,12 +2,18 @@ use super::build_trap_info;
 use super::context::{ORIGINAL_ERROR_OFFSET, TrapFrame};
 use crate::arch::{Arch, api::ArchTrap};
 
+// Trap entry stubs assume:
+// - Direction flag is cleared on entry (`cld`) before any Rust code runs.
+// - The kernel is built with red-zone disabled (SysV ABI requires `-mno-red-zone`).
+// - SIMD/FPU registers are not touched in the kernel until proper save/restore exists.
+
 macro_rules! define_trap_stub_no_error {
     ($name:ident, $vector:expr) => {
         #[unsafe(naked)]
         pub(super) unsafe extern "C" fn $name() -> ! {
             core::arch::naked_asm!(
                 r#"
+                    cld
                     push r15
                     push r14
                     push r13
@@ -75,6 +81,7 @@ macro_rules! define_trap_stub_with_error {
         pub(super) unsafe extern "C" fn $name() -> ! {
             core::arch::naked_asm!(
                 r#"
+                    cld
                     push r15
                     push r14
                     push r13
@@ -142,6 +149,8 @@ macro_rules! define_trap_stub_with_error {
     };
 }
 
+// NOTE: Exception vectors with error codes are fixed by the CPU specification.
+// A mismatch here will corrupt the stack frame and usually triple-fault on `iretq`.
 define_trap_stub_no_error!(exception_0, 0);
 define_trap_stub_no_error!(exception_1, 1);
 define_trap_stub_no_error!(exception_2, 2);

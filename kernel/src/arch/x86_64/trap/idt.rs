@@ -76,6 +76,8 @@ fn build_idt() -> InterruptDescriptorTable {
         idt[super::SYSCALL_VECTOR]
             .set_handler_addr(VirtAddr::from_ptr(software_interrupt_syscall as *const ()))
             .set_privilege_level(PrivilegeLevel::Ring3);
+        // External interrupt handlers must issue EOI to PIC/APIC in their
+        // dispatch path; the stubs themselves do not handle it.
         for (offset, stub) in EXTERNAL_INTERRUPT_STUBS.iter().enumerate() {
             let vector = crate::interrupt::DEVICE_VECTOR_BASE + offset as u8;
             idt[vector].set_handler_addr(VirtAddr::from_ptr(*stub as *const ()));
