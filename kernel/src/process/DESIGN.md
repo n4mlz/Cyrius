@@ -2,7 +2,7 @@
 
 ## Role and Scope
 - Manage the set of threads and minimal metadata associated with each process.
-- Currently limited to kernel-space execution; the structure is intentionally skeletal so it can expand once userland support arrives.
+- Supports kernel and user processes with per-process address spaces, while keeping the model intentionally skeletal for future expansion.
 - Exposed as a single global instance (`PROCESS_TABLE`), which higher-level orchestration (at present the scheduler) manipulates through its API.
 
 ## Entities

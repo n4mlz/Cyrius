@@ -340,81 +340,64 @@ impl Scheduler {
     }
 
     fn switch_current(&self, frame: &mut CurrentTrapFrame, mode: SwitchMode) {
-        let (
-            _next_id,
-            next_ctx,
-            next_space,
-            next_stack,
-            next_is_user,
-            next_abi,
-            next_process,
-            detach_target,
-        ) = {
-            let (_guard, mut inner) = self.lock_inner();
-            let current_id = match inner.current {
-                Some(id) => id,
-                None => return,
-            };
-            let idle_id = inner.idle.expect("idle thread must exist");
-            let mut detach_target = None;
+        // NOTE: Interrupts must remain masked until the context is restored to
+        // avoid re-entrancy during the switch.
+        let (_guard, mut inner) = self.lock_inner();
+        let current_id = match inner.current {
+            Some(id) => id,
+            None => return,
+        };
+        let idle_id = inner.idle.expect("idle thread must exist");
+        let mut detach_target = None;
 
-            if let Some(thread) = inner.thread_mut(current_id) {
-                let saved = <Arch as ArchThread>::save_context(frame);
-                thread.context = saved;
-                let process = thread.process().clone();
+        if let Some(thread) = inner.thread_mut(current_id) {
+            let saved = <Arch as ArchThread>::save_context(frame);
+            thread.context = saved;
+            let process = thread.process().clone();
 
-                match mode {
-                    SwitchMode::Requeue => {
-                        if current_id != idle_id {
-                            thread.state = ThreadState::Ready;
-                            inner.ready.push_back(current_id);
-                            process.mark_ready();
-                        } else {
-                            thread.state = ThreadState::Idle;
-                        }
-                    }
-                    SwitchMode::Terminate => {
-                        detach_target = Some((process, current_id));
-                        thread.state = ThreadState::Terminated;
+            match mode {
+                SwitchMode::Requeue => {
+                    if current_id != idle_id {
+                        thread.state = ThreadState::Ready;
+                        inner.ready.push_back(current_id);
+                        process.mark_ready();
+                    } else {
+                        thread.state = ThreadState::Idle;
                     }
                 }
+                SwitchMode::Terminate => {
+                    detach_target = Some((process, current_id));
+                    thread.state = ThreadState::Terminated;
+                }
             }
+        }
 
-            let next_id = inner.next_runnable(idle_id);
-            inner.current = Some(next_id);
+        let next_id = inner.next_runnable(idle_id);
+        inner.current = Some(next_id);
 
-            let (ctx, space, stack_top, is_user, abi, process) = inner
-                .thread_mut(next_id)
-                .map(|thread| {
-                    thread.state = if next_id == idle_id {
-                        ThreadState::Idle
-                    } else {
-                        ThreadState::Running
-                    };
-                    (
-                        thread.context.clone(),
-                        thread.address_space.clone(),
-                        thread.kernel_stack_top(),
-                        thread.is_user(),
-                        thread.process().abi(),
-                        thread.process().clone(),
-                    )
-                })
-                .expect("next thread must exist");
-
-            (
-                next_id,
-                ctx,
-                space,
-                stack_top,
-                is_user,
-                abi,
-                process,
-                detach_target,
-            )
-        };
+        let (next_ctx, next_space, next_stack, next_is_user, next_abi, next_process) = inner
+            .thread_mut(next_id)
+            .map(|thread| {
+                thread.state = if next_id == idle_id {
+                    ThreadState::Idle
+                } else {
+                    ThreadState::Running
+                };
+                (
+                    thread.context.clone(),
+                    thread.address_space.clone(),
+                    thread.kernel_stack_top(),
+                    thread.is_user(),
+                    thread.process().abi(),
+                    thread.process().clone(),
+                )
+            })
+            .expect("next thread must exist");
+        drop(inner);
 
         if let Some((process, tid)) = detach_target {
+            // NOTE: Scheduler reaches into Process directly; this should route
+            // through ProcessTable once it tracks thread membership globally.
             let _ = process.detach_thread(tid);
         }
 
@@ -463,6 +446,7 @@ pub enum SpawnError {
 }
 
 struct SchedulerInner {
+    // TODO: Reap terminated threads; the vector grows monotonically.
     threads: Vec<ThreadControl>,
     ready: VecDeque<ThreadId>,
     current: Option<ThreadId>,
@@ -800,6 +784,7 @@ struct KernelStack {
 
 impl KernelStack {
     fn allocate(size: usize) -> Result<Self, SpawnError> {
+        // TODO: Add guard pages to catch kernel stack overflows.
         let layout = Layout::from_size_align(size, KERNEL_STACK_ALIGN)
             .map_err(|_| SpawnError::OutOfMemory)?;
         let ptr = unsafe { alloc::alloc::alloc(layout) };

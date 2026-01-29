@@ -18,9 +18,9 @@ pub type ProcessHandle = Arc<Process>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
-    AlreadyInitialised,
     NotInitialised,
     NotFound,
+    Terminated,
     DuplicateThread,
     ThreadNotAttached,
     AddressSpace(crate::arch::api::UserAddressSpaceError),
@@ -42,6 +42,7 @@ impl ProcessFs {
     }
 
     fn install_stdio(&self) {
+        // NOTE: stdin/stdout/stderr share the same open file description (dup-like).
         let tty = crate::fs::devfs::global_tty_node();
         let tty_file = tty
             .clone()
@@ -84,8 +85,8 @@ impl Default for ProcessFs {
 ///
 /// # Implementation note
 ///
-/// At this point, each process does not have an individual address space and all share the kernel's address space.
-/// When implementing userland in the future, it will be necessary to properly duplicate and isolate `ArchThread::AddressSpace` here.
+/// Kernel processes share the current address space; user processes receive their own
+/// address spaces from `ArchThread::create_user_address_space`.
 pub struct ProcessTable {
     inner: SpinLock<ProcessTableInner>,
     initialised: AtomicBool,
@@ -100,27 +101,18 @@ impl ProcessTable {
     }
 
     pub fn init_kernel(&self) -> Result<ProcessId, ProcessError> {
-        if self
-            .initialised
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(self
-                .inner
-                .lock()
-                .kernel_pid
-                .expect("kernel process must exist"));
-        }
-
+        // NOTE: Idempotent initialization; returns PID 0 after the first call.
         let mut inner = self.inner.lock();
         if inner.kernel_pid.is_some() {
-            return Err(ProcessError::AlreadyInitialised);
+            self.initialised.store(true, Ordering::Release);
+            return Ok(inner.kernel_pid.expect("kernel process must exist"));
         }
 
         let process = Arc::new(Process::kernel(0, "kernel", Abi::Host));
         inner.kernel_pid = Some(process.id());
         inner.next_pid = 1;
         inner.processes.push(process);
+        self.initialised.store(true, Ordering::Release);
 
         Ok(0)
     }
@@ -255,6 +247,7 @@ impl Default for ProcessTable {
 pub static PROCESS_TABLE: ProcessTable = ProcessTable::new();
 
 struct ProcessTableInner {
+    // TODO: Implement process reaping/removal; the vector grows monotonically.
     processes: Vec<ProcessHandle>,
     kernel_pid: Option<ProcessId>,
     next_pid: ProcessId,
@@ -441,6 +434,9 @@ impl Process {
     }
 
     pub fn attach_thread(&self, tid: ThreadId) -> Result<(), ProcessError> {
+        if matches!(self.state(), ProcessState::Terminated) {
+            return Err(ProcessError::Terminated);
+        }
         let mut guard = self.threads.lock();
         if guard.contains(&tid) {
             return Err(ProcessError::DuplicateThread);
