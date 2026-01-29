@@ -1,6 +1,7 @@
 use crate::trap::TrapFrame as TrapFrameTrait;
 
 pub(super) const GENERAL_REGS_SIZE: usize = core::mem::size_of::<GeneralRegisters>();
+/// Byte offset from the trap frame base to the CPU-pushed error code slot.
 pub(super) const ORIGINAL_ERROR_OFFSET: usize = 8 + GENERAL_REGS_SIZE;
 
 #[repr(C)]

@@ -78,3 +78,16 @@ pub(super) fn build_trap_info(vector: u8, has_error: bool) -> TrapInfo {
         has_error_code: has_error,
     }
 }
+
+#[cfg(test)]
+pub(crate) fn arm_user_pf_frame_check(
+    pid: crate::process::ProcessId,
+    expected_fault_addr: u64,
+) {
+    handlers::arm_user_pf_frame_check(pid, expected_fault_addr);
+}
+
+#[cfg(test)]
+pub(crate) fn user_pf_frame_check_passed() -> bool {
+    handlers::user_pf_frame_check_passed()
+}

@@ -15,6 +15,31 @@ use crate::{
 };
 
 use super::TrapFrame;
+#[cfg(test)]
+use super::context::ORIGINAL_ERROR_OFFSET;
+#[cfg(test)]
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+#[cfg(test)]
+use crate::process::ProcessId;
+
+#[cfg(test)]
+static USER_PF_FRAME_CHECK_STATE: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static USER_PF_FRAME_CHECK_PID: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static USER_PF_FRAME_CHECK_ADDR: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn arm_user_pf_frame_check(pid: ProcessId, expected_fault_addr: u64) {
+    USER_PF_FRAME_CHECK_PID.store(pid, Ordering::SeqCst);
+    USER_PF_FRAME_CHECK_ADDR.store(expected_fault_addr, Ordering::SeqCst);
+    USER_PF_FRAME_CHECK_STATE.store(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn user_pf_frame_check_passed() -> bool {
+    USER_PF_FRAME_CHECK_STATE.load(Ordering::SeqCst) == 2
+}
 
 pub fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
     // Be careful with logging/locking here: traps can occur while locks are held or
@@ -47,6 +72,9 @@ fn handle_page_fault(frame: &mut TrapFrame) -> bool {
     let user = (code & 1 << 2) != 0 || (frame.cs & 3) != 0;
     let reserved = (code & 1 << 3) != 0;
     let instruction = (code & 1 << 4) != 0;
+
+    #[cfg(test)]
+    maybe_check_user_pf_frame(frame, fault_addr.as_u64());
 
     println!(
         "[#PF] fault_addr={:#x} present={} write={} user={} reserved={} instruction={} fs_base={:#x}",
@@ -265,6 +293,49 @@ fn dump_field_hint(
         in_brk,
         in_stack
     );
+}
+
+#[cfg(test)]
+fn maybe_check_user_pf_frame(frame: &TrapFrame, fault_addr: u64) {
+    if USER_PF_FRAME_CHECK_STATE.load(Ordering::SeqCst) != 1 {
+        return;
+    }
+
+    let expected_pid = USER_PF_FRAME_CHECK_PID.load(Ordering::SeqCst);
+    let expected_addr = USER_PF_FRAME_CHECK_ADDR.load(Ordering::SeqCst);
+    if SCHEDULER.current_process_id().unwrap_or(0) != expected_pid {
+        return;
+    }
+    if fault_addr != expected_addr {
+        return;
+    }
+
+    // Read the CPU-pushed exception frame starting at ORIGINAL_ERROR_OFFSET.
+    let base = frame as *const TrapFrame as *const u8;
+    let cpu_frame_ptr =
+        unsafe { base.add(ORIGINAL_ERROR_OFFSET) as *const u64 };
+    let mut cpu = [0u64; 6];
+    for idx in 0..4 {
+        unsafe {
+            cpu[idx] = core::ptr::read_volatile(cpu_frame_ptr.add(idx));
+        }
+    }
+    let cpl = (cpu[2] & 3) as u8;
+    assert!(cpl != 0, "expected user-mode page fault");
+    for idx in 4..6 {
+        unsafe {
+            cpu[idx] = core::ptr::read_volatile(cpu_frame_ptr.add(idx));
+        }
+    }
+
+    assert_eq!(cpu[0], frame.error_code, "error_code mismatch");
+    assert_eq!(cpu[1], frame.rip, "rip mismatch");
+    assert_eq!(cpu[2], frame.cs, "cs mismatch");
+    assert_eq!(cpu[3], frame.rflags, "rflags mismatch");
+    assert_eq!(cpu[4], frame.rsp, "rsp mismatch");
+    assert_eq!(cpu[5], frame.ss, "ss mismatch");
+
+    USER_PF_FRAME_CHECK_STATE.store(2, Ordering::SeqCst);
 }
 
 #[cfg(test)]
