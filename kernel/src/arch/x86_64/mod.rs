@@ -105,6 +105,10 @@ impl ArchInterrupt for X86_64 {
         interrupt::LOCAL_APIC.init(boot_info)
     }
 
+    fn are_interrupts_enabled() -> bool {
+        x86_64::instructions::interrupts::are_enabled()
+    }
+
     fn enable_interrupts() {
         interrupt::LOCAL_APIC.enable();
     }

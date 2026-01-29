@@ -7,6 +7,7 @@ use crate::fs::{Path, VfsError};
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
+use crate::interrupt::INTERRUPTS;
 use crate::thread::{SCHEDULER, SpawnError};
 
 /// Errors surfaced while launching or supervising a Linux guest process.
@@ -96,6 +97,8 @@ fn wait_for_exit(pid: ProcessId) {
         .map(|count| count > 0)
         .unwrap_or(false)
     {
+        // Ensure interrupts are enabled so HALT can resume.
+        INTERRUPTS.enable();
         #[cfg(target_arch = "x86_64")]
         crate::arch::x86_64::halt();
         #[cfg(not(target_arch = "x86_64"))]

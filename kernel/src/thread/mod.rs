@@ -14,7 +14,7 @@ use crate::mem::addr::VirtAddr;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessHandle, ProcessId};
 use crate::syscall;
 use crate::trap::{CurrentTrapFrame, TrapInfo};
-use crate::util::spinlock::SpinLock;
+use crate::util::spinlock::{SpinLock, SpinLockGuard};
 
 pub type ThreadId = u64;
 pub type KernelThreadEntry = fn() -> !;
@@ -28,6 +28,28 @@ pub struct UserStackInfo {
 const KERNEL_STACK_SIZE: usize = 32 * 1024;
 const KERNEL_STACK_ALIGN: usize = 16;
 const USER_STACK_SIZE: usize = 32 * 1024;
+
+struct InterruptGuard {
+    was_enabled: bool,
+}
+
+impl InterruptGuard {
+    fn new() -> Self {
+        let was_enabled = <Arch as ArchInterrupt>::are_interrupts_enabled();
+        if was_enabled {
+            <Arch as ArchInterrupt>::disable_interrupts();
+        }
+        Self { was_enabled }
+    }
+}
+
+impl Drop for InterruptGuard {
+    fn drop(&mut self) {
+        if self.was_enabled {
+            <Arch as ArchInterrupt>::enable_interrupts();
+        }
+    }
+}
 
 /// Lightweight kernel-managed execution unit representing a single thread of execution.
 pub static SCHEDULER: Scheduler = Scheduler::new();
@@ -54,8 +76,16 @@ impl Scheduler {
         }
     }
 
+    /// Acquire the scheduler lock with interrupts masked to avoid re-entrancy
+    /// from interrupt handlers that also touch the scheduler.
+    fn lock_inner(&self) -> (InterruptGuard, SpinLockGuard<'_, SchedulerInner>) {
+        let guard = InterruptGuard::new();
+        let inner = self.inner.lock();
+        (guard, inner)
+    }
+
     pub fn init(&self) -> Result<(), SchedulerError> {
-        let mut inner = self.inner.lock();
+        let (_guard, mut inner) = self.lock_inner();
         if inner.initialised {
             return Ok(());
         }
@@ -95,13 +125,13 @@ impl Scheduler {
 
     /// Return the process ID of the currently running thread, if any.
     pub fn current_process_id(&self) -> Option<ProcessId> {
-        let inner = self.inner.lock();
+        let (_guard, inner) = self.lock_inner();
         let current = inner.current?;
         inner.thread(current).map(|thread| thread.process_id())
     }
 
     pub fn current_user_stack_info(&self) -> Option<UserStackInfo> {
-        let inner = self.inner.lock();
+        let (_guard, inner) = self.lock_inner();
         let current = inner.current?;
         inner
             .thread(current)
@@ -114,7 +144,7 @@ impl Scheduler {
         entry: KernelThreadEntry,
     ) -> Result<ThreadId, SpawnError> {
         let process = {
-            let inner = self.inner.lock();
+            let (_guard, inner) = self.lock_inner();
             if !inner.initialised {
                 return Err(SpawnError::SchedulerNotReady);
             }
@@ -132,7 +162,7 @@ impl Scheduler {
         name: &'static str,
         entry: KernelThreadEntry,
     ) -> Result<ThreadId, SpawnError> {
-        let mut inner = self.inner.lock();
+        let (_guard, mut inner) = self.lock_inner();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
@@ -147,7 +177,7 @@ impl Scheduler {
         entry: VirtAddr,
         stack_size: usize,
     ) -> Result<ThreadId, SpawnError> {
-        let mut inner = self.inner.lock();
+        let (_guard, mut inner) = self.lock_inner();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
@@ -163,7 +193,7 @@ impl Scheduler {
         user_stack: <Arch as ArchThread>::UserStack,
         stack_pointer: VirtAddr,
     ) -> Result<ThreadId, SpawnError> {
-        let mut inner = self.inner.lock();
+        let (_guard, mut inner) = self.lock_inner();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
@@ -178,7 +208,7 @@ impl Scheduler {
         context: <Arch as ArchThread>::Context,
         user_stack: <Arch as ArchThread>::UserStack,
     ) -> Result<ThreadId, SpawnError> {
-        let mut inner = self.inner.lock();
+        let (_guard, mut inner) = self.lock_inner();
         if !inner.initialised {
             return Err(SpawnError::SchedulerNotReady);
         }
@@ -190,38 +220,45 @@ impl Scheduler {
         &self,
         user_stack: <Arch as ArchThread>::UserStack,
     ) -> Result<(), SpawnError> {
-        let mut inner = self.inner.lock();
-        if !inner.initialised {
-            return Err(SpawnError::SchedulerNotReady);
-        }
+        let old_stack = {
+            let (_guard, mut inner) = self.lock_inner();
+            if !inner.initialised {
+                return Err(SpawnError::SchedulerNotReady);
+            }
 
-        let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
-        let thread = inner
-            .thread_mut(current)
-            .ok_or(SpawnError::SchedulerNotReady)?;
-        if !thread.is_user() {
-            return Err(SpawnError::SchedulerNotReady);
-        }
-        thread.user_stack = Some(user_stack);
+            let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
+            let thread = inner
+                .thread_mut(current)
+                .ok_or(SpawnError::SchedulerNotReady)?;
+            if !thread.is_user() {
+                return Err(SpawnError::SchedulerNotReady);
+            }
+            thread.user_stack.replace(user_stack)
+        };
+        drop(old_stack);
         Ok(())
     }
 
-    pub fn clear_current_user_stack(&self) -> Result<(), SpawnError> {
-        let mut inner = self.inner.lock();
-        if !inner.initialised {
-            return Err(SpawnError::SchedulerNotReady);
-        }
+    pub fn take_current_user_stack(
+        &self,
+    ) -> Result<Option<<Arch as ArchThread>::UserStack>, SpawnError> {
+        let old_stack = {
+            let (_guard, mut inner) = self.lock_inner();
+            if !inner.initialised {
+                return Err(SpawnError::SchedulerNotReady);
+            }
 
-        let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
-        let thread = inner
-            .thread_mut(current)
-            .ok_or(SpawnError::SchedulerNotReady)?;
-        if !thread.is_user() {
-            return Err(SpawnError::SchedulerNotReady);
-        }
+            let current = inner.current.ok_or(SpawnError::SchedulerNotReady)?;
+            let thread = inner
+                .thread_mut(current)
+                .ok_or(SpawnError::SchedulerNotReady)?;
+            if !thread.is_user() {
+                return Err(SpawnError::SchedulerNotReady);
+            }
 
-        thread.user_stack = None;
-        Ok(())
+            thread.user_stack.take()
+        };
+        Ok(old_stack)
     }
 
     fn spawn_thread_locked(
@@ -248,7 +285,7 @@ impl Scheduler {
 
     pub fn start(&self) -> Result<(), SchedulerError> {
         {
-            let inner = self.inner.lock();
+            let (_guard, inner) = self.lock_inner();
             if !inner.initialised {
                 return Err(SchedulerError::NotInitialised);
             }
@@ -313,7 +350,7 @@ impl Scheduler {
             next_process,
             detach_target,
         ) = {
-            let mut inner = self.inner.lock();
+            let (_guard, mut inner) = self.lock_inner();
             let current_id = match inner.current {
                 Some(id) => id,
                 None => return,

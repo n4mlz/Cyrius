@@ -1,6 +1,8 @@
 use x86_64::registers::control::Cr2;
 
 use crate::println;
+use crate::process::PROCESS_TABLE;
+use crate::thread::SCHEDULER;
 use crate::trap::TrapInfo;
 
 use super::TrapFrame;
@@ -8,8 +10,7 @@ use super::TrapFrame;
 pub fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
     match info.vector {
         14 => {
-            handle_page_fault(frame);
-            true
+            handle_page_fault(frame)
         }
         6 => {
             handle_invalid_opcode(frame);
@@ -27,13 +28,13 @@ pub fn handle_exception(info: TrapInfo, frame: &mut TrapFrame) -> bool {
     }
 }
 
-fn handle_page_fault(frame: &TrapFrame) {
+fn handle_page_fault(frame: &mut TrapFrame) -> bool {
     let fault_addr = Cr2::read().expect("CR2 must contain a canonical address");
     let code = frame.error_code;
 
     let present = (code & 1) != 0;
     let write = (code & 1 << 1) != 0;
-    let user = (code & 1 << 2) != 0;
+    let user = (code & 1 << 2) != 0 || (frame.cs & 3) != 0;
     let reserved = (code & 1 << 3) != 0;
     let instruction = (code & 1 << 4) != 0;
 
@@ -47,6 +48,16 @@ fn handle_page_fault(frame: &TrapFrame) {
         instruction
     );
     println!("[#PF] frame={:#?}", frame);
+    if user {
+        if let Some(pid) = SCHEDULER.current_process_id() {
+            if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+                // Use a conventional non-zero status for user faults.
+                process.set_exit_code(139);
+            }
+        }
+        SCHEDULER.terminate_current(frame);
+        return true;
+    }
     panic!("page fault while executing in kernel context");
 }
 

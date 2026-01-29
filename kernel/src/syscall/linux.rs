@@ -23,7 +23,6 @@ use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 
 const DEBUG_LS_SYSCALL: bool = true;
 const DEBUG_LINUX_ENOSYS: bool = true;
-const DEBUG_LINUX_EXECVE: bool = true;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +54,7 @@ pub enum LinuxSyscall {
     Writev = 20,
     Uname = 63,
     GetPid = 39,
+    GetTimeOfDay = 96,
     Fcntl = 72,
     GetCwd = 79,
     Chdir = 80,
@@ -76,6 +76,7 @@ pub enum LinuxSyscall {
     GetSid = 124,
     ArchPrctl = 158,
     SetTidAddress = 218,
+    ClockGetTime = 228,
 }
 
 impl LinuxSyscall {
@@ -98,6 +99,7 @@ impl LinuxSyscall {
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
             63 => Some(Self::Uname),
+            96 => Some(Self::GetTimeOfDay),
             72 => Some(Self::Fcntl),
             79 => Some(Self::GetCwd),
             80 => Some(Self::Chdir),
@@ -119,6 +121,7 @@ impl LinuxSyscall {
             124 => Some(Self::GetSid),
             158 => Some(Self::ArchPrctl),
             218 => Some(Self::SetTidAddress),
+            228 => Some(Self::ClockGetTime),
             _ => None,
         }
     }
@@ -182,8 +185,10 @@ pub fn dispatch(
         Some(LinuxSyscall::SetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetGid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
+        Some(LinuxSyscall::GetTimeOfDay) => DispatchResult::Completed(handle_gettimeofday(invocation)),
         Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
         Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
+        Some(LinuxSyscall::ClockGetTime) => DispatchResult::Completed(handle_clock_gettime(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
         None => {
@@ -813,10 +818,6 @@ fn handle_execve(
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
 
-    if DEBUG_LINUX_EXECVE {
-        crate::println!("[linux-execve] path={path}");
-    }
-
     let argv = match process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         read_cstring_array_with_user(&user, argv_ptr, 128)
@@ -834,17 +835,21 @@ fn handle_execve(
 
     // Drop the previous user stack before clearing mappings so we do not unmap the
     // freshly allocated stack on replacement.
-    if let Err(err) = SCHEDULER.clear_current_user_stack() {
-        return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
-    }
+    let old_stack = match SCHEDULER.take_current_user_stack() {
+        Ok(stack) => stack,
+        Err(err) => {
+            return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
+        }
+    };
 
     if <Arch as ArchThread>::clear_user_mappings(&process.address_space()).is_err() {
         return DispatchResult::Completed(Err(SysError::InvalidArgument));
     }
+    drop(old_stack);
 
     let program = match crate::loader::linux::load_elf(pid, &path) {
         Ok(program) => program,
-        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+        Err(_err) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
     let auxv = crate::loader::linux::build_auxv(&program, PageSize::SIZE_4K.bytes());
@@ -858,7 +863,7 @@ fn handle_execve(
             )
         }) {
             Ok(ptr) => ptr,
-            Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+            Err(_err) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
         },
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
@@ -955,6 +960,65 @@ fn handle_arch_prctl(invocation: &SyscallInvocation) -> SysResult {
     }
 
     crate::arch::x86_64::set_fs_base(value);
+    Ok(0)
+}
+
+#[repr(C)]
+struct LinuxTimeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+impl LinuxTimeval {
+    fn as_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.tv_sec.to_ne_bytes());
+        out[8..].copy_from_slice(&self.tv_usec.to_ne_bytes());
+        out
+    }
+}
+
+#[repr(C)]
+struct LinuxTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+impl LinuxTimespec {
+    fn as_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.tv_sec.to_ne_bytes());
+        out[8..].copy_from_slice(&self.tv_nsec.to_ne_bytes());
+        out
+    }
+}
+
+fn handle_gettimeofday(invocation: &SyscallInvocation) -> SysResult {
+    let tv_ptr = invocation.arg(0).unwrap_or(0);
+    if tv_ptr != 0 {
+        // TODO: Provide real wall-clock time once the time source is implemented.
+        let tv = LinuxTimeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        let dst = VirtAddr::new(tv_ptr as usize);
+        copy_to_user(dst, &tv.as_bytes()).map_err(|_| SysError::BadAddress)?;
+    }
+    Ok(0)
+}
+
+fn handle_clock_gettime(invocation: &SyscallInvocation) -> SysResult {
+    let tp_ptr = invocation.arg(1).unwrap_or(0);
+    if tp_ptr == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    // TODO: Provide a real clock source once timekeeping is implemented.
+    let ts = LinuxTimespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let dst = VirtAddr::new(tp_ptr as usize);
+    copy_to_user(dst, &ts.as_bytes()).map_err(|_| SysError::BadAddress)?;
     Ok(0)
 }
 
