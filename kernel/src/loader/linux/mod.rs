@@ -425,7 +425,7 @@ mod tests {
             .address_space(pid)
             .expect("user address space");
         let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400)).expect("read reloc");
-        assert_eq!(relocated, 0x400000 + 0x1234);
+        assert_eq!(relocated, 0x400000 + 0x234);
     }
 
     fn test_elf_image() -> Vec<u8> {
@@ -535,7 +535,7 @@ mod tests {
         write_dyn(&mut buf[0x220..0x230], 9, 24);
         write_dyn(&mut buf[0x230..0x240], 0, 0);
 
-        write_rela(&mut buf[0x300..0x318], 0x400, 8, 0x1234);
+        write_rela(&mut buf[0x300..0x318], 0x400, 8, 0x234);
 
         buf
     }

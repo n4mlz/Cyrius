@@ -314,26 +314,21 @@ fn maybe_check_user_pf_frame(frame: &TrapFrame, fault_addr: u64) {
     let base = frame as *const TrapFrame as *const u8;
     let cpu_frame_ptr =
         unsafe { base.add(ORIGINAL_ERROR_OFFSET) as *const u64 };
-    let mut cpu = [0u64; 6];
-    for idx in 0..4 {
+    let mut cpu = [0u64; 5];
+    for idx in 0..5 {
         unsafe {
             cpu[idx] = core::ptr::read_volatile(cpu_frame_ptr.add(idx));
         }
     }
-    let cpl = (cpu[2] & 3) as u8;
+    let cpl = (cpu[1] & 3) as u8;
     assert!(cpl != 0, "expected user-mode page fault");
-    for idx in 4..6 {
-        unsafe {
-            cpu[idx] = core::ptr::read_volatile(cpu_frame_ptr.add(idx));
-        }
-    }
 
-    assert_eq!(cpu[0], frame.error_code, "error_code mismatch");
-    assert_eq!(cpu[1], frame.rip, "rip mismatch");
-    assert_eq!(cpu[2], frame.cs, "cs mismatch");
-    assert_eq!(cpu[3], frame.rflags, "rflags mismatch");
-    assert_eq!(cpu[4], frame.rsp, "rsp mismatch");
-    assert_eq!(cpu[5], frame.ss, "ss mismatch");
+    assert_eq!(frame.error_code, 4, "pf error_code unexpected");
+    assert_eq!(cpu[0], frame.rip, "rip mismatch");
+    assert_eq!(cpu[1], frame.cs, "cs mismatch");
+    assert_eq!(cpu[2], frame.rflags, "rflags mismatch");
+    assert_eq!(cpu[3], frame.rsp, "rsp mismatch");
+    assert_eq!(cpu[4], frame.ss, "ss mismatch");
 
     USER_PF_FRAME_CHECK_STATE.store(2, Ordering::SeqCst);
 }
