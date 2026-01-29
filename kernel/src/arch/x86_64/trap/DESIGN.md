@@ -32,6 +32,7 @@
 - `handlers` provides the architecture-specific fast path for #PF/#GP/#DF, decoding hardware error codes and emitting structured diagnostics before panicking. Double-fault handling avoids logging and halts to reduce re-entrancy risk.
 - The dispatcher in `mod.rs` delegates to these helpers via `ArchTrap::handle_exception`; returning `true` suppresses the generic logging path.
 - Page-fault handling records the CR2 fault address and access type bits so future user-mode recovery logic has the required context.
+- While `SYSCALL/SYSRET` is not wired up, #UD in user mode checks for the `0f 05` opcode and emulates a syscall as a temporary workaround; kernel-mode #UD remains fatal.
 
 - Expand syscall handling beyond `int 0x80` by enabling `SYSCALL/SYSRET` once MSR management is implemented.
 - Incorporate per-CPU IST buffers to support SMP and avoid contention on the global static region.

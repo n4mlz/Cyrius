@@ -5,6 +5,7 @@ use crate::arch::api::ArchPageTableAccess;
 use crate::mem::paging::{PageTableOps, PhysMapper};
 use crate::println;
 use crate::process::PROCESS_TABLE;
+use crate::syscall::{self, SyscallInvocation};
 use crate::thread::SCHEDULER;
 use crate::trap::TrapInfo;
 use crate::{
@@ -141,7 +142,10 @@ fn handle_general_protection(frame: &TrapFrame) {
     panic!("general protection fault");
 }
 
-fn handle_invalid_opcode(frame: &TrapFrame) {
+fn handle_invalid_opcode(frame: &mut TrapFrame) {
+    if emulate_syscall_from_ud(frame) {
+        return;
+    }
     println!("[#UD] invalid opcode");
     println!("[#UD] frame={:#?}", frame);
     panic!("invalid opcode");
@@ -214,6 +218,81 @@ fn dump_faulting_bytes(rip: usize) {
     } else {
         println!("[#PF] bytes @ rip: <unmapped>");
     }
+}
+
+/// Emulate `syscall` on #UD in user mode as a compatibility workaround.
+///
+/// # Implicit dependencies
+/// - Relies on the current process address space being active and readable.
+/// - Assumes the syscall ABI register layout matches the Linux `syscall` calling convention
+///   (rax, rdi, rsi, rdx, r10, r8, r9).
+/// - Assumes #UD is raised because `SYSCALL/SYSRET` MSRs are not wired yet.
+fn emulate_syscall_from_ud(frame: &mut TrapFrame) -> bool {
+    let cpl = (frame.cs & 3) as u8;
+    if cpl == 0 {
+        return false;
+    }
+    let pid = match SCHEDULER.current_process_id() {
+        Some(pid) => pid,
+        None => return false,
+    };
+    let process = match PROCESS_TABLE.process_handle(pid) {
+        Ok(proc) => proc,
+        Err(_) => return false,
+    };
+    let rip = frame.rip as usize;
+    let mut bytes = [0u8; 2];
+    let mut ok = true;
+    process.address_space().with_page_table(|table, _| {
+        for (idx, out) in bytes.iter_mut().enumerate() {
+            let addr = match rip.checked_add(idx) {
+                Some(addr) => addr,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            let virt = VirtAddr::new(addr);
+            let phys = match table.translate(virt) {
+                Ok(phys) => phys,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            };
+            let mapper = manager::phys_mapper();
+            unsafe {
+                let ptr = mapper.phys_to_virt(phys).into_ptr();
+                *out = core::ptr::read(ptr);
+            }
+        }
+    });
+    if !ok || bytes != [0x0f, 0x05] {
+        return false;
+    }
+
+    let abi = syscall::current_abi();
+    let invocation = SyscallInvocation::new(
+        frame.regs.rax,
+        [
+            frame.regs.rdi,
+            frame.regs.rsi,
+            frame.regs.rdx,
+            frame.regs.r10,
+            frame.regs.r8,
+            frame.regs.r9,
+        ],
+    );
+    match syscall::dispatch_with_frame(abi, &invocation, Some(frame)) {
+        syscall::DispatchResult::Completed(result) => {
+            frame.regs.rax = syscall::encode_result(abi, result);
+            frame.rip = frame.rip.wrapping_add(2);
+        }
+        syscall::DispatchResult::Terminate(_code) => {
+            SCHEDULER.terminate_current(frame);
+        }
+    }
+    true
 }
 
 fn dump_trap_frame_qwords(frame: &TrapFrame) {
