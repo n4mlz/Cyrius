@@ -75,7 +75,9 @@ pub fn initialise_stack_with_args(
 
     // TODO: Replace zeroed bytes with a kernel RNG once available.
     let random_ptr = {
-        sp = sp.checked_sub(AT_RANDOM_LEN).ok_or(StackBuildError::Overflow)?;
+        sp = sp
+            .checked_sub(AT_RANDOM_LEN)
+            .ok_or(StackBuildError::Overflow)?;
         unsafe {
             core::ptr::write_bytes(sp as *mut u8, 0, AT_RANDOM_LEN);
         }
@@ -142,7 +144,9 @@ pub fn initialise_stack_with_args_in_table<T: PageTableOps>(
 
     // TODO: Replace zeroed bytes with a kernel RNG once available.
     let random_ptr = {
-        sp = sp.checked_sub(AT_RANDOM_LEN).ok_or(StackBuildError::Overflow)?;
+        sp = sp
+            .checked_sub(AT_RANDOM_LEN)
+            .ok_or(StackBuildError::Overflow)?;
         let addr = VirtAddr::new(sp);
         let zeros = [0u8; AT_RANDOM_LEN];
         user.write_bytes(addr, &zeros)

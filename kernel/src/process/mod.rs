@@ -105,7 +105,6 @@ impl ProcessTable {
         let mut inner = self.inner.lock();
         if inner.kernel_pid.is_some() {
             self.initialised.store(true, Ordering::Release);
-            crate::println!("[process] init_kernel already initialised");
             return Ok(inner.kernel_pid.expect("kernel process must exist"));
         }
 
@@ -114,7 +113,6 @@ impl ProcessTable {
         inner.next_pid = 1;
         inner.processes.push(process);
         self.initialised.store(true, Ordering::Release);
-        crate::println!("[process] init_kernel created pid=0");
 
         Ok(0)
     }
@@ -139,7 +137,6 @@ impl ProcessTable {
         let process = Arc::new(Process::kernel(pid, name, Abi::Host));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
-        crate::println!("[process] create_kernel_process pid={} name={}", pid, name);
         Ok(pid)
     }
 
@@ -172,7 +169,6 @@ impl ProcessTable {
         let process = Arc::new(Process::user(pid, name, space, domain));
         inner.next_pid = pid.checked_add(1).expect("process id overflow");
         inner.processes.push(process);
-        crate::println!("[process] create_user_process pid={} name={}", pid, name);
         Ok(pid)
     }
 

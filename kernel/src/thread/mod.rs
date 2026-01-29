@@ -94,7 +94,6 @@ impl Scheduler {
             .init_kernel()
             .map_err(SchedulerError::Process)?;
         inner.kernel_process = Some(kernel_pid);
-        crate::println!("[thread] scheduler init kernel_pid={}", kernel_pid);
 
         let kernel_process = PROCESS_TABLE
             .process_handle(kernel_pid)
@@ -109,7 +108,6 @@ impl Scheduler {
         inner.current = Some(bootstrap.id);
         inner.threads.push(bootstrap);
         kernel_process.mark_running();
-        crate::println!("[thread] bootstrap thread id=0");
 
         let idle_id = inner.next_tid;
         let idle = ThreadControl::idle(idle_id, kernel_process.clone(), kernel_space.clone())
@@ -119,7 +117,6 @@ impl Scheduler {
             .map_err(SchedulerError::Process)?;
         inner.next_tid = idle_id.checked_add(1).expect("thread id overflow");
         inner.idle = Some(idle.id);
-        crate::println!("[thread] idle thread id={}", idle.id);
         inner.threads.push(idle);
         inner.initialised = true;
         syscall::set_current_abi(kernel_process.abi());
@@ -170,11 +167,6 @@ impl Scheduler {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        crate::println!(
-            "[thread] spawn kernel thread name={} pid={}",
-            name,
-            process
-        );
         self.spawn_thread_locked(&mut inner, process, name, entry)
     }
 
@@ -190,12 +182,6 @@ impl Scheduler {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        crate::println!(
-            "[thread] spawn user thread name={} pid={} entry={:#x}",
-            name,
-            process,
-            entry.as_raw()
-        );
         inner.spawn_user_thread(process, name, entry, stack_size)
     }
 
@@ -212,13 +198,6 @@ impl Scheduler {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        crate::println!(
-            "[thread] spawn user thread (stack) name={} pid={} entry={:#x} sp={:#x}",
-            name,
-            process,
-            entry.as_raw(),
-            stack_pointer.as_raw()
-        );
         inner.spawn_user_thread_with_stack(process, name, entry, user_stack, stack_pointer)
     }
 
@@ -234,11 +213,6 @@ impl Scheduler {
             return Err(SpawnError::SchedulerNotReady);
         }
 
-        crate::println!(
-            "[thread] spawn user thread (ctx) name={} pid={}",
-            name,
-            process
-        );
         inner.spawn_user_thread_with_context(process, name, context, user_stack)
     }
 

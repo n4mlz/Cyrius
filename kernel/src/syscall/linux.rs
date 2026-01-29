@@ -21,9 +21,6 @@ use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
 use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 
-const DEBUG_LS_SYSCALL: bool = true;
-const DEBUG_LINUX_ENOSYS: bool = true;
-
 // NOTE: Error mapping is intentionally coarse right now (many failures collapse
 // to InvalidArgument/BadAddress). This keeps the syscall surface minimal but is
 // not Linux-accurate.
@@ -143,23 +140,6 @@ pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
-    if DEBUG_LS_SYSCALL {
-        match invocation.number {
-            217 | 257 | 262 => {
-                crate::println!(
-                    "[linux-ls] nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
-                    invocation.number,
-                    invocation.args[0],
-                    invocation.args[1],
-                    invocation.args[2],
-                    invocation.args[3],
-                    invocation.args[4],
-                    invocation.args[5],
-                );
-            }
-            _ => {}
-        }
-    }
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -209,21 +189,7 @@ pub fn dispatch(
         }
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
-        None => {
-            if DEBUG_LINUX_ENOSYS {
-                crate::println!(
-                    "[linux-syscall] ENOSYS nr={} args=[{:x}, {:x}, {:x}, {:x}, {:x}, {:x}]",
-                    invocation.number,
-                    invocation.args[0],
-                    invocation.args[1],
-                    invocation.args[2],
-                    invocation.args[3],
-                    invocation.args[4],
-                    invocation.args[5],
-                );
-            }
-            DispatchResult::Completed(Err(SysError::NotImplemented))
-        }
+        None => DispatchResult::Completed(Err(SysError::NotImplemented)),
     }
 }
 
@@ -392,21 +358,11 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
 
-    let result = process.address_space().with_page_table(|table, _| {
+    process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
         proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
-    });
-    if cmd == 0x540e || cmd == 0x540f || cmd == 0x5410 {
-        crate::println!(
-            "[linux-ioctl] pid={} fd={} cmd=0x{:x} -> {:?}",
-            pid,
-            fd,
-            cmd,
-            result
-        );
-    }
-    result
+    })
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -622,8 +578,8 @@ fn handle_getdents64(invocation: &SyscallInvocation) -> SysResult {
     }
 
     let entries = proc_fs::read_dir_fd(pid, fd as u32).map_err(|_| SysError::InvalidArgument)?;
-    let mut index = proc_fs::dir_offset(pid, fd as u32)
-        .map_err(|_| SysError::InvalidArgument)? as usize;
+    let mut index =
+        proc_fs::dir_offset(pid, fd as u32).map_err(|_| SysError::InvalidArgument)? as usize;
     if index >= entries.len() {
         return Ok(0);
     }
@@ -632,32 +588,24 @@ fn handle_getdents64(invocation: &SyscallInvocation) -> SysResult {
     let mut written = 0usize;
     while index < entries.len() {
         let entry = &entries[index];
-        let reclen = dirent64_reclen(entry.name.as_bytes().len(), HEADER_LEN, ALIGN)?;
+        let reclen = dirent64_reclen(entry.name.len(), HEADER_LEN, ALIGN)?;
         if written + reclen > count {
             break;
         }
-        write_dirent64(
-            base,
-            written,
-            entry,
-            (index + 1) as u64,
-            reclen,
-            HEADER_LEN,
-        )?;
+        write_dirent64(base, written, entry, (index + 1) as u64, reclen, HEADER_LEN)?;
         written += reclen;
         index += 1;
     }
 
     if written == 0 && index < entries.len() {
         let entry = &entries[index];
-        let min = dirent64_reclen(entry.name.as_bytes().len(), HEADER_LEN, ALIGN)?;
+        let min = dirent64_reclen(entry.name.len(), HEADER_LEN, ALIGN)?;
         if min > count {
             return Err(SysError::InvalidArgument);
         }
     }
 
-    proc_fs::set_dir_offset(pid, fd as u32, index as u64)
-        .map_err(|_| SysError::InvalidArgument)?;
+    proc_fs::set_dir_offset(pid, fd as u32, index as u64).map_err(|_| SysError::InvalidArgument)?;
     Ok(written as u64)
 }
 
@@ -704,9 +652,7 @@ fn write_dirent64(
     copy_to_user(dst, &header).map_err(|_| SysError::BadAddress)?;
 
     let name = entry.name.as_bytes();
-    let name_dst = dst
-        .checked_add(header_len)
-        .ok_or(SysError::BadAddress)?;
+    let name_dst = dst.checked_add(header_len).ok_or(SysError::BadAddress)?;
     copy_to_user(name_dst, name).map_err(|_| SysError::BadAddress)?;
     let nul_dst = name_dst
         .checked_add(name.len())
@@ -842,7 +788,9 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                         return Err(SysError::InvalidArgument);
                     }
                 }
-                let phys = table.translate(page.start).map_err(|_| SysError::InvalidArgument)?;
+                let phys = table
+                    .translate(page.start)
+                    .map_err(|_| SysError::InvalidArgument)?;
                 let mapper = manager::phys_mapper();
                 unsafe {
                     core::ptr::write_bytes(mapper.phys_to_virt(phys).into_mut_ptr(), 0, page_size);
@@ -889,7 +837,6 @@ fn handle_fork(
         Ok(pid) => pid,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
-    crate::println!("[fork] parent_pid={}", pid);
 
     let parent_stack = match SCHEDULER.current_user_stack_info() {
         Some(info) => info,
@@ -916,7 +863,6 @@ fn handle_fork(
         Ok(pid) => pid,
         Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    crate::println!("[fork] created child_pid={}", child_pid);
 
     if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
         child_proc.set_brk_state(parent_proc.brk_state());
@@ -958,7 +904,6 @@ fn handle_fork(
         return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
     }
 
-    crate::println!("[fork] spawned child thread for pid={}", child_pid);
     DispatchResult::Completed(Ok(child_pid))
 }
 
@@ -989,7 +934,6 @@ fn handle_execve(
         Ok(path) => path,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
-    crate::println!("[execve] pid={} path={}", pid, path);
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
 
@@ -1008,11 +952,6 @@ fn handle_execve(
         Ok(list) => list,
         Err(err) => return DispatchResult::Completed(Err(err)),
     };
-    crate::println!(
-        "[execve] argv_count={} envp_count={}",
-        argv.len(),
-        envp.len()
-    );
 
     // Drop the previous user stack before clearing mappings so we do not unmap the
     // freshly allocated stack on replacement.
@@ -1032,11 +971,6 @@ fn handle_execve(
         Ok(program) => program,
         Err(_err) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
-    crate::println!(
-        "[execve] entry={:#x} stack_top={:#x}",
-        program.entry.as_raw(),
-        <Arch as ArchThread>::user_stack_top(&program.user_stack).as_raw()
-    );
 
     let auxv = crate::loader::linux::build_auxv(&program, PageSize::SIZE_4K.bytes());
     let argv_refs: alloc::vec::Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
@@ -1065,7 +999,6 @@ fn handle_execve(
     frame.rip = program.entry.as_raw() as u64;
     frame.rsp = stack_pointer.as_raw() as u64;
     frame.regs.rax = 0;
-    crate::println!("[execve] new rsp={:#x}", frame.rsp);
     DispatchResult::Completed(Ok(0))
 }
 
@@ -1147,10 +1080,7 @@ fn handle_arch_prctl(invocation: &SyscallInvocation) -> SysResult {
     }
 
     // NOTE: This assumes FS base is part of the thread context and restored on context switches.
-    crate::println!("[arch_prctl] ARCH_SET_FS requested={:#x}", value);
     crate::arch::x86_64::set_fs_base(value);
-    let fs_base = x86_64::registers::model_specific::FsBase::read().as_u64();
-    crate::println!("[arch_prctl] FS base now={:#x}", fs_base);
     Ok(0)
 }
 

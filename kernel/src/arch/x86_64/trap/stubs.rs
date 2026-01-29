@@ -282,29 +282,6 @@ pub(super) const EXTERNAL_INTERRUPT_STUBS: [unsafe extern "C" fn() -> !;
 
 #[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn dispatch_trap(vector: u8, frame: *mut TrapFrame, has_error: u8) {
-    if vector == 14 {
-        let frame_ptr = frame as *const u64;
-        let cpu_frame_ptr = (frame as *const u8).wrapping_add(ORIGINAL_ERROR_OFFSET) as *const u64;
-        let mut cpu_words = [0u64; 6];
-        for (idx, slot) in cpu_words.iter_mut().enumerate() {
-            *slot = core::ptr::read_volatile(cpu_frame_ptr.add(idx));
-        }
-        crate::println!(
-            "[#PF] frame_ptr={:#x} cpu_frame_ptr={:#x} has_error={}",
-            frame_ptr as usize,
-            cpu_frame_ptr as usize,
-            has_error
-        );
-        crate::println!(
-            "[#PF] cpu_frame qwords: {:016x} {:016x} {:016x} {:016x} {:016x} {:016x}",
-            cpu_words[0],
-            cpu_words[1],
-            cpu_words[2],
-            cpu_words[3],
-            cpu_words[4],
-            cpu_words[5]
-        );
-    }
     let frame = unsafe { &mut *frame };
     let info = build_trap_info(vector, has_error != 0);
     <Arch as ArchTrap>::dispatch_trap(info, frame);

@@ -9,7 +9,7 @@ use crate::mem::paging::{MapError, PhysMapper, TranslationError};
 use super::LinuxLoadError;
 use super::add_base;
 use super::elf::{ElfFile, ProgramSegment};
-use super::patch::{dump_range, rewrite_syscalls_in_table, verify_rewrite_coverage};
+use super::patch::rewrite_syscalls_in_table;
 use alloc::vec::Vec;
 
 pub struct MappedSegment {
@@ -68,13 +68,6 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
 
     let page_size = P::page_size();
     let seg_vaddr = add_base(base, seg.vaddr)?;
-    crate::println!(
-        "[loader] map segment vaddr={:#x} filesz={:#x} memsz={:#x} perms={:?}",
-        seg_vaddr.as_raw(),
-        seg.file_size,
-        seg.mem_size,
-        target_perms
-    );
     let start = align_down(seg_vaddr.as_raw(), page_size);
     let end = align_up(
         seg_vaddr
@@ -103,11 +96,6 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     zero_mapped(table, VirtAddr::new(start), mapped_len, page_size)?;
 
     // Copy file-backed bytes.
-    crate::println!(
-        "[loader] populate segment range={:#x}-{:#x}",
-        start,
-        end
-    );
     let file_range = seg
         .offset
         .checked_add(seg.file_size)
@@ -119,11 +107,6 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
 
     // Zero BSS.
     if seg.mem_size > seg.file_size {
-        crate::println!(
-            "[loader] zero bss vaddr={:#x} len={:#x}",
-            seg_vaddr.as_raw() + seg.file_size,
-            seg.mem_size - seg.file_size
-        );
         let bss_start = seg_vaddr
             .as_raw()
             .checked_add(seg.file_size)
@@ -133,11 +116,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     }
 
     if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
-        crate::println!("[loader] rewrite syscalls in executable segment");
-        debug_dump_rip_window(seg_vaddr, seg.file_size, table, "pre-rewrite");
         rewrite_syscalls_in_table(seg_vaddr, seg.file_size, table).map_err(LinuxLoadError::from)?;
-        verify_rewrite_coverage(seg_vaddr, seg.file_size, table).map_err(LinuxLoadError::from)?;
-        debug_dump_rip_window(seg_vaddr, seg.file_size, table, "post-rewrite");
     }
 
     Ok(Some(MappedSegment {
@@ -146,33 +125,6 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
         perms: target_perms,
         page_size,
     }))
-}
-
-fn debug_dump_rip_window<T: PageTableOps>(
-    seg_start: VirtAddr,
-    seg_size: usize,
-    table: &T,
-    label: &str,
-) {
-    const RIP_DUMP_START: usize = 0x4d7390;
-    const RIP_DUMP_END: usize = 0x4d73d0;
-    if RIP_DUMP_START >= RIP_DUMP_END {
-        return;
-    }
-    let seg_end = match seg_start.as_raw().checked_add(seg_size) {
-        Some(end) => end,
-        None => return,
-    };
-    if seg_start.as_raw() <= RIP_DUMP_START && seg_end >= RIP_DUMP_END {
-        let len = RIP_DUMP_END - RIP_DUMP_START;
-        if let Err(err) = dump_range(VirtAddr::new(RIP_DUMP_START), len, table, label) {
-            crate::println!(
-                "[loader] dump {label} failed start={:#x} err={:?}",
-                RIP_DUMP_START,
-                err
-            );
-        }
-    }
 }
 
 fn copy_into_mapped<T: PageTableOps>(

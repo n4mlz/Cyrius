@@ -23,7 +23,6 @@ const DT_RELRENT: i64 = 37;
 
 const R_X86_64_RELATIVE: u32 = 8;
 
-
 #[derive(Debug, Default)]
 pub struct DynamicInfo {
     pub rela_addr: Option<VirtAddr>,
@@ -141,44 +140,6 @@ pub fn read_dynamic_info<T: PageTableOps>(
     if info.relr_size > 0 && info.relr_addr.is_none() {
         return Err(LinuxLoadError::InvalidElf("DT_RELR missing"));
     }
-    if let (Some(rela_addr), true) = (info.rela_addr, info.rela_size > 0) {
-        crate::println!(
-            "[loader] rela addr={:#x} size={:#x} ent={:#x}",
-            rela_addr.as_raw(),
-            info.rela_size,
-            info.rela_ent
-        );
-        let entry_size = core::mem::size_of::<Elf64Rela>();
-        if entry_size > 0 && info.rela_size.is_multiple_of(entry_size) {
-            let count = (info.rela_size / entry_size).min(3);
-            for idx in 0..count {
-                let entry_addr = match rela_addr.checked_add(idx * entry_size) {
-                    Some(addr) => addr,
-                    None => break,
-                };
-                let r_offset = match user.read_u64(entry_addr) {
-                    Ok(val) => val,
-                    Err(_) => break,
-                };
-                let r_info = match user.read_u64(entry_addr.checked_add(8).unwrap_or(entry_addr)) {
-                    Ok(val) => val,
-                    Err(_) => break,
-                };
-                let r_addend =
-                    match user.read_u64(entry_addr.checked_add(16).unwrap_or(entry_addr)) {
-                        Ok(val) => val as i64,
-                        Err(_) => break,
-                    };
-                crate::println!(
-                    "[loader] rela[{}] r_offset={:#x} r_info={:#x} r_addend={:#x}",
-                    idx,
-                    r_offset,
-                    r_info,
-                    r_addend
-                );
-            }
-        }
-    }
     Ok(info)
 }
 
@@ -188,10 +149,6 @@ pub fn apply_relocations<T: PageTableOps>(
     info: &DynamicInfo,
     segments: &[MappedSegment],
 ) -> Result<(), LinuxLoadError> {
-    crate::println!(
-        "[loader] apply relocations base={:#x}",
-        base.as_raw()
-    );
     apply_rel(table, base, info, segments)?;
     apply_rela(table, base, info, segments)?;
     apply_relr(table, base, info, segments)?;
@@ -209,7 +166,15 @@ fn apply_rel<T: PageTableOps>(
         Some(addr) => addr,
         None => return Ok(()),
     };
-    apply_rel_table(table, base, rel_addr, info.rel_size, info.rel_ent, segments, "REL")
+    apply_rel_table(
+        table,
+        base,
+        rel_addr,
+        info.rel_size,
+        info.rel_ent,
+        segments,
+        "REL",
+    )
 }
 
 fn apply_rela<T: PageTableOps>(
@@ -222,7 +187,15 @@ fn apply_rela<T: PageTableOps>(
         Some(addr) => addr,
         None => return Ok(()),
     };
-    apply_rela_table(table, base, rela_addr, info.rela_size, info.rela_ent, segments, "RELA")
+    apply_rela_table(
+        table,
+        base,
+        rela_addr,
+        info.rela_size,
+        info.rela_ent,
+        segments,
+        "RELA",
+    )
 }
 
 fn apply_jmprel<T: PageTableOps>(
@@ -303,17 +276,6 @@ fn apply_rela_table<T: PageTableOps>(
         let raw_offset = usize::try_from(r_offset).map_err(|_| LinuxLoadError::SizeOverflow)?;
         let target = resolve_reloc_target(base, raw_offset, segments)?;
         let value_raw = resolve_symbol_reloc(base, reloc_type, sym, r_addend, segments)?;
-        let value_addr = VirtAddr::new(value_raw as usize);
-        if !is_mapped(value_addr, segments) {
-            crate::println!(
-                "[loader] rela[{}] unmapped value r_offset={:#x} target={:#x} addend={:#x} value={:#x}",
-                idx,
-                r_offset,
-                target.as_raw(),
-                r_addend,
-                value_raw
-            );
-        }
         user.write_u64(target, value_raw)?;
     }
 
@@ -432,10 +394,7 @@ fn apply_relative_at<T: PageTableOps>(
     Ok(())
 }
 
-fn user_read_u64<T: PageTableOps>(
-    table: &T,
-    addr: VirtAddr,
-) -> Result<u64, LinuxLoadError> {
+fn user_read_u64<T: PageTableOps>(table: &T, addr: VirtAddr) -> Result<u64, LinuxLoadError> {
     let user = UserMemoryAccess::new(table);
     user.read_u64(addr).map_err(LinuxLoadError::from)
 }
@@ -445,9 +404,7 @@ fn resolve_reloc_target(
     raw: usize,
     segments: &[MappedSegment],
 ) -> Result<VirtAddr, LinuxLoadError> {
-    let base_target = base
-        .checked_add(raw)
-        .ok_or(LinuxLoadError::SizeOverflow)?;
+    let base_target = base.checked_add(raw).ok_or(LinuxLoadError::SizeOverflow)?;
     if is_mapped(base_target, segments) {
         return Ok(base_target);
     }
@@ -522,11 +479,6 @@ pub fn apply_gnu_relro<T: PageTableOps>(
     let relro_end = relro_start
         .checked_add(relro.mem_size)
         .ok_or(LinuxLoadError::SizeOverflow)?;
-    crate::println!(
-        "[loader] relro range={:#x}-{:#x}",
-        relro_start.as_raw(),
-        relro_end.as_raw()
-    );
     let page_size = segments
         .first()
         .map(|seg| seg.page_size)

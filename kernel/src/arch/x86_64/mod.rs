@@ -99,10 +99,7 @@ pub fn halt() {
 }
 
 #[cfg(test)]
-pub(crate) fn arm_user_pf_frame_check(
-    pid: crate::process::ProcessId,
-    expected_fault_addr: u64,
-) {
+pub(crate) fn arm_user_pf_frame_check(pid: crate::process::ProcessId, expected_fault_addr: u64) {
     trap::arm_user_pf_frame_check(pid, expected_fault_addr);
 }
 

@@ -80,10 +80,7 @@ pub(super) fn build_trap_info(vector: u8, has_error: bool) -> TrapInfo {
 }
 
 #[cfg(test)]
-pub(crate) fn arm_user_pf_frame_check(
-    pid: crate::process::ProcessId,
-    expected_fault_addr: u64,
-) {
+pub(crate) fn arm_user_pf_frame_check(pid: crate::process::ProcessId, expected_fault_addr: u64) {
     handlers::arm_user_pf_frame_check(pid, expected_fault_addr);
 }
 

@@ -122,22 +122,10 @@ pub fn control_fd(
     let entry = match process.fd_table().entry(fd) {
         Ok(entry) => entry,
         Err(_) => {
-            if request.command == 0x5410 {
-                crate::println!("[proc-fs] ioctl fd not found pid={} fd={}", pid, fd);
-            }
             return Err(ControlError::Invalid);
         }
     };
-    let result = entry.file().ioctl(request);
-    if request.command == 0x5410 {
-        crate::println!(
-            "[proc-fs] ioctl fd={} cmd=0x{:x} -> {:?}",
-            fd,
-            request.command,
-            result
-        );
-    }
-    result
+    entry.file().ioctl(request)
 }
 
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
