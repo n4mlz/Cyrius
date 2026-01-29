@@ -14,7 +14,7 @@ mod spec;
 pub mod state;
 mod table;
 
-pub use context::ContainerContext;
+pub use context::{ContainerContext, Uts};
 pub use error::ContainerError;
 pub use repository::ContainerRepository;
 pub use spec::{SpecLoader, SpecMetadata};

@@ -15,6 +15,8 @@
   `bundlePath`, `annotations`) and is paired with `ContainerContext` inside a single lock.
 - `ContainerMutable` also keeps a process list for the container; the init process PID is mirrored
   in `ContainerState::pid` so OCI `state` reports it consistently.
+- `ContainerContext` stores the container VFS plus per-container UTS data (hostname/domainname
+  from the OCI spec) so `uname` can reflect the bundle configuration.
 - The parsed OCI `Spec` (`config.json`) is stored immutably as `Arc<Spec>` so it can be shared
   without additional locking.
 

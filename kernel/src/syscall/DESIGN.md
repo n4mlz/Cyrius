@@ -24,7 +24,7 @@
   `execve`, `wait4`, `arch_prctl`, `ioctl` (routed through `ControlOps`), `fcntl` (dup + FD_CLOEXEC),
   and basic
   process/session metadata (`getppid`, `getpgrp`, `getpgid`, `setpgid`, `getsid`, `setsid`), plus
-  `uname`, `geteuid`, and stubbed signal
+  `uname` (UTS fields sourced from the container context), `geteuid`, and stubbed signal
   calls. Unsupported numbers map to `ENOSYS`, while unsupported ioctls map to `ENOTTY`.
 - `/dev/tty` open assigns the global controlling TTY when the caller is a session leader and no
   controlling TTY is present yet; this is a minimal bridge until full tty/session semantics land.

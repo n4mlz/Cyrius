@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
+use crate::container::Uts;
 use crate::fs::{DirEntry, NodeKind};
 use crate::interrupt::INTERRUPTS;
 use crate::mem::addr::{
@@ -686,7 +687,10 @@ fn handle_uname(invocation: &SyscallInvocation) -> SysResult {
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
-    let uts = LinuxUtsName::new();
+    let uts = match process.domain() {
+        crate::process::ProcessDomain::Container(container) => container.context().uts(),
+        _ => Uts::default_host(),
+    };
     let dst = VirtAddr::new(addr as usize);
     process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
@@ -1598,52 +1602,6 @@ struct LinuxWinsize {
     ws_col: u16,
     ws_xpixel: u16,
     ws_ypixel: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct LinuxUtsName {
-    sysname: [u8; 65],
-    nodename: [u8; 65],
-    release: [u8; 65],
-    version: [u8; 65],
-    machine: [u8; 65],
-    domainname: [u8; 65],
-}
-
-impl LinuxUtsName {
-    fn new() -> Self {
-        fn write_field(dst: &mut [u8; 65], src: &[u8]) {
-            let len = dst.len().saturating_sub(1).min(src.len());
-            dst[..len].copy_from_slice(&src[..len]);
-            dst[len] = 0;
-        }
-
-        let mut uts = Self {
-            sysname: [0; 65],
-            nodename: [0; 65],
-            release: [0; 65],
-            version: [0; 65],
-            machine: [0; 65],
-            domainname: [0; 65],
-        };
-        write_field(&mut uts.sysname, b"Linux");
-        write_field(&mut uts.nodename, b"cyrius");
-        write_field(&mut uts.release, b"5.10.0");
-        write_field(&mut uts.version, b"cyrius");
-        write_field(&mut uts.machine, b"x86_64");
-        write_field(&mut uts.domainname, b"");
-        uts
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                (self as *const LinuxUtsName) as *const u8,
-                core::mem::size_of::<LinuxUtsName>(),
-            )
-        }
-    }
 }
 
 struct KernelControlAccess;

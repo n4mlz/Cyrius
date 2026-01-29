@@ -669,9 +669,10 @@ mod tests {
                 annotations: Default::default(),
             },
             oci_spec::runtime::Spec::default(),
-            crate::container::ContainerContext::new(Arc::new(crate::fs::Vfs::new(
-                crate::fs::memfs::MemDirectory::new(),
-            ))),
+            crate::container::ContainerContext::new(
+                Arc::new(crate::fs::Vfs::new(crate::fs::memfs::MemDirectory::new())),
+                crate::container::Uts::default_host(),
+            ),
         ));
         let pid = PROCESS_TABLE
             .create_user_process(

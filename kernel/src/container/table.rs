@@ -45,7 +45,7 @@ impl ContainerTable {
             annotations: meta.annotations,
         };
         let vfs = SpecLoader::build_container_vfs(&bundle, &spec)?;
-        let context = ContainerContext::new(vfs);
+        let context = ContainerContext::new(vfs, crate::container::Uts::from_spec(&spec));
         let container = Arc::new(Container::new(state, spec, context));
 
         self.repo.insert(id, container)
