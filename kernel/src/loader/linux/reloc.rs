@@ -150,6 +150,10 @@ pub fn apply_relocations<T: PageTableOps>(
     info: &DynamicInfo,
     segments: &[MappedSegment],
 ) -> Result<(), LinuxLoadError> {
+    crate::println!(
+        "[loader] apply relocations base={:#x}",
+        base.as_raw()
+    );
     apply_rel(table, base, info, segments)?;
     apply_rela(table, base, info, segments)?;
     apply_relr(table, base, info, segments)?;
@@ -398,10 +402,6 @@ fn resolve_reloc_target(
     if is_mapped(base_target, segments) {
         return Ok(base_target);
     }
-    let abs_target = VirtAddr::new(raw);
-    if is_mapped(abs_target, segments) {
-        return Ok(abs_target);
-    }
     Err(LinuxLoadError::RelocationTargetOutOfRange)
 }
 
@@ -436,12 +436,8 @@ fn resolve_relative_value(
         .checked_add(addend_usize)
         .ok_or(LinuxLoadError::SizeOverflow)?;
     let base_addr = VirtAddr::new(base_value);
-    if is_mapped(base_addr, segments) {
-        return Ok(base_value as u64);
-    }
-    let abs_addr = VirtAddr::new(addend_usize);
-    if is_mapped(abs_addr, segments) {
-        return Ok(addend_usize as u64);
+    if !is_mapped(base_addr, segments) {
+        return Err(LinuxLoadError::RelocationTargetOutOfRange);
     }
     Ok(base_value as u64)
 }
@@ -477,6 +473,11 @@ pub fn apply_gnu_relro<T: PageTableOps>(
     let relro_end = relro_start
         .checked_add(relro.mem_size)
         .ok_or(LinuxLoadError::SizeOverflow)?;
+    crate::println!(
+        "[loader] relro range={:#x}-{:#x}",
+        relro_start.as_raw(),
+        relro_end.as_raw()
+    );
     let page_size = segments
         .first()
         .map(|seg| seg.page_size)
