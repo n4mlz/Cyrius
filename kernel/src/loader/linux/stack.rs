@@ -5,6 +5,10 @@ use crate::mem::addr::{Addr, VirtAddr, align_down};
 use crate::mem::paging::PageTableOps;
 use crate::mem::user::{UserAccessError, UserMemoryAccess};
 
+use super::AT_RANDOM;
+
+const AT_RANDOM_LEN: usize = 16;
+
 #[derive(Clone, Copy)]
 pub struct AuxvEntry {
     pub key: u64,
@@ -18,6 +22,7 @@ pub enum StackBuildError {
     UnsupportedPageSize,
 }
 
+/// Build a minimal stack that is not Linux ABI-complete; intended for simple tests only.
 pub fn initialise_minimal_stack<T: PageTableOps>(
     table: &T,
     stack_top: VirtAddr,
@@ -68,10 +73,30 @@ pub fn initialise_stack_with_args(
 
     sp = align_down(sp, 16);
 
-    // auxv (terminate with AT_NULL)
+    // TODO: Replace zeroed bytes with a kernel RNG once available.
+    let random_ptr = {
+        sp = sp
+            .checked_sub(AT_RANDOM_LEN)
+            .ok_or(StackBuildError::Overflow)?;
+        unsafe {
+            core::ptr::write_bytes(sp as *mut u8, 0, AT_RANDOM_LEN);
+        }
+        sp as u64
+    };
+
+    let mut auxv_entries: Vec<AuxvEntry> = auxv.to_vec();
+    if !auxv_entries.iter().any(|entry| entry.key == AT_RANDOM) {
+        auxv_entries.push(AuxvEntry {
+            key: AT_RANDOM,
+            value: random_ptr,
+        });
+    }
+
+    sp = align_down(sp, 16);
+
     push_u64(&mut sp, 0)?;
     push_u64(&mut sp, 0)?;
-    for entry in auxv.iter().rev() {
+    for entry in auxv_entries.iter().rev() {
         push_u64(&mut sp, entry.value)?;
         push_u64(&mut sp, entry.key)?;
     }
@@ -117,9 +142,31 @@ pub fn initialise_stack_with_args_in_table<T: PageTableOps>(
 
     sp = align_down(sp, 16);
 
+    // TODO: Replace zeroed bytes with a kernel RNG once available.
+    let random_ptr = {
+        sp = sp
+            .checked_sub(AT_RANDOM_LEN)
+            .ok_or(StackBuildError::Overflow)?;
+        let addr = VirtAddr::new(sp);
+        let zeros = [0u8; AT_RANDOM_LEN];
+        user.write_bytes(addr, &zeros)
+            .map_err(StackBuildError::from)?;
+        sp as u64
+    };
+
+    let mut auxv_entries: Vec<AuxvEntry> = auxv.to_vec();
+    if !auxv_entries.iter().any(|entry| entry.key == AT_RANDOM) {
+        auxv_entries.push(AuxvEntry {
+            key: AT_RANDOM,
+            value: random_ptr,
+        });
+    }
+
+    sp = align_down(sp, 16);
+
     push_u64_in_table(&user, &mut sp, 0)?;
     push_u64_in_table(&user, &mut sp, 0)?;
-    for entry in auxv.iter().rev() {
+    for entry in auxv_entries.iter().rev() {
         push_u64_in_table(&user, &mut sp, entry.value)?;
         push_u64_in_table(&user, &mut sp, entry.key)?;
     }

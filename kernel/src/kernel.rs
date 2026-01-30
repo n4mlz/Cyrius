@@ -40,11 +40,20 @@ const BOOTLOADER_CONFIG: BootloaderConfig = {
     config
 };
 
+#[cfg(test)]
+const TEST_BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // Increase stack size for tests to avoid stack overflow
+    config.kernel_stack_size = 256 * 1024; // 256KB
+    config
+};
+
 #[cfg(not(test))]
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 #[cfg(test)]
-entry_point!(test_kernel_main, config = &BOOTLOADER_CONFIG);
+entry_point!(test_kernel_main, config = &TEST_BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init::init_runtime(boot_info);

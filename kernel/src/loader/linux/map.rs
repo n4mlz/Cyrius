@@ -1,5 +1,7 @@
 use crate::arch::api::{ArchLinuxElfPlatform, ArchPageTableAccess};
-use crate::mem::addr::{MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up};
+use crate::mem::addr::{
+    MemPerm, Page, PageSize, PhysAddr, VirtAddr, VirtIntoPtr, align_down, align_up,
+};
 use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, PageTableOps};
 use crate::mem::paging::{MapError, PhysMapper, TranslationError};
@@ -76,6 +78,8 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     );
 
     let page_sz = PageSize(page_size);
+    // NOTE: This loader assumes a fresh address space and does not validate
+    // that the ELF virtual ranges avoid existing user mappings.
     clear_segment_range(table, allocator, start, end, page_sz);
     for addr in (start..end).step_by(page_size) {
         let virt = VirtAddr::new(addr);
@@ -86,6 +90,11 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
         table.map(page, frame, map_perms, allocator)?;
     }
 
+    let mapped_len = end.checked_sub(start).ok_or(LinuxLoadError::SizeOverflow)?;
+    // Zero the full mapped range to avoid leaving uninitialized bytes in
+    // non-page-aligned PT_LOAD segments.
+    zero_mapped(table, VirtAddr::new(start), mapped_len, page_size)?;
+
     // Copy file-backed bytes.
     let file_range = seg
         .offset
@@ -94,7 +103,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
     let file_slice = image
         .get(seg.offset..file_range)
         .ok_or(LinuxLoadError::InvalidElf("segment out of file bounds"))?;
-    copy_into_mapped(table, seg_vaddr, file_slice)?;
+    copy_into_mapped(table, seg_vaddr, file_slice, page_size)?;
 
     // Zero BSS.
     if seg.mem_size > seg.file_size {
@@ -103,7 +112,7 @@ fn map_single_segment<T: PageTableOps, A: FrameAllocator, P: ArchLinuxElfPlatfor
             .checked_add(seg.file_size)
             .ok_or(LinuxLoadError::SizeOverflow)?;
         let bss_len = seg.mem_size - seg.file_size;
-        zero_mapped(table, VirtAddr::new(bss_start), bss_len)?;
+        zero_mapped(table, VirtAddr::new(bss_start), bss_len, page_size)?;
     }
 
     if target_perms.contains(MemPerm::EXEC) && seg.file_size > 0 {
@@ -122,21 +131,19 @@ fn copy_into_mapped<T: PageTableOps>(
     table: &T,
     dst: VirtAddr,
     src: &[u8],
+    page_size: usize,
 ) -> Result<(), LinuxLoadError> {
-    let mapper = manager::phys_mapper();
     let mut offset = 0usize;
     while offset < src.len() {
         let addr = dst
             .as_raw()
             .checked_add(offset)
             .ok_or(LinuxLoadError::SizeOverflow)?;
-        let virt = VirtAddr::new(addr);
-        let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
-        let page_offset = addr % PageSize::SIZE_4K.bytes();
-        let len = (PageSize::SIZE_4K.bytes() - page_offset).min(src.len() - offset);
+        let page_offset = addr % page_size;
+        let len = (page_size - page_offset).min(src.len() - offset);
+        let ptr = mapped_ptr(table, addr, page_size)?;
         unsafe {
-            let ptr = mapper.phys_to_virt(phys);
-            core::ptr::copy_nonoverlapping(src[offset..].as_ptr(), ptr.into_mut_ptr(), len);
+            core::ptr::copy_nonoverlapping(src[offset..].as_ptr(), ptr, len);
         }
         offset += len;
     }
@@ -147,25 +154,40 @@ fn zero_mapped<T: PageTableOps>(
     table: &T,
     dst: VirtAddr,
     len: usize,
+    page_size: usize,
 ) -> Result<(), LinuxLoadError> {
-    let mapper = manager::phys_mapper();
     let mut offset = 0usize;
     while offset < len {
         let addr = dst
             .as_raw()
             .checked_add(offset)
             .ok_or(LinuxLoadError::SizeOverflow)?;
-        let virt = VirtAddr::new(addr);
-        let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
-        let page_offset = addr % PageSize::SIZE_4K.bytes();
-        let chunk = (PageSize::SIZE_4K.bytes() - page_offset).min(len - offset);
+        let page_offset = addr % page_size;
+        let chunk = (page_size - page_offset).min(len - offset);
+        let ptr = mapped_ptr(table, addr, page_size)?;
         unsafe {
-            let ptr = mapper.phys_to_virt(phys);
-            core::ptr::write_bytes(ptr.into_mut_ptr(), 0, chunk);
+            core::ptr::write_bytes(ptr, 0, chunk);
         }
         offset += chunk;
     }
     Ok(())
+}
+
+fn mapped_ptr<T: PageTableOps>(
+    table: &T,
+    addr: usize,
+    page_size: usize,
+) -> Result<*mut u8, LinuxLoadError> {
+    let virt = VirtAddr::new(addr);
+    let phys = table.translate(virt).map_err(LinuxLoadError::from)?;
+    let page_offset = addr % page_size;
+    let base = align_down(phys.as_raw(), page_size);
+    let phys_addr = base
+        .checked_add(page_offset)
+        .ok_or(LinuxLoadError::SizeOverflow)?;
+    let mapper = manager::phys_mapper();
+    let ptr = unsafe { mapper.phys_to_virt(PhysAddr::new(phys_addr)).into_mut_ptr() };
+    Ok(ptr)
 }
 
 impl From<TranslationError> for LinuxLoadError {

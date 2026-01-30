@@ -5,15 +5,17 @@
 - Own the GDT/TSS, IDT, and the hand-written trap stubs that translate hardware events into the architecture-neutral trap dispatcher.
 
 ## Descriptor Tables
-- `gdt` installs both ring-0 and ring-3 segment descriptors alongside the TSS entry, allocating three IST stacks (NMI, double-fault, machine-check) from a statically mapped buffer.
-- `set_privilege_stack` updates `TSS.rsp0` on every context switch so user→kernel transitions enter on the scheduled thread's kernel stack, while a fallback ring-0 stack remains available for bootstrap paths.
+- `gdt` installs both ring-0 and ring-3 segment descriptors alongside the TSS entry, allocating three IST stacks (NMI, double-fault, machine-check) from a statically mapped buffer (single-CPU only until per-CPU storage exists).
+- `set_privilege_stack` updates `TSS.rsp0` on every context switch so user→kernel transitions enter on the scheduled thread's kernel stack, while a fallback ring-0 stack remains available for bootstrap paths. Updates must occur with interrupts disabled on the current CPU.
 - `idt` populates exception vectors with dedicated stubs and assigns IST indices where architectural guidance recommends hardened stacks.
 - The IDT exposes vector `0x80` with DPL=3, providing an initial software interrupt entry point for user mode before the syscall MSRs are wired up. The vector is registered with the syscall dispatcher so `int 0x80` routes into ABI-aware handling.
 - `init()` loads both tables during early boot and must run per-CPU prior to enabling interrupts.
 - The syscall software interrupt (vector `0x80`) is registered in `arch/x86_64/syscall.rs`, which forwards to the generic syscall dispatcher to keep ABI logic architecture-neutral.
 
 ## Trap Stubs
-- Naked assembly routines in `stubs` save general-purpose registers, normalise error codes, maintain stack alignment for `call`, and end with `iretq`.
+- Naked assembly routines in `stubs` clear DF, save general-purpose registers, normalise error codes, maintain stack alignment for `call`, and end with `iretq`.
+- The exception table must match the architectural error-code list; a mismatch corrupts the stack frame.
+- The kernel is built with red-zone disabled, and SIMD/FPU usage in kernel mode is currently prohibited until save/restore support is added.
 - Each stub invokes `dispatch_trap`, which constructs a `TrapInfo` (vector, origin, description) and hands control to `ArchTrap::dispatch_trap` so the architecture layer can route through the generic trap handler without hard-wiring the entry point.
 - Timer interrupts reuse the same mechanism, so the scheduler observes consistent metadata regardless of source.
 
@@ -27,9 +29,10 @@
 - `thread::Context` derives from a trap frame after interrupts, allowing seamless handoff between interrupt context and scheduled threads.
 
 ## Exception Handlers
-- `handlers` provides the architecture-specific fast path for #PF/#GP/#DF, decoding hardware error codes and emitting structured diagnostics before panicking.
+- `handlers` provides the architecture-specific fast path for #PF/#GP/#DF, decoding hardware error codes and emitting structured diagnostics before panicking. Double-fault handling avoids logging and halts to reduce re-entrancy risk.
 - The dispatcher in `mod.rs` delegates to these helpers via `ArchTrap::handle_exception`; returning `true` suppresses the generic logging path.
 - Page-fault handling records the CR2 fault address and access type bits so future user-mode recovery logic has the required context.
+- While `SYSCALL/SYSRET` is not wired up, #UD in user mode checks for the `0f 05` opcode and emulates a syscall as a temporary workaround; kernel-mode #UD remains fatal.
 
 - Expand syscall handling beyond `int 0x80` by enabling `SYSCALL/SYSRET` once MSR management is implemented.
 - Incorporate per-CPU IST buffers to support SMP and avoid contention on the global static region.

@@ -66,14 +66,51 @@ pub fn read_fd(pid: ProcessId, fd: Fd, buf: &mut [u8]) -> Result<usize, VfsError
     process.fd_table().read(fd, buf)
 }
 
+pub fn read_dir_fd(pid: ProcessId, fd: Fd) -> Result<Vec<DirEntry>, VfsError> {
+    let process = process_handle(pid)?;
+    let entry = process.fd_table().entry(fd)?;
+    entry.file().readdir()
+}
+
+pub fn dir_offset(pid: ProcessId, fd: Fd) -> Result<u64, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().dir_offset(fd)
+}
+
+pub fn set_dir_offset(pid: ProcessId, fd: Fd, offset: u64) -> Result<(), VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().set_dir_offset(fd, offset)
+}
+
 pub fn write_fd(pid: ProcessId, fd: Fd, data: &[u8]) -> Result<usize, VfsError> {
     let process = process_handle(pid)?;
     process.fd_table().write(fd, data)
 }
 
+pub fn seek_fd(pid: ProcessId, fd: Fd, offset: i64, whence: u32) -> Result<u64, VfsError> {
+    let process = process_handle(pid)?;
+    let entry = process.fd_table().entry(fd)?;
+    entry.file().seek(offset, whence)
+}
+
 pub fn close_fd(pid: ProcessId, fd: Fd) -> Result<(), VfsError> {
     let process = process_handle(pid)?;
     process.fd_table().close(fd)
+}
+
+pub fn dup_fd_min(pid: ProcessId, fd: Fd, min: Fd, close_on_exec: bool) -> Result<Fd, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().dup_min(fd, min, close_on_exec)
+}
+
+pub fn get_fd_flags(pid: ProcessId, fd: Fd) -> Result<u32, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().get_fd_flags(fd)
+}
+
+pub fn set_fd_flags(pid: ProcessId, fd: Fd, flags: u32) -> Result<(), VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().set_fd_flags(fd, flags)
 }
 
 pub fn control_fd(
@@ -82,10 +119,12 @@ pub fn control_fd(
     request: &ControlRequest<'_>,
 ) -> Result<u64, ControlError> {
     let process = process_handle(pid).map_err(|_| ControlError::Invalid)?;
-    let entry = process
-        .fd_table()
-        .entry(fd)
-        .map_err(|_| ControlError::Invalid)?;
+    let entry = match process.fd_table().entry(fd) {
+        Ok(entry) => entry,
+        Err(_) => {
+            return Err(ControlError::Invalid);
+        }
+    };
     entry.file().ioctl(request)
 }
 
@@ -109,6 +148,29 @@ pub fn stat_path(pid: ProcessId, raw_path: &str) -> Result<crate::fs::NodeStat, 
     let process = process_handle(pid)?;
     let abs = Path::resolve(raw_path, &process.cwd())?;
     with_process_vfs(&process, |vfs| vfs.stat_absolute(&abs))
+}
+
+pub fn stat_path_no_follow(
+    pid: ProcessId,
+    raw_path: &str,
+) -> Result<crate::fs::NodeStat, VfsError> {
+    let process = process_handle(pid)?;
+    let abs = Path::resolve(raw_path, &process.cwd())?;
+    if abs.components().is_empty() {
+        return with_process_vfs(&process, |vfs| vfs.stat_absolute(&abs));
+    }
+    let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
+    let name = abs
+        .components()
+        .last()
+        .ok_or(VfsError::InvalidPath)?
+        .clone();
+    with_process_vfs(&process, |vfs| {
+        let dir = vfs.resolve_node(&parent)?;
+        let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
+        let node = dir_view.lookup(&name)?;
+        node.stat()
+    })
 }
 
 pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {

@@ -4,6 +4,7 @@ use alloc::string::{String, ToString};
 
 use crate::arch::api::ArchPageTableAccess;
 use crate::fs::{Path, VfsError};
+use crate::interrupt::INTERRUPTS;
 use crate::loader::linux::{self, LinuxLoadError};
 use crate::process::fs as proc_fs;
 use crate::process::{PROCESS_TABLE, ProcessError, ProcessId};
@@ -96,6 +97,8 @@ fn wait_for_exit(pid: ProcessId) {
         .map(|count| count > 0)
         .unwrap_or(false)
     {
+        // Ensure interrupts are enabled so HALT can resume.
+        INTERRUPTS.enable();
         #[cfg(target_arch = "x86_64")]
         crate::arch::x86_64::halt();
         #[cfg(not(target_arch = "x86_64"))]
@@ -112,11 +115,14 @@ fn absolute_path(origin_pid: ProcessId, raw: &str) -> Result<String, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arch::api::ArchThread;
+    use crate::arch::x86_64::{arm_user_pf_frame_check, user_pf_frame_check_passed};
     use crate::device::tty::global_tty;
     use crate::fs::DirNode;
     use crate::fs::force_replace_root;
     use crate::fs::memfs::MemDirectory;
     use crate::interrupt::{INTERRUPTS, SYSTEM_TIMER, TimerTicks};
+    use crate::loader::linux;
     use crate::println;
     use crate::process::PROCESS_TABLE;
     use crate::test::kernel_test_case;
@@ -134,6 +140,11 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../target/xtask-assets/linux-syscall-child.elf"
     ));
+    const LINUX_PAGE_FAULT_ELF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../target/xtask-assets/linux-page-fault.elf"
+    ));
+    const LINUX_PAGE_FAULT_ADDR: u64 = 0xdeadbeef000;
 
     #[kernel_test_case]
     fn linux_binary_reads_stdin_and_file() {
@@ -197,6 +208,9 @@ mod tests {
             .open(crate::fs::OpenOptions::new(0))
             .expect("open stat.txt");
         let _ = handle.write(b"STATDATA").expect("write stat.txt");
+        let _ = root
+            .create_symlink("stat-link", "stat.txt")
+            .expect("create stat-link");
 
         let adv = root.create_file("adv").expect("create adv");
         let handle = adv.open(crate::fs::OpenOptions::new(0)).expect("open adv");
@@ -217,11 +231,79 @@ mod tests {
         let output = tty.drain_output();
         assert_eq!(
             output,
-            b"WRITEV\nSTAT:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+            b"WRITEV\nSTAT:OK\nLSTAT:OK\nDENTS:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
         );
 
         if started {
             SCHEDULER.shutdown();
+        }
+    }
+
+    #[kernel_test_case]
+    fn linux_page_fault_trap_frame_matches_cpu_frame() {
+        println!("[test] linux_page_fault_trap_frame_matches_cpu_frame");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+        let started = match SCHEDULER.start() {
+            Ok(()) => true,
+            Err(SchedulerError::AlreadyStarted) => false,
+            Err(err) => panic!("scheduler start failed: {:?}", err),
+        };
+
+        let root = MemDirectory::new();
+        force_replace_root(root.clone());
+
+        let bin = root.create_file("pf").expect("create page-fault fixture");
+        let handle = bin.open(crate::fs::OpenOptions::new(0)).expect("open pf");
+        let _ = handle
+            .write(LINUX_PAGE_FAULT_ELF)
+            .expect("write page-fault fixture");
+
+        let pid = PROCESS_TABLE
+            .create_user_process("linux-proc", crate::process::ProcessDomain::HostLinux)
+            .expect("create user process");
+        arm_user_pf_frame_check(pid, LINUX_PAGE_FAULT_ADDR);
+
+        let program = linux::load_elf(pid, "/pf").expect("load page-fault fixture");
+        if let Ok(process) = PROCESS_TABLE.process_handle(pid) {
+            process.set_brk_base(program.heap_base);
+        }
+        let argv_refs = ["/pf"];
+        let envp_refs: [&str; 0] = [];
+        let auxv = linux::build_auxv(&program, crate::mem::addr::PageSize::SIZE_4K.bytes());
+        let stack_top = <crate::arch::Arch as ArchThread>::user_stack_top(&program.user_stack);
+        let stack_pointer = PROCESS_TABLE
+            .address_space(pid)
+            .expect("user address space")
+            .with_page_table(|table, _| {
+                linux::initialise_stack_with_args_in_table(
+                    table, stack_top, &argv_refs, &envp_refs, &auxv,
+                )
+            })
+            .expect("init page-fault stack");
+        SCHEDULER
+            .spawn_user_thread_with_stack(
+                pid,
+                "linux-main",
+                program.entry,
+                program.user_stack,
+                stack_pointer,
+            )
+            .expect("spawn page-fault thread");
+        super::wait_for_exit(pid);
+
+        assert!(
+            user_pf_frame_check_passed(),
+            "page-fault trap frame check did not complete"
+        );
+
+        if started {
+            SCHEDULER.shutdown();
+            SYSTEM_TIMER
+                .start_periodic(TimerTicks::new(10_000_000))
+                .expect("failed to restart system timer after page-fault test");
+            INTERRUPTS.enable();
         }
     }
 }

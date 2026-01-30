@@ -15,6 +15,8 @@
   `bundlePath`, `annotations`) and is paired with `ContainerContext` inside a single lock.
 - `ContainerMutable` also keeps a process list for the container; the init process PID is mirrored
   in `ContainerState::pid` so OCI `state` reports it consistently.
+- `ContainerContext` stores the container VFS plus per-container UTS data (hostname/domainname
+  from the OCI spec) so `uname` can reflect the bundle configuration.
 - The parsed OCI `Spec` (`config.json`) is stored immutably as `Arc<Spec>` so it can be shared
   without additional locking.
 
@@ -34,6 +36,8 @@
   `cwd` before loading the ELF image.
 - Container init processes are created with Linux ABI and are tied to the container VFS at process
   creation time, ensuring path resolution never touches the host VFS.
+- Container init processes are assigned the global controlling TTY so shells can enable job control
+  without requiring a separate `cttyhack` step.
 - Starting a container transitions status from `Created` to `Running` and stores the init PID.
 
 ## Future Work

@@ -2,7 +2,7 @@
 
 ## Role and Scope
 - Manage the set of threads and minimal metadata associated with each process.
-- Currently limited to kernel-space execution; the structure is intentionally skeletal so it can expand once userland support arrives.
+- Supports kernel and user processes with per-process address spaces, while keeping the model intentionally skeletal for future expansion.
 - Exposed as a single global instance (`PROCESS_TABLE`), which higher-level orchestration (at present the scheduler) manipulates through its API.
 
 ## Entities
@@ -14,12 +14,14 @@
 
 ### Process
 - Stored as `Arc<Process>` so threads can hold a direct reference to their owning process without touching the global table.
-- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, `parent`, `exit_code`, `reaped`, `brk`, `abi`, and a `ProcessDomain`.
+- Stores `id`, `name`, `address_space`, `state`, `threads`, `fs`, `parent`, `exit_code`, `reaped`, `brk`, `abi`, `session_id`, `pgrp_id`, `controlling_tty`, and a `ProcessDomain`.
 - `address_space` holds an `ArchThread::AddressSpace` (currently an `Arc` handle) so processes share explicit address-space state.
 - `ProcessState` now spans `Created`, `Ready`, `Running`, `Waiting`, `Terminated`; transitions are simple and primarily driven by thread attach/detach and scheduler ticks.
 - `ProcessDomain` decides both the ABI and the VFS binding at creation time.
 - `brk` tracks the user-mode heap break (base/current), seeded by Linux ELF loading and advanced by the `brk` syscall.
 - `parent`/`exit_code`/`reaped` provide minimal wait4 support: fork assigns a parent, exit writes a code, and wait4 marks the child as reaped.
+- `session_id` and `pgrp_id` carry minimal job-control metadata; both default to the process ID and are inherited across fork.
+- `controlling_tty` tracks whether the process is attached to the global TTY; it is cleared on `setsid` and inherited across fork.
 - If a process is created for a container, it retains the container handle and filesystem operations route through the container VFS.
 
 ## Initialization and Invariants

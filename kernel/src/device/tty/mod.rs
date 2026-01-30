@@ -5,6 +5,8 @@ use crate::arch::Arch;
 use crate::arch::api::ArchDevice;
 use crate::device::char::CharDevice;
 use crate::device::{Device, DeviceType};
+use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle};
+use crate::thread::SCHEDULER;
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
 use crate::util::stream::{ControlError, ControlOps, ControlRequest, ReadOps, WriteOps};
@@ -15,6 +17,7 @@ const IOCTL_TCGETS: u64 = 0x5401;
 const IOCTL_TCSETS: u64 = 0x5402;
 const IOCTL_TCSETSW: u64 = 0x5403;
 const IOCTL_TCSETSF: u64 = 0x5404;
+const IOCTL_TIOCSCTTY: u64 = 0x540e;
 const IOCTL_TIOCGPGRP: u64 = 0x540f;
 const IOCTL_TIOCSPGRP: u64 = 0x5410;
 const IOCTL_TIOCGWINSZ: u64 = 0x5413;
@@ -129,6 +132,7 @@ struct TtyState {
 /// # Implicit dependencies
 /// - Assumes `Arch::console()` is initialised and can be accessed from any context that invokes
 ///   read/write operations on the global TTY.
+/// - Resolves the caller process group via the scheduler when answering job-control ioctls.
 pub struct TtyDevice {
     input: SpinLock<VecDeque<u8>>,
     output: SpinLock<VecDeque<u8>>,
@@ -163,6 +167,19 @@ impl TtyDevice {
     pub fn clear_output(&self) {
         let mut guard = self.output.lock();
         guard.clear();
+    }
+
+    pub fn input_available(&self) -> bool {
+        if !self.input.lock().is_empty() {
+            return true;
+        }
+        let console = Arch::console();
+        let mut byte = [0u8; 1];
+        if console.read(&mut byte).unwrap_or(0) == 1 {
+            self.input.lock().push_back(byte[0]);
+            return true;
+        }
+        false
     }
 
     fn record_output(&self, data: &[u8]) {
@@ -212,6 +229,82 @@ impl TtyDevice {
     fn set_pgrp(&self, pgrp: u32) {
         self.state.lock().pgrp = pgrp;
     }
+
+    fn read_byte_blocking(&self) -> u8 {
+        loop {
+            let mut byte = [0u8; 1];
+            if self.read_from_input(&mut byte) == 1 {
+                return byte[0];
+            }
+            let console = Arch::console();
+            if console.read(&mut byte).unwrap_or(0) == 1 {
+                return byte[0];
+            }
+            #[cfg(target_arch = "x86_64")]
+            crate::arch::x86_64::halt();
+            #[cfg(not(target_arch = "x86_64"))]
+            core::hint::spin_loop();
+        }
+    }
+
+    fn read_canonical(&self, buf: &mut [u8], echo: bool, c_cc: [u8; NCCS]) -> usize {
+        let mut total = 0usize;
+        let mut eof_seen = false;
+        while total < buf.len() {
+            let mut b = self.read_byte_blocking();
+            if b == b'\r' {
+                b = b'\n';
+            }
+            if b == c_cc[VERASE] {
+                if total > 0 {
+                    total -= 1;
+                    if echo {
+                        let _ = Arch::console().write(b"\x08 \x08");
+                    }
+                }
+                continue;
+            }
+            if b == c_cc[VEOF] {
+                eof_seen = true;
+                break;
+            }
+            buf[total] = b;
+            total += 1;
+            if echo {
+                let out = if b == b'\n' && (self.termios_snapshot().c_oflag & OF_ONLCR) != 0 {
+                    b"\r\n"
+                } else {
+                    core::slice::from_ref(&b)
+                };
+                let _ = Arch::console().write(out);
+            }
+            if b == b'\n' {
+                break;
+            }
+        }
+        if eof_seen && total == 0 {
+            return 0;
+        }
+        total
+    }
+
+    fn current_process(&self) -> Option<ProcessHandle> {
+        let pid = SCHEDULER.current_process_id()?;
+        PROCESS_TABLE.process_handle(pid).ok()
+    }
+
+    fn current_process_pgrp(&self) -> Option<u32> {
+        let proc = self.current_process()?;
+        Some(proc.pgrp_id() as u32)
+    }
+
+    fn require_controlling_tty(&self) -> Result<ProcessHandle, ControlError> {
+        let proc = self.current_process().ok_or(ControlError::Invalid)?;
+        if !proc.has_controlling_tty() {
+            return Err(ControlError::Invalid);
+        }
+        Ok(proc)
+    }
 }
 
 impl Default for TtyDevice {
@@ -234,11 +327,40 @@ impl ReadOps for TtyDevice {
     type Error = core::convert::Infallible;
 
     fn read(&self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let mut total = self.read_from_input(buf);
-        if total == 0 {
-            let console = Arch::console();
-            let read = console.read(&mut buf[total..]).unwrap_or(0);
-            total += read;
+        let termios = self.termios_snapshot();
+        let icrnl = (termios.c_iflag & IF_ICRNL) != 0;
+        let icanon = (termios.c_lflag & LF_ICANON) != 0;
+        let echo = (termios.c_lflag & LF_ECHO) != 0;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        if icanon {
+            let read = self.read_canonical(buf, echo, termios.c_cc);
+            return Ok(read);
+        }
+
+        let mut total = 0usize;
+        while total == 0 {
+            total = self.read_from_input(buf);
+            if total == 0 {
+                let console = Arch::console();
+                let read = console.read(&mut buf[total..]).unwrap_or(0);
+                total += read;
+            }
+            if total == 0 {
+                #[cfg(target_arch = "x86_64")]
+                crate::arch::x86_64::halt();
+                #[cfg(not(target_arch = "x86_64"))]
+                core::hint::spin_loop();
+            }
+        }
+        if icrnl {
+            for byte in &mut buf[..total] {
+                if *byte == b'\r' {
+                    *byte = b'\n';
+                }
+            }
         }
         Ok(total)
     }
@@ -282,14 +404,39 @@ impl ControlOps for TtyDevice {
                 self.set_winsize(winsize);
                 Ok(0)
             }
+            IOCTL_TIOCSCTTY => {
+                let proc = self.current_process().ok_or(ControlError::Invalid)?;
+                let pid = proc.id();
+                if proc.session_id() != pid {
+                    return Err(ControlError::Invalid);
+                }
+                if proc.has_controlling_tty() {
+                    return Err(ControlError::Invalid);
+                }
+                proc.set_controlling_tty(ControllingTty::Global);
+                self.set_pgrp(proc.pgrp_id() as u32);
+                Ok(0)
+            }
             IOCTL_TIOCGPGRP => {
-                let pgrp = self.pgrp() as i32;
+                let _ = self.require_controlling_tty()?;
+                let mut pgrp = self.pgrp();
+                if pgrp == 0
+                    && let Some(current) = self.current_process_pgrp()
+                {
+                    pgrp = current;
+                    self.set_pgrp(pgrp);
+                }
+                let pgrp = pgrp as i32;
                 request.write_struct(&pgrp)?;
                 Ok(0)
             }
             IOCTL_TIOCSPGRP => {
+                let _ = self.require_controlling_tty()?;
                 let pgrp = request.read_struct::<i32>()?;
                 if pgrp < 0 {
+                    return Err(ControlError::Invalid);
+                }
+                if pgrp == 0 {
                     return Err(ControlError::Invalid);
                 }
                 self.set_pgrp(pgrp as u32);

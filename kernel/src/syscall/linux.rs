@@ -1,22 +1,30 @@
 use super::{DispatchResult, SysError, SysResult, SyscallInvocation};
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::arch::Arch;
 use crate::arch::api::{ArchPageTableAccess, ArchThread};
-use crate::fs::NodeKind;
+use crate::container::Uts;
+use crate::fs::{DirEntry, NodeKind};
+use crate::interrupt::INTERRUPTS;
 use crate::mem::addr::{
     Addr, MemPerm, Page, PageSize, VirtAddr, VirtIntoPtr, align_down, align_up,
 };
 use crate::mem::manager;
 use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
-use crate::mem::user::{UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice};
-use crate::println;
+use crate::mem::user::{
+    UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice, with_user_slice_mut,
+};
 use crate::process::fs as proc_fs;
-use crate::process::{PROCESS_TABLE, ProcessId};
+use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle, ProcessId};
 use crate::thread::SCHEDULER;
 use crate::trap::CurrentTrapFrame;
+use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
+
+// NOTE: Error mapping is intentionally coarse right now (many failures collapse
+// to InvalidArgument/BadAddress). This keeps the syscall surface minimal but is
+// not Linux-accurate.
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +34,7 @@ pub enum LinuxErrno {
     InvalidArgument = 22,
     BadAddress = 14,
     NotTty = 25,
+    IllegalSeek = 29,
 }
 
 #[repr(u64)]
@@ -36,6 +45,9 @@ pub enum LinuxSyscall {
     Open = 2,
     Close = 3,
     Stat = 4,
+    Lstat = 6,
+    Poll = 7,
+    Lseek = 8,
     Mmap = 9,
     Munmap = 11,
     Brk = 12,
@@ -43,27 +55,46 @@ pub enum LinuxSyscall {
     RtSigprocmask = 14,
     Ioctl = 16,
     Writev = 20,
+    Uname = 63,
     GetPid = 39,
+    GetTimeOfDay = 96,
+    Fcntl = 72,
+    GetCwd = 79,
+    Chdir = 80,
+    SetPgid = 109,
+    GetPpid = 110,
+    GetPgrp = 111,
+    SetSid = 112,
     Fork = 57,
     Execve = 59,
     Exit = 60,
+    ExitGroup = 231,
     Wait4 = 61,
     GetUid = 102,
     GetGid = 104,
+    GetEuid = 107,
     SetUid = 105,
     SetGid = 106,
+    GetPgid = 121,
+    GetSid = 124,
     ArchPrctl = 158,
+    GetDents64 = 217,
     SetTidAddress = 218,
+    ClockGetTime = 228,
 }
 
 impl LinuxSyscall {
     pub fn from_raw(value: u64) -> Option<Self> {
+        let value = value as u32 as u64;
         match value {
             0 => Some(Self::Read),
             1 => Some(Self::Write),
             2 => Some(Self::Open),
             3 => Some(Self::Close),
             4 => Some(Self::Stat),
+            6 => Some(Self::Lstat),
+            7 => Some(Self::Poll),
+            8 => Some(Self::Lseek),
             9 => Some(Self::Mmap),
             11 => Some(Self::Munmap),
             12 => Some(Self::Brk),
@@ -72,30 +103,44 @@ impl LinuxSyscall {
             16 => Some(Self::Ioctl),
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
+            63 => Some(Self::Uname),
+            96 => Some(Self::GetTimeOfDay),
+            72 => Some(Self::Fcntl),
+            79 => Some(Self::GetCwd),
+            80 => Some(Self::Chdir),
+            109 => Some(Self::SetPgid),
+            110 => Some(Self::GetPpid),
+            111 => Some(Self::GetPgrp),
+            112 => Some(Self::SetSid),
             57 => Some(Self::Fork),
             59 => Some(Self::Execve),
             60 => Some(Self::Exit),
+            231 => Some(Self::ExitGroup),
             61 => Some(Self::Wait4),
             102 => Some(Self::GetUid),
             104 => Some(Self::GetGid),
+            107 => Some(Self::GetEuid),
             105 => Some(Self::SetUid),
             106 => Some(Self::SetGid),
+            121 => Some(Self::GetPgid),
+            124 => Some(Self::GetSid),
             158 => Some(Self::ArchPrctl),
+            217 => Some(Self::GetDents64),
             218 => Some(Self::SetTidAddress),
+            228 => Some(Self::ClockGetTime),
             _ => None,
         }
     }
 }
 
 /// Minimal Linux syscall table supporting write/getpid/exit placeholders.
+///
+/// NOTE: `openat` and related syscalls are not implemented yet; userland that
+/// relies on them will see ENOSYS.
 pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
 ) -> DispatchResult {
-    println!(
-        "Linux syscall invoked: number={}, args={:?}",
-        invocation.number, invocation.args
-    );
     match LinuxSyscall::from_raw(invocation.number) {
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
@@ -103,25 +148,48 @@ pub fn dispatch(
         Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
+        Some(LinuxSyscall::Lstat) => DispatchResult::Completed(handle_lstat(invocation)),
+        Some(LinuxSyscall::Poll) => DispatchResult::Completed(handle_poll(invocation)),
+        Some(LinuxSyscall::Lseek) => DispatchResult::Completed(handle_lseek(invocation)),
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
         Some(LinuxSyscall::Munmap) => DispatchResult::Completed(handle_munmap(invocation)),
         Some(LinuxSyscall::Brk) => DispatchResult::Completed(handle_brk(invocation)),
+        Some(LinuxSyscall::Fcntl) => DispatchResult::Completed(handle_fcntl(invocation)),
+        Some(LinuxSyscall::Uname) => DispatchResult::Completed(handle_uname(invocation)),
+        Some(LinuxSyscall::GetCwd) => DispatchResult::Completed(handle_getcwd(invocation)),
+        Some(LinuxSyscall::Chdir) => DispatchResult::Completed(handle_chdir(invocation)),
+        Some(LinuxSyscall::SetPgid) => DispatchResult::Completed(handle_setpgid(invocation)),
+        Some(LinuxSyscall::GetPpid) => DispatchResult::Completed(handle_getppid(invocation)),
+        Some(LinuxSyscall::GetPgrp) => DispatchResult::Completed(handle_getpgrp(invocation)),
+        Some(LinuxSyscall::SetSid) => DispatchResult::Completed(handle_setsid(invocation)),
         Some(LinuxSyscall::Fork) => handle_fork(invocation, frame),
         Some(LinuxSyscall::Execve) => handle_execve(invocation, frame),
         Some(LinuxSyscall::Wait4) => DispatchResult::Completed(handle_wait4(invocation)),
         Some(LinuxSyscall::ArchPrctl) => DispatchResult::Completed(handle_arch_prctl(invocation)),
         Some(LinuxSyscall::Ioctl) => DispatchResult::Completed(handle_ioctl(invocation)),
-        // These syscalls are currently stubbed and always report success (0).
+        // These syscalls are stubbed and always report success (0). This is risky
+        // because userland may rely on signals/TID state that is not tracked yet.
         Some(LinuxSyscall::RtSigaction) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::RtSigprocmask) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetTidAddress) => DispatchResult::Completed(Ok(0)),
         // NOTE: UID/GID syscalls are stubbed to 0 for now; user/cred support is not implemented yet.
         Some(LinuxSyscall::GetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetGid) => DispatchResult::Completed(Ok(0)),
+        Some(LinuxSyscall::GetEuid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetUid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::SetGid) => DispatchResult::Completed(Ok(0)),
         Some(LinuxSyscall::GetPid) => DispatchResult::Completed(handle_getpid(invocation)),
+        Some(LinuxSyscall::GetTimeOfDay) => {
+            DispatchResult::Completed(handle_gettimeofday(invocation))
+        }
+        Some(LinuxSyscall::GetPgid) => DispatchResult::Completed(handle_getpgid(invocation)),
+        Some(LinuxSyscall::GetSid) => DispatchResult::Completed(handle_getsid(invocation)),
+        Some(LinuxSyscall::GetDents64) => DispatchResult::Completed(handle_getdents64(invocation)),
+        Some(LinuxSyscall::ClockGetTime) => {
+            DispatchResult::Completed(handle_clock_gettime(invocation))
+        }
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
+        Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
         None => DispatchResult::Completed(Err(SysError::NotImplemented)),
     }
 }
@@ -195,13 +263,16 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
     })?;
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
-    let fd = if create {
+    let result = if create {
         proc_fs::open_path_with_create(pid, &path, flags)
     } else {
         proc_fs::open_path(pid, &path, flags)
-    }
-    .map_err(|_| SysError::InvalidArgument)?;
+    };
 
+    let fd = result.map_err(|_| SysError::InvalidArgument)?;
+    if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
+        process.set_controlling_tty(ControllingTty::Global);
+    }
     Ok(fd as u64)
 }
 
@@ -241,6 +312,43 @@ fn handle_writev(invocation: &SyscallInvocation) -> SysResult {
     Ok(total)
 }
 
+fn handle_fcntl(invocation: &SyscallInvocation) -> SysResult {
+    const F_DUPFD: u64 = 0;
+    const F_GETFD: u64 = 1;
+    const F_SETFD: u64 = 2;
+    const F_DUPFD_CLOEXEC: u64 = 1030;
+
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let cmd = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let arg = invocation.arg(2).unwrap_or(0);
+
+    match cmd {
+        F_DUPFD => {
+            let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
+            proc_fs::dup_fd_min(pid, fd, min, false)
+                .map(|val| val as u64)
+                .map_err(|_| SysError::InvalidArgument)
+        }
+        F_DUPFD_CLOEXEC => {
+            let min = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
+            proc_fs::dup_fd_min(pid, fd, min, true)
+                .map(|val| val as u64)
+                .map_err(|_| SysError::InvalidArgument)
+        }
+        F_GETFD => proc_fs::get_fd_flags(pid, fd)
+            .map(|val| val as u64)
+            .map_err(|_| SysError::InvalidArgument),
+        F_SETFD => {
+            let flags = u32::try_from(arg).map_err(|_| SysError::InvalidArgument)?;
+            proc_fs::set_fd_flags(pid, fd, flags)
+                .map(|_| 0)
+                .map_err(|_| SysError::InvalidArgument)
+        }
+        _ => Err(SysError::NotImplemented),
+    }
+}
+
 fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
     let pid = current_pid()?;
     let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
@@ -250,6 +358,7 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
+
     process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
@@ -262,6 +371,81 @@ fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
         .current_process_id()
         .ok_or(SysError::InvalidArgument)?;
     Ok(pid)
+}
+
+fn handle_getppid(_invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(process.parent().unwrap_or(0))
+}
+
+fn handle_getpgrp(_invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(process.pgrp_id())
+}
+
+fn handle_setsid(_invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    if process.session_id() == pid {
+        return Err(SysError::InvalidArgument);
+    }
+    process.set_session_id(pid);
+    process.set_pgrp_id(pid);
+    process.clear_controlling_tty();
+    Ok(pid)
+}
+
+fn handle_getpgid(invocation: &SyscallInvocation) -> SysResult {
+    let pid = invocation.arg(0).unwrap_or(0);
+    let target = if pid == 0 { current_pid()? } else { pid };
+    let process = PROCESS_TABLE
+        .process_handle(target)
+        .map_err(|_| SysError::NotFound)?;
+    Ok(process.pgrp_id())
+}
+
+fn handle_getsid(invocation: &SyscallInvocation) -> SysResult {
+    let pid = invocation.arg(0).unwrap_or(0);
+    let target = if pid == 0 { current_pid()? } else { pid };
+    let process = PROCESS_TABLE
+        .process_handle(target)
+        .map_err(|_| SysError::NotFound)?;
+    Ok(process.session_id())
+}
+
+fn handle_setpgid(invocation: &SyscallInvocation) -> SysResult {
+    let pid_arg = invocation.arg(0).unwrap_or(0);
+    let pgid_arg = invocation.arg(1).unwrap_or(0);
+
+    let caller_pid = current_pid()?;
+    let target_pid = if pid_arg == 0 { caller_pid } else { pid_arg };
+    let target_pgid = if pgid_arg == 0 { target_pid } else { pgid_arg };
+
+    let caller = PROCESS_TABLE
+        .process_handle(caller_pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let target = PROCESS_TABLE
+        .process_handle(target_pid)
+        .map_err(|_| SysError::NotFound)?;
+
+    if target_pid != caller_pid && !PROCESS_TABLE.is_child(caller_pid, target_pid) {
+        return Err(SysError::InvalidArgument);
+    }
+
+    if target.session_id() != caller.session_id() {
+        return Err(SysError::InvalidArgument);
+    }
+
+    target.set_pgrp_id(target_pgid);
+    Ok(0)
 }
 
 fn handle_exit(invocation: &SyscallInvocation) -> DispatchResult {
@@ -306,9 +490,260 @@ fn handle_stat(invocation: &SyscallInvocation) -> SysResult {
     Ok(0)
 }
 
+fn handle_lstat(invocation: &SyscallInvocation) -> SysResult {
+    let path_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let stat_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, path_ptr)
+    })?;
+    let stat = proc_fs::stat_path_no_follow(pid, &path).map_err(|err| match err {
+        crate::fs::VfsError::NotFound => SysError::NotFound,
+        _ => SysError::InvalidArgument,
+    })?;
+
+    let mode = mode_from_meta(stat.kind);
+    let stat = LinuxStat::from_meta(mode, stat.size);
+    let dst = VirtAddr::new(stat_ptr as usize);
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, stat.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
+    Ok(0)
+}
+
+fn handle_lseek(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let offset = invocation.arg(1).ok_or(SysError::InvalidArgument)? as i64;
+    let whence = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let whence = u32::try_from(whence).map_err(|_| SysError::InvalidArgument)?;
+    match proc_fs::seek_fd(pid, fd as u32, offset, whence) {
+        Ok(pos) => Ok(pos),
+        Err(crate::fs::VfsError::NotFile) => Err(SysError::IllegalSeek),
+        Err(crate::fs::VfsError::NotDirectory) => Err(SysError::IllegalSeek),
+        Err(crate::fs::VfsError::InvalidPath) => Err(SysError::InvalidArgument),
+        Err(crate::fs::VfsError::NotFound) => Err(SysError::InvalidArgument),
+        Err(_) => Err(SysError::InvalidArgument),
+    }
+}
+
+fn handle_getcwd(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let buf_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let size = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let size = usize::try_from(size).map_err(|_| SysError::InvalidArgument)?;
+    if size == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let cwd = proc_fs::cwd(pid).map_err(|_| SysError::InvalidArgument)?;
+    let text = cwd.to_string();
+    let bytes = text.as_bytes();
+    if bytes.len().saturating_add(1) > size {
+        // NOTE: Linux returns ERANGE here; we currently map to InvalidArgument.
+        return Err(SysError::InvalidArgument);
+    }
+    let user_ptr = VirtAddr::new(buf_ptr as usize);
+    copy_to_user(user_ptr, bytes).map_err(|_| SysError::InvalidArgument)?;
+    let nul = VirtAddr::new(user_ptr.as_raw() + bytes.len());
+    copy_to_user(nul, &[0]).map_err(|_| SysError::InvalidArgument)?;
+    Ok((bytes.len() + 1) as u64)
+}
+
+/// Encode directory entries for `getdents64` using the per-fd cursor in `FdTable`.
+///
+/// Implicit dependencies:
+/// - The backing `File::readdir` returns entries in a stable order for the lifetime of the open
+///   directory handle so the offset cursor remains valid across calls.
+/// - Directory entries fit in the caller-provided buffer; if the buffer is too small for the
+///   next entry, the syscall returns `EINVAL` instead of looping forever.
+fn handle_getdents64(invocation: &SyscallInvocation) -> SysResult {
+    const ALIGN: usize = 8;
+    const HEADER_LEN: usize = 8 + 8 + 2 + 1;
+
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let dir_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let count = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let count = usize::try_from(count).map_err(|_| SysError::InvalidArgument)?;
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let entries = proc_fs::read_dir_fd(pid, fd as u32).map_err(|_| SysError::InvalidArgument)?;
+    let mut index =
+        proc_fs::dir_offset(pid, fd as u32).map_err(|_| SysError::InvalidArgument)? as usize;
+    if index >= entries.len() {
+        return Ok(0);
+    }
+
+    let base = VirtAddr::new(dir_ptr as usize);
+    let mut written = 0usize;
+    while index < entries.len() {
+        let entry = &entries[index];
+        let reclen = dirent64_reclen(entry.name.len(), HEADER_LEN, ALIGN)?;
+        if written + reclen > count {
+            break;
+        }
+        write_dirent64(base, written, entry, (index + 1) as u64, reclen, HEADER_LEN)?;
+        written += reclen;
+        index += 1;
+    }
+
+    if written == 0 && index < entries.len() {
+        let entry = &entries[index];
+        let min = dirent64_reclen(entry.name.len(), HEADER_LEN, ALIGN)?;
+        if min > count {
+            return Err(SysError::InvalidArgument);
+        }
+    }
+
+    proc_fs::set_dir_offset(pid, fd as u32, index as u64).map_err(|_| SysError::InvalidArgument)?;
+    Ok(written as u64)
+}
+
+fn handle_chdir(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, ptr)
+    })?;
+    proc_fs::change_dir(pid, &path).map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
+}
+
+fn dirent64_reclen(name_len: usize, header_len: usize, align: usize) -> Result<usize, SysError> {
+    let base = header_len
+        .checked_add(name_len)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(SysError::InvalidArgument)?;
+    let reclen = align_up(base, align);
+    if reclen > u16::MAX as usize {
+        return Err(SysError::InvalidArgument);
+    }
+    Ok(reclen)
+}
+
+fn write_dirent64(
+    base: VirtAddr,
+    offset: usize,
+    entry: &DirEntry,
+    next_offset: u64,
+    reclen: usize,
+    header_len: usize,
+) -> Result<(), SysError> {
+    let dst = base.checked_add(offset).ok_or(SysError::BadAddress)?;
+    let mut header = [0u8; 8 + 8 + 2 + 1];
+    header[0..8].copy_from_slice(&0u64.to_ne_bytes());
+    header[8..16].copy_from_slice(&next_offset.to_ne_bytes());
+    header[16..18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+    header[18] = dirent_type(entry.stat.kind);
+    copy_to_user(dst, &header).map_err(|_| SysError::BadAddress)?;
+
+    let name = entry.name.as_bytes();
+    let name_dst = dst.checked_add(header_len).ok_or(SysError::BadAddress)?;
+    copy_to_user(name_dst, name).map_err(|_| SysError::BadAddress)?;
+    let nul_dst = name_dst
+        .checked_add(name.len())
+        .ok_or(SysError::BadAddress)?;
+    copy_to_user(nul_dst, &[0]).map_err(|_| SysError::BadAddress)?;
+
+    let pad = reclen.saturating_sub(header_len + name.len() + 1);
+    if pad > 0 {
+        let pad_dst = nul_dst.checked_add(1).ok_or(SysError::BadAddress)?;
+        let zeros = [0u8; 8];
+        copy_to_user(pad_dst, &zeros[..pad]).map_err(|_| SysError::BadAddress)?;
+    }
+    Ok(())
+}
+
+fn dirent_type(kind: NodeKind) -> u8 {
+    match kind {
+        NodeKind::Regular => 8,
+        NodeKind::Directory => 4,
+        NodeKind::Symlink => 10,
+        NodeKind::CharDevice => 2,
+        NodeKind::BlockDevice => 6,
+        NodeKind::Pipe => 1,
+        NodeKind::Socket => 12,
+    }
+}
+
+fn handle_uname(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let addr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let uts = match process.domain() {
+        crate::process::ProcessDomain::Container(container) => container.context().uts(),
+        _ => Uts::default_host(),
+    };
+    let dst = VirtAddr::new(addr as usize);
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, uts.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
+    Ok(0)
+}
+
+fn handle_poll(invocation: &SyscallInvocation) -> SysResult {
+    const POLLIN: i16 = 0x0001;
+    const POLLNVAL: i16 = 0x0020;
+
+    let pid = current_pid()?;
+    let fds_ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let nfds = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let timeout_raw = invocation.arg(2).unwrap_or(0);
+    let timeout_ms = if timeout_raw == u64::MAX {
+        -1
+    } else {
+        i64::try_from(timeout_raw).map_err(|_| SysError::InvalidArgument)?
+    };
+    let nfds = usize::try_from(nfds).map_err(|_| SysError::InvalidArgument)?;
+    if nfds == 0 {
+        return Ok(0);
+    }
+
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let ptr = VirtAddr::new(fds_ptr as usize);
+
+    loop {
+        let ready =
+            with_user_slice_mut(ptr, nfds, |fds| poll_once(fds, &process, POLLIN, POLLNVAL))
+                .map_err(|_| SysError::BadAddress)?;
+        if ready > 0 || timeout_ms == 0 {
+            return Ok(ready as u64);
+        }
+        // NOTE: Timeout handling is intentionally simplified; any non-zero timeout blocks
+        // until an event arrives. Poll semantics are coarse (TTY readiness only, others are
+        // treated as immediately readable).
+        //
+        // Syscalls may run with interrupts disabled; enable them so the scheduler can
+        // make progress while we wait.
+        INTERRUPTS.enable();
+        core::hint::spin_loop();
+    }
+}
+
 fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
-    // TODO: This is a grow-only brk; shrinking does not unmap pages and no heap upper bound
-    // is enforced yet. The behavior is enough for busybox's basic allocator path.
+    // TODO: This is a minimal brk: no heap upper bound is enforced and errors are coarse.
     let requested = invocation.arg(0).unwrap_or(0);
     let pid = current_pid()?;
     let process = PROCESS_TABLE
@@ -357,12 +792,12 @@ fn handle_brk(invocation: &SyscallInvocation) -> SysResult {
                         return Err(SysError::InvalidArgument);
                     }
                 }
+                let phys = table
+                    .translate(page.start)
+                    .map_err(|_| SysError::InvalidArgument)?;
+                let mapper = manager::phys_mapper();
                 unsafe {
-                    core::ptr::write_bytes(
-                        VirtAddr::new(addr).into_mut_ptr(),
-                        0,
-                        PageSize::SIZE_4K.bytes(),
-                    );
+                    core::ptr::write_bytes(mapper.phys_to_virt(phys).into_mut_ptr(), 0, page_size);
                 }
             }
             Ok::<_, SysError>(())
@@ -436,6 +871,12 @@ fn handle_fork(
     if let Ok(child_proc) = PROCESS_TABLE.process_handle(child_pid) {
         child_proc.set_brk_state(parent_proc.brk_state());
         child_proc.set_parent(pid);
+        child_proc.set_session_id(parent_proc.session_id());
+        child_proc.set_pgrp_id(parent_proc.pgrp_id());
+        child_proc.clone_fs_from(&parent_proc);
+        if let Some(tty) = parent_proc.controlling_tty() {
+            child_proc.set_controlling_tty(tty);
+        }
     }
 
     let stack_size = parent_stack.size;
@@ -451,7 +892,10 @@ fn handle_fork(
     let child_top = <Arch as ArchThread>::user_stack_top(&child_stack);
 
     let parent_rsp = frame.rsp as usize;
-    let offset = parent_rsp.saturating_sub(parent_stack.base.as_raw());
+    if parent_rsp < parent_stack.base.as_raw() {
+        return DispatchResult::Completed(Err(SysError::InvalidArgument));
+    }
+    let offset = parent_rsp - parent_stack.base.as_raw();
     let child_rsp = child_base.checked_add(offset).unwrap_or(child_top).as_raw() as u64;
 
     let mut ctx = <Arch as ArchThread>::save_context(frame);
@@ -497,6 +941,7 @@ fn handle_execve(
     let argv_ptr = invocation.arg(1).unwrap_or(0);
     let envp_ptr = invocation.arg(2).unwrap_or(0);
 
+    // NOTE: Limit argv/envp length to avoid unbounded user input scans.
     let argv = match process.address_space().with_page_table(|table, _| {
         let user = UserMemoryAccess::new(table);
         read_cstring_array_with_user(&user, argv_ptr, 128)
@@ -514,17 +959,21 @@ fn handle_execve(
 
     // Drop the previous user stack before clearing mappings so we do not unmap the
     // freshly allocated stack on replacement.
-    if let Err(err) = SCHEDULER.clear_current_user_stack() {
-        return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
-    }
+    let old_stack = match SCHEDULER.take_current_user_stack() {
+        Ok(stack) => stack,
+        Err(err) => {
+            return DispatchResult::Completed(Err(spawn_error_to_sys(err)));
+        }
+    };
 
     if <Arch as ArchThread>::clear_user_mappings(&process.address_space()).is_err() {
         return DispatchResult::Completed(Err(SysError::InvalidArgument));
     }
+    drop(old_stack);
 
     let program = match crate::loader::linux::load_elf(pid, &path) {
         Ok(program) => program,
-        Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+        Err(_err) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
 
     let auxv = crate::loader::linux::build_auxv(&program, PageSize::SIZE_4K.bytes());
@@ -538,7 +987,7 @@ fn handle_execve(
             )
         }) {
             Ok(ptr) => ptr,
-            Err(_) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
+            Err(_err) => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
         },
         None => return DispatchResult::Completed(Err(SysError::InvalidArgument)),
     };
@@ -618,9 +1067,9 @@ fn handle_wait4(invocation: &SyscallInvocation) -> SysResult {
             return Ok(0);
         }
 
-        #[cfg(target_arch = "x86_64")]
-        crate::arch::x86_64::halt();
-        #[cfg(not(target_arch = "x86_64"))]
+        // NOTE: Syscalls may run with interrupts disabled; enable them so the scheduler can
+        // observe child exits while we wait.
+        INTERRUPTS.enable();
         core::hint::spin_loop();
     }
 }
@@ -634,7 +1083,67 @@ fn handle_arch_prctl(invocation: &SyscallInvocation) -> SysResult {
         return Err(SysError::InvalidArgument);
     }
 
+    // NOTE: This assumes FS base is part of the thread context and restored on context switches.
     crate::arch::x86_64::set_fs_base(value);
+    Ok(0)
+}
+
+#[repr(C)]
+struct LinuxTimeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+impl LinuxTimeval {
+    fn as_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.tv_sec.to_ne_bytes());
+        out[8..].copy_from_slice(&self.tv_usec.to_ne_bytes());
+        out
+    }
+}
+
+#[repr(C)]
+struct LinuxTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+impl LinuxTimespec {
+    fn as_bytes(&self) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&self.tv_sec.to_ne_bytes());
+        out[8..].copy_from_slice(&self.tv_nsec.to_ne_bytes());
+        out
+    }
+}
+
+fn handle_gettimeofday(invocation: &SyscallInvocation) -> SysResult {
+    let tv_ptr = invocation.arg(0).unwrap_or(0);
+    if tv_ptr != 0 {
+        // TODO: Provide real wall-clock time once the time source is implemented.
+        let tv = LinuxTimeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        let dst = VirtAddr::new(tv_ptr as usize);
+        copy_to_user(dst, &tv.as_bytes()).map_err(|_| SysError::BadAddress)?;
+    }
+    Ok(0)
+}
+
+fn handle_clock_gettime(invocation: &SyscallInvocation) -> SysResult {
+    let tp_ptr = invocation.arg(1).unwrap_or(0);
+    if tp_ptr == 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    // TODO: Provide a real clock source once timekeeping is implemented.
+    let ts = LinuxTimespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let dst = VirtAddr::new(tp_ptr as usize);
+    copy_to_user(dst, &ts.as_bytes()).map_err(|_| SysError::BadAddress)?;
     Ok(0)
 }
 
@@ -687,6 +1196,8 @@ fn handle_mmap(invocation: &SyscallInvocation) -> SysResult {
             return Err(SysError::InvalidArgument);
         }
     } else if target == 0 {
+        // NOTE: This reuses the brk state as a simple bump allocator; it can
+        // collide with future brk growth and does not model Linux VMAs.
         let brk = process.brk_state();
         target = align_up(brk.current.as_raw(), page_size);
         let next = VirtAddr::new(target + len);
@@ -835,6 +1346,7 @@ fn errno_for(err: SysError) -> u16 {
         SysError::NotFound => LinuxErrno::NoEntry as u16,
         SysError::BadAddress => LinuxErrno::BadAddress as u16,
         SysError::NotTty => LinuxErrno::NotTty as u16,
+        SysError::IllegalSeek => LinuxErrno::IllegalSeek as u16,
     }
 }
 
@@ -970,6 +1482,86 @@ fn writev_from_iovecs(
     Ok(())
 }
 
+fn poll_once(
+    fds: &mut [LinuxPollFd],
+    process: &ProcessHandle,
+    pollin: i16,
+    pollnval: i16,
+) -> usize {
+    // NOTE: Non-TTY FDs are treated as immediately readable; this is a
+    // compatibility shortcut for regular files, not pipes/sockets.
+    let mut wants_input = false;
+    let mut tty_flags = Vec::with_capacity(fds.len());
+    for fd in fds.iter_mut() {
+        fd.revents = 0;
+        if fd.fd < 0 {
+            tty_flags.push(false);
+            continue;
+        }
+        if process.fd_table().entry(fd.fd as u32).is_err() {
+            fd.revents = pollnval;
+            tty_flags.push(false);
+            continue;
+        }
+        let is_tty = file_is_tty(process, fd.fd);
+        tty_flags.push(is_tty);
+        if (fd.events & pollin) != 0 {
+            if is_tty {
+                wants_input = true;
+            } else {
+                fd.revents |= pollin;
+            }
+        }
+    }
+
+    let input_ready = if wants_input {
+        crate::device::tty::global_tty().input_available()
+    } else {
+        false
+    };
+
+    let mut ready = 0usize;
+    for (fd, is_tty) in fds.iter_mut().zip(tty_flags.iter()) {
+        if fd.revents != 0 {
+            ready += 1;
+            continue;
+        }
+        if *is_tty && (fd.events & pollin) != 0 && input_ready {
+            fd.revents |= pollin;
+        }
+        if fd.revents != 0 {
+            ready += 1;
+        }
+    }
+    ready
+}
+
+fn file_is_tty(process: &ProcessHandle, fd: i32) -> bool {
+    const IOCTL_TIOCGWINSZ: u64 = 0x5413;
+
+    let entry = match process.fd_table().entry(fd as u32) {
+        Ok(entry) => entry,
+        Err(_) => return false,
+    };
+    let mut winsize = LinuxWinsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let access = KernelControlAccess;
+    let request = ControlRequest::new(
+        IOCTL_TIOCGWINSZ,
+        core::ptr::addr_of_mut!(winsize) as u64,
+        &access,
+    );
+    match entry.file().ioctl(&request) {
+        Ok(_) => true,
+        Err(ControlError::Unsupported) => false,
+        Err(_) => false,
+    }
+}
+
 fn encode_wait_status(code: i32) -> u32 {
     ((code as u32) & 0xFF) << 8
 }
@@ -993,6 +1585,56 @@ enum LinuxOpenFlags {
 struct LinuxIovec {
     base: u64,
     len: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxPollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxWinsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+struct KernelControlAccess;
+
+impl ControlAccess for KernelControlAccess {
+    // NOTE: Kernel-only access for ioctl helpers; never expose this to user pointers.
+    fn read(&self, addr: u64, dst: &mut [u8]) -> Result<(), ControlError> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let ptr = addr as *const u8;
+        if ptr.is_null() {
+            return Err(ControlError::BadAddress);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr, dst.as_mut_ptr(), dst.len());
+        }
+        Ok(())
+    }
+
+    fn write(&self, addr: u64, src: &[u8]) -> Result<(), ControlError> {
+        if src.is_empty() {
+            return Ok(());
+        }
+        let ptr = addr as *mut u8;
+        if ptr.is_null() {
+            return Err(ControlError::BadAddress);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), ptr, src.len());
+        }
+        Ok(())
+    }
 }
 
 #[repr(C)]
@@ -1058,6 +1700,7 @@ impl LinuxStat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::tty::global_tty;
     use crate::fs::DirNode;
     use crate::mem::addr::VirtAddr;
     use crate::println;
@@ -1135,6 +1778,77 @@ mod tests {
             DispatchResult::Completed(Ok(written)) => {
                 assert_eq!(written, (a.len() + b.len()) as u64)
             }
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn poll_reports_tty_input() {
+        println!("[test] poll_reports_tty_input");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+        let tty = global_tty();
+        tty.push_input(b"X");
+
+        let mut fds = [LinuxPollFd {
+            fd: 0,
+            events: 0x0001,
+            revents: 0,
+        }];
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::Poll as u64,
+            [fds.as_mut_ptr() as u64, fds.len() as u64, 0, 0, 0, 0],
+        );
+        match dispatch(&invocation, None) {
+            DispatchResult::Completed(Ok(ready)) => {
+                assert_eq!(ready, 1);
+                assert_eq!(fds[0].revents & 0x0001, 0x0001);
+            }
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn getcwd_returns_root_path() {
+        println!("[test] getcwd_returns_root_path");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+
+        let mut buf = [0u8; 8];
+        let invocation = SyscallInvocation::new(
+            LinuxSyscall::GetCwd as u64,
+            [buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0],
+        );
+        match dispatch(&invocation, None) {
+            DispatchResult::Completed(Ok(len)) => {
+                assert_eq!(len, 2);
+                assert_eq!(buf[0], b'/');
+                assert_eq!(buf[1], 0);
+            }
+            other => panic!("unexpected dispatch result: {:?}", other),
+        }
+    }
+
+    #[kernel_test_case]
+    fn fcntl_dupfd_sets_cloexec() {
+        println!("[test] fcntl_dupfd_sets_cloexec");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        SCHEDULER.init().expect("scheduler init");
+
+        let dup_inv = SyscallInvocation::new(LinuxSyscall::Fcntl as u64, [0, 1030, 10, 0, 0, 0]);
+        let new_fd = match dispatch(&dup_inv, None) {
+            DispatchResult::Completed(Ok(fd)) => fd as u32,
+            other => panic!("unexpected dispatch result: {:?}", other),
+        };
+        assert_eq!(new_fd, 10);
+
+        let get_inv =
+            SyscallInvocation::new(LinuxSyscall::Fcntl as u64, [new_fd as u64, 1, 0, 0, 0, 0]);
+        match dispatch(&get_inv, None) {
+            DispatchResult::Completed(Ok(flags)) => assert_eq!(flags, 1),
             other => panic!("unexpected dispatch result: {:?}", other),
         }
     }

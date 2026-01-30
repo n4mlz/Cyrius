@@ -113,6 +113,23 @@ impl File for MemFileHandle {
         *guard = guard.checked_add(written).ok_or(VfsError::Corrupted)?;
         Ok(written)
     }
+
+    fn seek(&self, offset: i64, whence: u32) -> Result<u64, VfsError> {
+        let mut guard = self.pos.lock();
+        let base = match whence {
+            0 => 0i64,
+            1 => *guard as i64,
+            2 => self.node.size() as i64,
+            _ => return Err(VfsError::InvalidPath),
+        };
+        let next = base.checked_add(offset).ok_or(VfsError::Corrupted)?;
+        if next < 0 {
+            return Err(VfsError::InvalidPath);
+        }
+        let next = usize::try_from(next).map_err(|_| VfsError::Corrupted)?;
+        *guard = next;
+        Ok(next as u64)
+    }
 }
 
 struct MemDirFile {
@@ -266,6 +283,32 @@ impl Node for MemSymlink {
 
     fn as_symlink(&self) -> Option<&dyn SymlinkNode> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::println;
+    use crate::test::kernel_test_case;
+
+    #[kernel_test_case]
+    fn memfs_seek_updates_offset() {
+        println!("[test] memfs_seek_updates_offset");
+
+        let root = MemDirectory::new();
+        let root_view = root.as_dir().expect("root dir");
+        let file_node = root_view.create_file("note").expect("create file");
+        let file = file_node.open(OpenOptions::new(0)).expect("open file");
+
+        let _ = file.write(b"abcd").expect("write");
+        let pos = file.seek(1, 0).expect("seek");
+        assert_eq!(pos, 1);
+
+        let mut buf = [0u8; 2];
+        let read = file.read(&mut buf).expect("read");
+        assert_eq!(read, 2);
+        assert_eq!(&buf[..read], b"bc");
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::trap::TrapFrame as TrapFrameTrait;
 
 pub(super) const GENERAL_REGS_SIZE: usize = core::mem::size_of::<GeneralRegisters>();
+/// Byte offset from the trap frame base to the CPU-pushed error code slot.
 pub(super) const ORIGINAL_ERROR_OFFSET: usize = 8 + GENERAL_REGS_SIZE;
 
 #[repr(C)]
@@ -79,6 +80,7 @@ impl TrapFrame {
 
 impl TrapFrameTrait for TrapFrame {
     fn error_code(&self) -> Option<u64> {
+        // The stubs push a placeholder even for no-error exceptions, so `0` means "no error".
         Some(self.error_code)
     }
 }

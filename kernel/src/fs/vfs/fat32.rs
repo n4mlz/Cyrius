@@ -512,6 +512,23 @@ impl<D: BlockDevice + Send + 'static> File for FatFileHandle<D> {
         *guard = guard.checked_add(read).ok_or(VfsError::Corrupted)?;
         Ok(read)
     }
+
+    fn seek(&self, offset: i64, whence: u32) -> Result<u64, VfsError> {
+        let mut guard = self.pos.lock();
+        let base = match whence {
+            0 => 0i64,
+            1 => *guard as i64,
+            2 => i64::from(self.node.size),
+            _ => return Err(VfsError::InvalidPath),
+        };
+        let next = base.checked_add(offset).ok_or(VfsError::Corrupted)?;
+        if next < 0 {
+            return Err(VfsError::InvalidPath);
+        }
+        let next = usize::try_from(next).map_err(|_| VfsError::Corrupted)?;
+        *guard = next;
+        Ok(next as u64)
+    }
 }
 
 impl<D: BlockDevice + Send + 'static> Node for FatFileNode<D> {

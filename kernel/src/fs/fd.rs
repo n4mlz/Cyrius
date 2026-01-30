@@ -11,6 +11,7 @@ pub type Fd = u32;
 pub struct FdEntry {
     file: Arc<dyn File>,
     close_on_exec: bool,
+    dir_offset: u64,
 }
 
 impl FdEntry {
@@ -18,6 +19,7 @@ impl FdEntry {
         Self {
             file,
             close_on_exec: false,
+            dir_offset: 0,
         }
     }
 
@@ -31,6 +33,14 @@ impl FdEntry {
 
     pub fn set_close_on_exec(&mut self, value: bool) {
         self.close_on_exec = value;
+    }
+
+    pub fn dir_offset(&self) -> u64 {
+        self.dir_offset
+    }
+
+    pub fn set_dir_offset(&mut self, value: u64) {
+        self.dir_offset = value;
     }
 }
 
@@ -80,9 +90,61 @@ impl FdTable {
         guard.clear(fd)
     }
 
+    pub fn dup_min(&self, src: Fd, min: Fd, close_on_exec: bool) -> Result<Fd, VfsError> {
+        let mut guard = self.inner.lock();
+        let entry = guard.get(src)?.clone();
+        let mut entry = entry;
+        entry.set_close_on_exec(close_on_exec);
+        let fd = guard.allocate_fd_from(min);
+        guard.set(fd, entry)?;
+        Ok(fd)
+    }
+
+    pub fn get_fd_flags(&self, fd: Fd) -> Result<u32, VfsError> {
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        Ok(if entry.close_on_exec() { 1 } else { 0 })
+    }
+
+    pub fn set_fd_flags(&self, fd: Fd, flags: u32) -> Result<(), VfsError> {
+        let mut guard = self.inner.lock();
+        let entry = guard
+            .slots
+            .get_mut(fd as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or(VfsError::NotFound)?;
+        entry.set_close_on_exec(flags & 1 != 0);
+        Ok(())
+    }
+
     pub fn entry(&self, fd: Fd) -> Result<FdEntry, VfsError> {
         let guard = self.inner.lock();
         guard.get(fd).cloned()
+    }
+
+    pub fn dir_offset(&self, fd: Fd) -> Result<u64, VfsError> {
+        let guard = self.inner.lock();
+        let entry = guard.get(fd)?;
+        Ok(entry.dir_offset())
+    }
+
+    pub fn set_dir_offset(&self, fd: Fd, offset: u64) -> Result<(), VfsError> {
+        let mut guard = self.inner.lock();
+        let entry = guard
+            .slots
+            .get_mut(fd as usize)
+            .and_then(|slot| slot.as_mut())
+            .ok_or(VfsError::NotFound)?;
+        entry.set_dir_offset(offset);
+        Ok(())
+    }
+
+    pub fn clone_from(&self, other: &FdTable) {
+        let other_guard = other.inner.lock();
+        let mut guard = self.inner.lock();
+        guard.slots = other_guard.slots.clone();
+        self.next_fd
+            .store(other.next_fd.load(Ordering::Acquire), Ordering::Release);
     }
 }
 
@@ -106,6 +168,23 @@ impl FdTableInner {
             return index as Fd;
         }
         let fd = suggested as usize;
+        if fd >= self.slots.len() {
+            self.slots.resize(fd + 1, None);
+        }
+        fd as Fd
+    }
+
+    fn allocate_fd_from(&mut self, min: Fd) -> Fd {
+        if let Some((index, _)) = self
+            .slots
+            .iter()
+            .enumerate()
+            .skip(min as usize)
+            .find(|(_, entry)| entry.is_none())
+        {
+            return index as Fd;
+        }
+        let fd = min as usize;
         if fd >= self.slots.len() {
             self.slots.resize(fd + 1, None);
         }
@@ -142,5 +221,28 @@ impl FdTableInner {
         } else {
             Err(VfsError::NotFound)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::devfs::global_tty_node;
+    use crate::println;
+    use crate::test::kernel_test_case;
+
+    #[kernel_test_case]
+    fn fd_table_clone_copies_entries() {
+        println!("[test] fd_table_clone_copies_entries");
+
+        let src = FdTable::new();
+        let dst = FdTable::new();
+        let tty = global_tty_node()
+            .open(crate::fs::OpenOptions::new(0))
+            .expect("open tty");
+        src.open_fixed(10, tty).expect("open fixed");
+
+        dst.clone_from(&src);
+        assert!(dst.entry(10).is_ok(), "cloned fd missing");
     }
 }

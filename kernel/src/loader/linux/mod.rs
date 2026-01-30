@@ -24,6 +24,7 @@ pub const AT_PHNUM: u64 = 5;
 pub const AT_PAGESZ: u64 = 6;
 pub const AT_BASE: u64 = 7;
 pub const AT_ENTRY: u64 = 9;
+pub const AT_RANDOM: u64 = 25;
 
 /// Linux ELF image loaded into a process address space.
 pub struct LinuxProgram<S> {
@@ -111,6 +112,8 @@ where
         .address_space(pid)
         .ok_or(LinuxLoadError::Process(ProcessError::NotFound))?;
 
+    // NOTE: The loader does not validate user address ranges; it assumes a fresh
+    // address space (or equivalent) before mapping the ELF image.
     let mapped = map::map_segments::<P>(&space, &elf, &elf_bytes, load_bias)?;
     if let Some(dynamic) = elf.dynamic.as_ref() {
         space.with_page_table(|table, _| {
@@ -121,12 +124,10 @@ where
     }
     space.with_page_table(|table, _| {
         map::apply_segment_permissions(table, &mapped)?;
-        if elf.interp.is_some() {
-            if let Some(relro) = elf.relro.as_ref() {
-                reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
-            }
-        } else if elf.relro.is_some() {
-            crate::println!("[loader] GNU_RELRO skipped (no PT_INTERP)");
+        if elf.interp.is_some()
+            && let Some(relro) = elf.relro.as_ref()
+        {
+            reloc::apply_gnu_relro(table, load_bias, relro, &mapped)?;
         }
         Ok::<(), LinuxLoadError>(())
     })?;
@@ -138,7 +139,6 @@ where
         .map_err(LinuxLoadError::from)?;
     let heap_base = compute_heap_base::<P>(load_bias, &elf)?;
     let phdr = compute_phdr_address(load_bias, &elf, &mapped)?;
-
     Ok(LinuxProgram {
         entry: add_base(load_bias, elf.entry)?,
         user_stack,
@@ -222,6 +222,8 @@ fn compute_phdr_address(
     Ok(phdr)
 }
 
+/// Build a minimal auxv set sufficient for static/PIE test binaries.
+/// Dynamic runtimes may require additional entries (AT_BASE/AT_RANDOM/etc.).
 pub fn build_auxv<S>(program: &LinuxProgram<S>, page_size: usize) -> Vec<AuxvEntry> {
     alloc::vec![
         AuxvEntry {
@@ -391,7 +393,7 @@ mod tests {
             .address_space(pid)
             .expect("user address space");
         let relocated = read_user_u64(&space, VirtAddr::new(0x400000 + 0x400)).expect("read reloc");
-        assert_eq!(relocated, 0x400000 + 0x1234);
+        assert_eq!(relocated, 0x400000 + 0x234);
     }
 
     fn test_elf_image() -> Vec<u8> {
@@ -501,7 +503,7 @@ mod tests {
         write_dyn(&mut buf[0x220..0x230], 9, 24);
         write_dyn(&mut buf[0x230..0x240], 0, 0);
 
-        write_rela(&mut buf[0x300..0x318], 0x400, 8, 0x1234);
+        write_rela(&mut buf[0x300..0x318], 0x400, 8, 0x234);
 
         buf
     }

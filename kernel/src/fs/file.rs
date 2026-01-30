@@ -15,6 +15,10 @@ pub trait File: Send + Sync {
         Err(VfsError::NotDirectory)
     }
 
+    fn seek(&self, _offset: i64, _whence: u32) -> Result<u64, VfsError> {
+        Err(VfsError::NotFile)
+    }
+
     fn ioctl(&self, _request: &ControlRequest<'_>) -> Result<u64, ControlError> {
         Err(ControlError::Unsupported)
     }

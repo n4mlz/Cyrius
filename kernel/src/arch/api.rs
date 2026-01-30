@@ -243,6 +243,7 @@ pub trait ArchInterrupt {
 
     fn init_interrupts(boot_info: &'static BootInfo) -> Result<(), InterruptInitError>;
 
+    fn are_interrupts_enabled() -> bool;
     fn enable_interrupts();
     fn disable_interrupts();
     fn end_of_interrupt(vector: u8);

@@ -18,9 +18,9 @@ pub type ProcessHandle = Arc<Process>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
-    AlreadyInitialised,
     NotInitialised,
     NotFound,
+    Terminated,
     DuplicateThread,
     ThreadNotAttached,
     AddressSpace(crate::arch::api::UserAddressSpaceError),
@@ -42,6 +42,7 @@ impl ProcessFs {
     }
 
     fn install_stdio(&self) {
+        // NOTE: stdin/stdout/stderr share the same open file description (dup-like).
         let tty = crate::fs::devfs::global_tty_node();
         let tty_file = tty
             .clone()
@@ -67,6 +68,11 @@ impl ProcessFs {
         let guard = self.cwd.lock();
         guard.clone()
     }
+
+    pub fn clone_from(&self, other: &ProcessFs) {
+        self.fd_table.clone_from(&other.fd_table);
+        self.set_cwd(other.cwd());
+    }
 }
 
 impl Default for ProcessFs {
@@ -79,8 +85,8 @@ impl Default for ProcessFs {
 ///
 /// # Implementation note
 ///
-/// At this point, each process does not have an individual address space and all share the kernel's address space.
-/// When implementing userland in the future, it will be necessary to properly duplicate and isolate `ArchThread::AddressSpace` here.
+/// Kernel processes share the current address space; user processes receive their own
+/// address spaces from `ArchThread::create_user_address_space`.
 pub struct ProcessTable {
     inner: SpinLock<ProcessTableInner>,
     initialised: AtomicBool,
@@ -95,27 +101,18 @@ impl ProcessTable {
     }
 
     pub fn init_kernel(&self) -> Result<ProcessId, ProcessError> {
-        if self
-            .initialised
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(self
-                .inner
-                .lock()
-                .kernel_pid
-                .expect("kernel process must exist"));
-        }
-
+        // NOTE: Idempotent initialization; returns PID 0 after the first call.
         let mut inner = self.inner.lock();
         if inner.kernel_pid.is_some() {
-            return Err(ProcessError::AlreadyInitialised);
+            self.initialised.store(true, Ordering::Release);
+            return Ok(inner.kernel_pid.expect("kernel process must exist"));
         }
 
         let process = Arc::new(Process::kernel(0, "kernel", Abi::Host));
         inner.kernel_pid = Some(process.id());
         inner.next_pid = 1;
         inner.processes.push(process);
+        self.initialised.store(true, Ordering::Release);
 
         Ok(0)
     }
@@ -250,6 +247,7 @@ impl Default for ProcessTable {
 pub static PROCESS_TABLE: ProcessTable = ProcessTable::new();
 
 struct ProcessTableInner {
+    // TODO: Implement process reaping/removal; the vector grows monotonically.
     processes: Vec<ProcessHandle>,
     kernel_pid: Option<ProcessId>,
     next_pid: ProcessId,
@@ -291,6 +289,9 @@ pub struct Process {
     brk: SpinLock<BrkState>,
     abi: Abi,
     domain: ProcessDomain,
+    session_id: SpinLock<ProcessId>,
+    pgrp_id: SpinLock<ProcessId>,
+    controlling_tty: SpinLock<Option<ControllingTty>>,
 }
 
 /// Process domain determines the ABI and VFS visibility contract.
@@ -352,6 +353,9 @@ impl Process {
             brk: SpinLock::new(BrkState::empty()),
             abi,
             domain: ProcessDomain::Host,
+            session_id: SpinLock::new(id),
+            pgrp_id: SpinLock::new(id),
+            controlling_tty: SpinLock::new(None),
         }
     }
 
@@ -376,6 +380,9 @@ impl Process {
             brk: SpinLock::new(BrkState::empty()),
             abi,
             domain,
+            session_id: SpinLock::new(id),
+            pgrp_id: SpinLock::new(id),
+            controlling_tty: SpinLock::new(None),
         }
     }
 
@@ -427,6 +434,9 @@ impl Process {
     }
 
     pub fn attach_thread(&self, tid: ThreadId) -> Result<(), ProcessError> {
+        if matches!(self.state(), ProcessState::Terminated) {
+            return Err(ProcessError::Terminated);
+        }
         let mut guard = self.threads.lock();
         if guard.contains(&tid) {
             return Err(ProcessError::DuplicateThread);
@@ -464,6 +474,10 @@ impl Process {
 
     pub fn fd_table(&self) -> &FdTable {
         &self.fs.fd_table
+    }
+
+    pub fn clone_fs_from(&self, other: &Process) {
+        self.fs.clone_from(&other.fs);
     }
 
     pub fn parent(&self) -> Option<ProcessId> {
@@ -508,6 +522,42 @@ impl Process {
         guard.current = base;
     }
 
+    pub fn session_id(&self) -> ProcessId {
+        *self.session_id.lock()
+    }
+
+    pub fn set_session_id(&self, session: ProcessId) {
+        let mut guard = self.session_id.lock();
+        *guard = session;
+    }
+
+    pub fn pgrp_id(&self) -> ProcessId {
+        *self.pgrp_id.lock()
+    }
+
+    pub fn set_pgrp_id(&self, pgrp: ProcessId) {
+        let mut guard = self.pgrp_id.lock();
+        *guard = pgrp;
+    }
+
+    pub fn controlling_tty(&self) -> Option<ControllingTty> {
+        *self.controlling_tty.lock()
+    }
+
+    pub fn has_controlling_tty(&self) -> bool {
+        self.controlling_tty.lock().is_some()
+    }
+
+    pub fn set_controlling_tty(&self, tty: ControllingTty) {
+        let mut guard = self.controlling_tty.lock();
+        *guard = Some(tty);
+    }
+
+    pub fn clear_controlling_tty(&self) {
+        let mut guard = self.controlling_tty.lock();
+        *guard = None;
+    }
+
     fn set_state_if_alive(&self, state: ProcessState) {
         if matches!(self.state(), ProcessState::Terminated) {
             return;
@@ -544,6 +594,11 @@ pub enum ProcessState {
 enum ProcessKind {
     Kernel,
     User,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControllingTty {
+    Global,
 }
 
 #[cfg(test)]
@@ -614,9 +669,10 @@ mod tests {
                 annotations: Default::default(),
             },
             oci_spec::runtime::Spec::default(),
-            crate::container::ContainerContext::new(Arc::new(crate::fs::Vfs::new(
-                crate::fs::memfs::MemDirectory::new(),
-            ))),
+            crate::container::ContainerContext::new(
+                Arc::new(crate::fs::Vfs::new(crate::fs::memfs::MemDirectory::new())),
+                crate::container::Uts::default_host(),
+            ),
         ));
         let pid = PROCESS_TABLE
             .create_user_process(
@@ -626,5 +682,30 @@ mod tests {
             .expect("create linux process");
         let abi = PROCESS_TABLE.abi(pid).expect("abi present");
         assert_eq!(abi, Abi::Linux);
+    }
+
+    #[kernel_test_case]
+    fn process_defaults_session_and_pgrp_to_pid() {
+        println!("[test] process_defaults_session_and_pgrp_to_pid");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("session-proc", ProcessDomain::Host)
+            .expect("create user process");
+        let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
+        assert_eq!(proc.session_id(), pid);
+        assert_eq!(proc.pgrp_id(), pid);
+    }
+
+    #[kernel_test_case]
+    fn process_default_has_no_controlling_tty() {
+        println!("[test] process_default_has_no_controlling_tty");
+
+        let _ = PROCESS_TABLE.init_kernel();
+        let pid = PROCESS_TABLE
+            .create_user_process("ctty-proc", ProcessDomain::Host)
+            .expect("create user process");
+        let proc = PROCESS_TABLE.process_handle(pid).expect("process handle");
+        assert!(!proc.has_controlling_tty());
     }
 }

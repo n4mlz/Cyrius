@@ -98,11 +98,25 @@ pub fn halt() {
     x86_64::instructions::hlt();
 }
 
+#[cfg(test)]
+pub(crate) fn arm_user_pf_frame_check(pid: crate::process::ProcessId, expected_fault_addr: u64) {
+    trap::arm_user_pf_frame_check(pid, expected_fault_addr);
+}
+
+#[cfg(test)]
+pub(crate) fn user_pf_frame_check_passed() -> bool {
+    trap::user_pf_frame_check_passed()
+}
+
 impl ArchInterrupt for X86_64 {
     type Timer = interrupt::LocalApicTimer;
 
     fn init_interrupts(boot_info: &'static BootInfo) -> Result<(), InterruptInitError> {
         interrupt::LOCAL_APIC.init(boot_info)
+    }
+
+    fn are_interrupts_enabled() -> bool {
+        x86_64::instructions::interrupts::are_enabled()
     }
 
     fn enable_interrupts() {

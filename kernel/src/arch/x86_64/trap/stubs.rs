@@ -2,12 +2,18 @@ use super::build_trap_info;
 use super::context::{ORIGINAL_ERROR_OFFSET, TrapFrame};
 use crate::arch::{Arch, api::ArchTrap};
 
+// Trap entry stubs assume:
+// - Direction flag is cleared on entry (`cld`) before any Rust code runs.
+// - The kernel is built with red-zone disabled (SysV ABI requires `-mno-red-zone`).
+// - SIMD/FPU registers are not touched in the kernel until proper save/restore exists.
+
 macro_rules! define_trap_stub_no_error {
     ($name:ident, $vector:expr) => {
         #[unsafe(naked)]
         pub(super) unsafe extern "C" fn $name() -> ! {
             core::arch::naked_asm!(
                 r#"
+                    cld
                     push r15
                     push r14
                     push r13
@@ -75,6 +81,7 @@ macro_rules! define_trap_stub_with_error {
         pub(super) unsafe extern "C" fn $name() -> ! {
             core::arch::naked_asm!(
                 r#"
+                    cld
                     push r15
                     push r14
                     push r13
@@ -96,16 +103,39 @@ macro_rules! define_trap_stub_with_error {
                     mov rsi, rsp
                     mov rax, [rsi + {orig_error_offset}]
                     mov [rsi], rax
+                    lea rdi, [rsi + {orig_error_offset}]
+                    mov rbx, [rdi + 16]
+                    test bx, 3
+                    jz 1f
+                    mov rax, [rdi + 8]
+                    mov rcx, [rdi + 16]
+                    mov rdx, [rdi + 24]
+                    mov r8, [rdi + 32]
+                    mov r9, [rdi + 40]
+                    mov [rdi], rax
+                    mov [rdi + 8], rcx
+                    mov [rdi + 16], rdx
+                    mov [rdi + 24], r8
+                    mov [rdi + 32], r9
+                    jmp 2f
+                1:
+                    mov rax, [rdi + 8]
+                    mov rcx, [rdi + 16]
+                    mov rdx, [rdi + 24]
+                    mov [rdi], rax
+                    mov [rdi + 8], rcx
+                    mov [rdi + 16], rdx
+                2:
 
                     mov r12, rsp
                     and r12, 0xF
-                    jz 1f
+                    jz 3f
                     sub rsp, 8
                     mov r12, 8
-                    jmp 2f
-                1:
+                    jmp 4f
+                3:
                     xor r12, r12
-                2:
+                4:
                     mov edi, {vector}
                     mov edx, 1
 
@@ -130,8 +160,6 @@ macro_rules! define_trap_stub_with_error {
                     pop r14
                     pop r15
 
-                    add rsp, 8
-
                     iretq
                 "#,
                 vector = const $vector,
@@ -142,6 +170,8 @@ macro_rules! define_trap_stub_with_error {
     };
 }
 
+// NOTE: Exception vectors with error codes are fixed by the CPU specification.
+// A mismatch here will corrupt the stack frame and usually triple-fault on `iretq`.
 define_trap_stub_no_error!(exception_0, 0);
 define_trap_stub_no_error!(exception_1, 1);
 define_trap_stub_no_error!(exception_2, 2);

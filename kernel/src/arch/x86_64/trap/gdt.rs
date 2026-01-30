@@ -20,11 +20,13 @@ const PRIVILEGE_STACK_SIZE: usize = 32 * 1024;
 #[repr(align(16))]
 struct IstStackArea([u8; IST_STACK_SIZE * IST_STACK_COUNT]);
 
+// NOTE: These stacks are global, so SMP will require per-CPU allocations.
 static mut IST_STACKS: IstStackArea = IstStackArea([0u8; IST_STACK_SIZE * IST_STACK_COUNT]);
 
 #[repr(align(16))]
 struct PrivilegeStack([u8; PRIVILEGE_STACK_SIZE]);
 
+// NOTE: This is a single fallback ring-0 stack; SMP must provide per-CPU stacks.
 static mut PRIV_STACK: PrivilegeStack = PrivilegeStack([0u8; PRIVILEGE_STACK_SIZE]);
 
 pub(crate) struct GdtSelectors {
@@ -49,6 +51,11 @@ static GDT: LazyLock<GdtInit, GdtBuilder> = LazyLock::new_const(build_gdt);
 ///
 /// Must be called on each CPU before enabling interrupts so that IST stacks and
 /// privilege transitions reference valid descriptors.
+///
+/// # SMP limitation
+///
+/// The current implementation uses global IST/privilege stacks. This is only
+/// safe for a single CPU and must be replaced with per-CPU storage.
 pub(super) fn load() {
     let (gdt, selectors) = &*GDT;
     gdt.load();
@@ -65,6 +72,12 @@ pub(crate) fn selectors() -> &'static GdtSelectors {
     selectors
 }
 
+/// Updates the ring-0 stack used on CPL3->CPL0 transitions.
+///
+/// # Safety contract
+///
+/// Must be called for the current CPU while its interrupts are disabled, and
+/// on SMP this must update the per-CPU TSS instance instead of the global one.
 pub(crate) fn set_privilege_stack(stack_top: KernelVirtAddr) {
     let mut tss = TSS.lock();
     let top = VirtAddr::new(stack_top.as_raw() as u64);

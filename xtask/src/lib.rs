@@ -709,6 +709,8 @@ fn ensure_xtask_assets_dir() -> Result<PathBuf> {
         .with_context(|| format!("ensure linux syscall adv elf in {}", assets_dir.display()))?;
     xtask_assets::ensure_linux_syscall_child_elf(&assets_dir)
         .with_context(|| format!("ensure linux syscall child elf in {}", assets_dir.display()))?;
+    xtask_assets::ensure_linux_page_fault_elf(&assets_dir)
+        .with_context(|| format!("ensure linux page fault elf in {}", assets_dir.display()))?;
     xtask_assets::run_linux_syscall_host_test(&assets_dir)
         .with_context(|| "run linux syscall host test")?;
     Ok(assets_dir)

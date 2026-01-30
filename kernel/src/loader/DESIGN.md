@@ -6,15 +6,15 @@
 
 ## Linux ELF Loader
 - Supports ELF64, little-endian, `ET_EXEC` and `ET_DYN` (PIE), `EM_X86_64`, and `PT_LOAD` segments.
-- Parses `PT_DYNAMIC` for relocation metadata and applies `R_X86_64_RELATIVE` relocations; full dynamic linking remains out of scope.
-- Applies `GNU_RELRO` by dropping write permissions after relocations.
+- Parses `PT_DYNAMIC` for relocation metadata and applies only `R_X86_64_RELATIVE`/`RELR` relocations; symbol resolution (`GLOB_DAT`, `JUMP_SLOT`, etc.) is intentionally rejected until a linker is implemented.
+- Applies `GNU_RELRO` by dropping write permissions after relocations, rounding to page boundaries (over-protecting is acceptable for now).
 - Parsing, mapping, syscall patching, and stack construction are separated into dedicated loader submodules (`elf`, `map`, `patch`, `stack`) for easier evolution.
 - Maps each loadable segment into the target process address space with `USER` permissions derived from ELF `p_flags` (R/W/X). Backing frames are freshly allocated via the global frame allocator.
 - Copies file-backed bytes to the mapped region and zero-fills the remaining `p_memsz - p_filesz` portion for `.bss`.
-- Rewrites `syscall` instructions (`0x0f 0x05`) in executable segments into `int 0x80` so we can reuse the existing software-interrupt path until proper `SYSCALL/SYSRET` MSR plumbing is added.
-- Before mapping a new image, any existing mappings in the target segment range are unmapped and frames are returned to the allocator. This allows repeated loads in the shared kernel address space without colliding at fixed ELF virtual addresses.
-- Builds a minimal SysV-style stack (when requested): `argc=0`, `argv[0]=NULL`, `envp[0]=NULL`, `AT_NULL` terminator. The stack pointer is 16-byte aligned before pushing.
-- When the caller supplies argv/envp, the loader can also populate `AT_PAGESZ`, `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, and `AT_ENTRY` to support PIE and libc expectations.
+- Rewrites `syscall` instructions (`0x0f 0x05`) in executable segments into `int 0x80` so we can reuse the existing software-interrupt path until proper `SYSCALL/SYSRET` MSR plumbing is added. The scan is heuristic (no instruction decoding), so it may yield false positives/negatives.
+- Before mapping a new image, any existing mappings in the target segment range are unmapped and frames are returned to the allocator. This assumes the process address space is fresh and that the loader owns those ranges.
+- Builds a minimal stack that is not fully Linux-ABI compliant; it exists only to bring up simple test binaries. Full ABI stacks are constructed by the argv/envp helpers.
+- When the caller supplies argv/envp, the loader can also populate `AT_PAGESZ`, `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, and `AT_ENTRY` to support PIE and libc expectations. Additional auxv entries are still missing for full libc compatibility.
 - Segments are initially mapped writable to populate contents, then write permission is dropped if the ELF flags omit it so CR0.WP=1 でもロード時に落ちない。
 - The loader copies bytes by translating target virtual addresses to physical frames and writing through the physical mapper, so it no longer depends on the target address space being active.
 
