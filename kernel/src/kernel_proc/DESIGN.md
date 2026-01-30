@@ -26,6 +26,8 @@
   (`cc`/`gcc`/`clang`) into `target/xtask-assets/linux-syscall.elf`.
 - Additional syscall coverage comes from `linux-syscall-adv.elf` plus its exec target
   `linux-syscall-child.elf`, built via `xtask-assets` from `xtask-assets/fixtures`.
+- TCP socket syscall coverage uses `linux-syscall-net.elf`, built via `xtask-assets` from
+  `xtask-assets/fixtures`, with a kernel-side smoltcp client driving the accept path.
 - `xtask` also runs the linux-syscall binary on the host to confirm Linux and Cyrius produce the
   same stdout for the stdin/file I/O scenario.
 

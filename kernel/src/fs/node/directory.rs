@@ -9,6 +9,14 @@ pub trait DirNode: Send + Sync {
     fn lookup(&self, name: &PathComponent) -> Result<Arc<dyn Node>, VfsError>;
     fn read_dir(&self) -> Result<Vec<DirEntry>, VfsError>;
 
+    fn parent(&self) -> Option<Arc<dyn Node>> {
+        None
+    }
+
+    fn name(&self) -> Option<&str> {
+        None
+    }
+
     fn create_file(&self, _name: &str) -> Result<Arc<dyn Node>, VfsError> {
         Err(VfsError::ReadOnly)
     }

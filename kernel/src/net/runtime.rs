@@ -1,5 +1,8 @@
 #[cfg(test)]
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use smoltcp::iface::SocketHandle;
 
 use crate::device::net::{LinkState, NetworkDevice, SharedNetworkDevice};
 use crate::device::virtio::net::{VirtioNetError, VirtioPciNetDevice};
@@ -22,6 +25,7 @@ pub enum NetError {
 
 pub struct NetRuntime {
     stack: SmoltcpStack<NetDevice>,
+    closing: Vec<SocketHandle>,
 }
 
 impl NetRuntime {
@@ -33,15 +37,51 @@ impl NetRuntime {
             .routes_mut()
             .add_default_ipv4_route(gateway)
             .map_err(NetError::Route)?;
-        Ok(Self { stack })
+        Ok(Self {
+            stack,
+            closing: Vec::new(),
+        })
     }
 
     pub fn poll(&mut self) -> smoltcp::iface::PollResult {
-        self.stack.poll()
+        let result = self.stack.poll();
+        self.reap_closed_sockets();
+        result
     }
 
     pub fn stack_mut(&mut self) -> &mut SmoltcpStack<NetDevice> {
         &mut self.stack
+    }
+
+    fn defer_close(&mut self, handle: SocketHandle) {
+        if self.closing.contains(&handle) {
+            return;
+        }
+        self.closing.push(handle);
+    }
+
+    fn reap_closed_sockets(&mut self) {
+        let mut idx = 0;
+        while idx < self.closing.len() {
+            let handle = self.closing[idx];
+            let socket = self
+                .stack
+                .sockets_mut()
+                .get_mut::<smoltcp::socket::tcp::Socket>(handle);
+            let pending = socket.send_queue();
+            let state = socket.state();
+            let remove = pending == 0
+                && matches!(
+                    state,
+                    smoltcp::socket::tcp::State::Closed | smoltcp::socket::tcp::State::TimeWait
+                );
+            if remove {
+                let _ = self.stack.sockets_mut().remove(handle);
+                self.closing.swap_remove(idx);
+            } else {
+                idx += 1;
+            }
+        }
     }
 }
 
@@ -82,6 +122,10 @@ pub fn poll_if_initialised() -> bool {
 pub fn is_initialised() -> bool {
     let guard = NET_RUNTIME.get().lock();
     guard.is_some()
+}
+
+pub fn defer_socket_close(handle: SocketHandle) -> Result<(), NetError> {
+    with_runtime(|rt| rt.defer_close(handle))
 }
 
 #[derive(Debug)]

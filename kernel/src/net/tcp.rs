@@ -15,7 +15,6 @@ const EPHEMERAL_START: u16 = 49_152;
 const EPHEMERAL_END: u16 = 65_535;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(EPHEMERAL_START);
-
 #[derive(Debug)]
 pub enum TcpError {
     Net(NetError),
@@ -251,9 +250,8 @@ impl TcpStream {
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        let _ = runtime::with_runtime(|rt| {
-            rt.stack_mut().sockets_mut().remove(self.handle);
-        });
+        let _ = self.close();
+        let _ = runtime::defer_socket_close(self.handle);
     }
 }
 
@@ -307,9 +305,12 @@ fn next_port() -> u16 {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use smoltcp::iface::SocketHandle;
-    use smoltcp::socket::tcp::{Socket as RawTcpSocket, SocketBuffer as RawTcpSocketBuffer};
+    use smoltcp::socket::tcp::{
+        RecvError, Socket as RawTcpSocket, SocketBuffer as RawTcpSocketBuffer,
+    };
     use smoltcp::wire::{IpAddress, IpEndpoint};
 
     use crate::net::runtime::{self, TestNetworkDevice};
@@ -391,6 +392,97 @@ mod tests {
         let echoed_len = recv_on_client(&mut client_stack, client_handle, &mut echoed);
         assert_eq!(echoed_len, payload.len());
         assert_eq!(&echoed[..echoed_len], payload);
+    }
+
+    #[kernel_test_case]
+    fn tcp_close_waits_for_tx_drain() {
+        println!("[test] tcp_close_waits_for_tx_drain");
+
+        runtime::reset_for_tests();
+        let (server_dev, client_dev) = TestNetworkDevice::pair();
+        runtime::init_for_tests(server_dev);
+
+        let client_addr = NetCidr::new(IpAddr::V4(CLIENT_IP), 24);
+        let mut client_stack = SmoltcpStack::new(client_dev, &[client_addr]);
+
+        let server_addr = SocketAddr::new(IpAddr::V4(SERVER_IP), PORT);
+        let mut listener = TcpListener::bind(server_addr).expect("bind listener");
+
+        let mut client_socket = RawTcpSocket::new(
+            RawTcpSocketBuffer::new(vec![0; 128 * 1024]),
+            RawTcpSocketBuffer::new(vec![0; 128 * 1024]),
+        );
+        let client_handle = client_stack.sockets_mut().add(client_socket);
+
+        let local_endpoint = IpEndpoint::new(IpAddress::Ipv4(to_smoltcp_ipv4(CLIENT_IP)), 40_001);
+        let remote_endpoint = IpEndpoint::new(IpAddress::Ipv4(to_smoltcp_ipv4(SERVER_IP)), PORT);
+
+        client_stack
+            .with_context_and_sockets(|cx, sockets| {
+                sockets.get_mut::<RawTcpSocket>(client_handle).connect(
+                    cx,
+                    remote_endpoint,
+                    local_endpoint,
+                )
+            })
+            .expect("client connect");
+
+        let mut accepted = None;
+        for _ in 0..200_000 {
+            poll_both(&mut client_stack);
+            if let Some((stream, _addr)) = listener.try_accept().expect("try_accept") {
+                accepted = Some(stream);
+                break;
+            }
+        }
+        let mut stream = accepted.expect("server accepted connection");
+
+        let payload = vec![0xAC; 64 * 1024];
+        let mut sent = 0usize;
+        for _ in 0..500_000 {
+            poll_both(&mut client_stack);
+            if let Some(n) = stream
+                .try_write(&payload[sent..])
+                .expect("server try_write")
+            {
+                sent += n;
+                if sent == payload.len() {
+                    break;
+                }
+            }
+        }
+        assert_eq!(sent, payload.len());
+        stream.close().expect("server close");
+
+        let mut received = Vec::with_capacity(payload.len());
+        let mut finished = false;
+        for _ in 0..500_000 {
+            poll_both(&mut client_stack);
+            let socket = client_stack
+                .sockets_mut()
+                .get_mut::<RawTcpSocket>(client_handle);
+            if socket.can_recv() {
+                let mut buf = [0u8; 4096];
+                match socket.recv_slice(&mut buf) {
+                    Ok(n) => {
+                        received.extend_from_slice(&buf[..n]);
+                        if received.len() == payload.len() {
+                            continue;
+                        }
+                    }
+                    Err(RecvError::Finished) => {
+                        finished = true;
+                        break;
+                    }
+                    Err(err) => panic!("client recv error: {:?}", err),
+                }
+            } else if !socket.may_recv() {
+                finished = true;
+                break;
+            }
+        }
+        assert_eq!(received.len(), payload.len());
+        assert!(finished, "client did not observe FIN");
     }
 
     fn poll_both(client_stack: &mut SmoltcpStack<TestNetworkDevice>) {

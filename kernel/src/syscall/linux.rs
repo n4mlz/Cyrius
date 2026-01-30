@@ -16,6 +16,7 @@ use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
 use crate::mem::user::{
     UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice, with_user_slice_mut,
 };
+use crate::net::{IpAddr, Ipv4Addr, SocketAddr, TcpSocketFile};
 use crate::process::fs as proc_fs;
 use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle, ProcessId};
 use crate::thread::SCHEDULER;
@@ -30,6 +31,8 @@ use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxErrno {
     NoEntry = 2,
+    BadFileDescriptor = 9,
+    NotDirectory = 20,
     NoSys = 38,
     InvalidArgument = 22,
     BadAddress = 14,
@@ -46,6 +49,7 @@ pub enum LinuxSyscall {
     Close = 3,
     Stat = 4,
     Lstat = 6,
+    SendTo = 44,
     Poll = 7,
     Lseek = 8,
     Mmap = 9,
@@ -81,7 +85,29 @@ pub enum LinuxSyscall {
     GetDents64 = 217,
     SetTidAddress = 218,
     ClockGetTime = 228,
+    Socket = 41,
+    Bind = 49,
+    Listen = 50,
+    Accept = 43,
+    Accept4 = 288,
+    SetSockOpt = 54,
+    OpenAt = 257,
+    NewFstatAt = 262,
 }
+
+const AF_INET: u16 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCKADDR_IN_LEN: usize = 16;
+const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+const LINUX_O_CLOEXEC: u64 = 0x80000;
+const MSG_NOSIGNAL: u32 = 0x4000;
+const SOL_SOCKET: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const SO_REUSEPORT: u32 = 15;
+const IPPROTO_TCP: u32 = 6;
+const TCP_NODELAY: u32 = 1;
+const SOCK_NONBLOCK: u32 = 0x800;
+const SOCK_CLOEXEC: u32 = 0x80000;
 
 impl LinuxSyscall {
     pub fn from_raw(value: u64) -> Option<Self> {
@@ -103,6 +129,7 @@ impl LinuxSyscall {
             16 => Some(Self::Ioctl),
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
+            44 => Some(Self::SendTo),
             63 => Some(Self::Uname),
             96 => Some(Self::GetTimeOfDay),
             72 => Some(Self::Fcntl),
@@ -128,15 +155,20 @@ impl LinuxSyscall {
             217 => Some(Self::GetDents64),
             218 => Some(Self::SetTidAddress),
             228 => Some(Self::ClockGetTime),
+            41 => Some(Self::Socket),
+            43 => Some(Self::Accept),
+            54 => Some(Self::SetSockOpt),
+            49 => Some(Self::Bind),
+            50 => Some(Self::Listen),
+            257 => Some(Self::OpenAt),
+            262 => Some(Self::NewFstatAt),
+            288 => Some(Self::Accept4),
             _ => None,
         }
     }
 }
 
 /// Minimal Linux syscall table supporting write/getpid/exit placeholders.
-///
-/// NOTE: `openat` and related syscalls are not implemented yet; userland that
-/// relies on them will see ENOSYS.
 pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
@@ -145,10 +177,12 @@ pub fn dispatch(
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
         Some(LinuxSyscall::Open) => DispatchResult::Completed(handle_open(invocation)),
+        Some(LinuxSyscall::OpenAt) => DispatchResult::Completed(handle_openat(invocation)),
         Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
         Some(LinuxSyscall::Lstat) => DispatchResult::Completed(handle_lstat(invocation)),
+        Some(LinuxSyscall::NewFstatAt) => DispatchResult::Completed(handle_newfstatat(invocation)),
         Some(LinuxSyscall::Poll) => DispatchResult::Completed(handle_poll(invocation)),
         Some(LinuxSyscall::Lseek) => DispatchResult::Completed(handle_lseek(invocation)),
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
@@ -188,6 +222,13 @@ pub fn dispatch(
         Some(LinuxSyscall::ClockGetTime) => {
             DispatchResult::Completed(handle_clock_gettime(invocation))
         }
+        Some(LinuxSyscall::SendTo) => DispatchResult::Completed(handle_sendto(invocation)),
+        Some(LinuxSyscall::Socket) => DispatchResult::Completed(handle_socket(invocation)),
+        Some(LinuxSyscall::Bind) => DispatchResult::Completed(handle_bind(invocation)),
+        Some(LinuxSyscall::Listen) => DispatchResult::Completed(handle_listen(invocation)),
+        Some(LinuxSyscall::Accept) => DispatchResult::Completed(handle_accept(invocation)),
+        Some(LinuxSyscall::Accept4) => DispatchResult::Completed(handle_accept4(invocation)),
+        Some(LinuxSyscall::SetSockOpt) => DispatchResult::Completed(handle_setsockopt(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
         None => DispatchResult::Completed(Err(SysError::NotImplemented)),
@@ -263,13 +304,45 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
     })?;
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
+    let cloexec = (flags & LINUX_O_CLOEXEC) != 0;
     let result = if create {
-        proc_fs::open_path_with_create(pid, &path, flags)
+        proc_fs::open_path_with_create_and_options(pid, &path, flags, cloexec)
     } else {
-        proc_fs::open_path(pid, &path, flags)
+        proc_fs::open_path_with_options(pid, &path, flags, cloexec)
     };
 
-    let fd = result.map_err(|_| SysError::InvalidArgument)?;
+    let fd = result.map_err(map_vfs_error)?;
+    if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
+        process.set_controlling_tty(ControllingTty::Global);
+    }
+    Ok(fd as u64)
+}
+
+fn handle_openat(invocation: &SyscallInvocation) -> SysResult {
+    let pid = SCHEDULER
+        .current_process_id()
+        .ok_or(SysError::InvalidArgument)?;
+    let dirfd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as i32;
+    let ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, ptr)
+    })?;
+
+    let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
+    let cloexec = (flags & LINUX_O_CLOEXEC) != 0;
+    let result = if create {
+        proc_fs::open_path_at_with_create_and_options(pid, dirfd, &path, flags, cloexec)
+    } else {
+        proc_fs::open_path_at_with_options(pid, dirfd, &path, flags, cloexec)
+    };
+
+    let fd = result.map_err(map_vfs_error)?;
     if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
         process.set_controlling_tty(ControllingTty::Global);
     }
@@ -364,6 +437,125 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
         proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
     })
+}
+
+fn handle_socket(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let domain = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let socket_type = invocation.arg(1).ok_or(SysError::InvalidArgument)? as u32;
+    let protocol = invocation.arg(2).ok_or(SysError::InvalidArgument)? as u32;
+
+    if domain != AF_INET as u32 {
+        return Err(SysError::InvalidArgument);
+    }
+    let base_type = socket_type & 0xff;
+    let type_flags = socket_type & !0xff;
+    let allowed = SOCK_NONBLOCK | SOCK_CLOEXEC;
+    if type_flags & !allowed != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    if base_type != SOCK_STREAM {
+        return Err(SysError::InvalidArgument);
+    }
+    if protocol != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let file = TcpSocketFile::new();
+    let fd = proc_fs::open_file_with_flags(pid, file, socket_type & SOCK_CLOEXEC != 0)
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(fd as u64)
+}
+
+fn handle_bind(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let addr_len = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let addr_len = usize::try_from(addr_len).map_err(|_| SysError::InvalidArgument)?;
+
+    let addr = read_sockaddr_in(addr_ptr, addr_len)?;
+    let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
+    let socket = file
+        .as_ref()
+        .as_any()
+        .downcast_ref::<TcpSocketFile>()
+        .ok_or(SysError::InvalidArgument)?;
+    socket.bind(addr).map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
+}
+
+fn handle_listen(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let _backlog = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+
+    let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
+    let socket = file
+        .as_ref()
+        .as_any()
+        .downcast_ref::<TcpSocketFile>()
+        .ok_or(SysError::InvalidArgument)?;
+    socket.listen().map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
+}
+
+fn handle_accept(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let addrlen_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    handle_accept_raw(pid, fd, addr_ptr, addrlen_ptr)
+}
+
+fn handle_accept4(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let addrlen_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(3).ok_or(SysError::InvalidArgument)? as u32;
+
+    let allowed = SOCK_NONBLOCK | SOCK_CLOEXEC;
+    if flags & !allowed != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let new_fd = handle_accept_raw(pid, fd, addr_ptr, addrlen_ptr)?;
+    if (flags & SOCK_CLOEXEC) != 0 {
+        proc_fs::set_fd_flags(pid, new_fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
+    }
+    Ok(new_fd as u64)
+}
+
+fn handle_accept_raw(
+    pid: ProcessId,
+    fd: u32,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) -> Result<u64, SysError> {
+    let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
+    let socket = file
+        .as_ref()
+        .as_any()
+        .downcast_ref::<TcpSocketFile>()
+        .ok_or(SysError::InvalidArgument)?;
+    let (stream, remote) = socket.accept().map_err(|_| SysError::InvalidArgument)?;
+    let new_socket = TcpSocketFile::new();
+    new_socket
+        .set_stream(stream)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let new_fd = proc_fs::open_file(pid, new_socket).map_err(|_| SysError::InvalidArgument)?;
+
+    if addr_ptr != 0 && addrlen_ptr != 0 {
+        let len = read_u32(addrlen_ptr)? as usize;
+        if len < SOCKADDR_IN_LEN {
+            return Err(SysError::InvalidArgument);
+        }
+        write_sockaddr_in(remote, addr_ptr)?;
+        write_u32(addrlen_ptr, SOCKADDR_IN_LEN as u32)?;
+    }
+
+    Ok(new_fd as u64)
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -519,6 +711,44 @@ fn handle_lstat(invocation: &SyscallInvocation) -> SysResult {
     Ok(0)
 }
 
+fn handle_newfstatat(invocation: &SyscallInvocation) -> SysResult {
+    let dirfd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as i32;
+    let path_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let stat_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(3).unwrap_or(0) as u32;
+
+    let allowed = AT_SYMLINK_NOFOLLOW;
+    if flags & !allowed != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, path_ptr)
+    })?;
+    let stat = if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
+        proc_fs::stat_path_no_follow_at(pid, dirfd, &path)
+    } else {
+        proc_fs::stat_path_at(pid, dirfd, &path)
+    }
+    .map_err(map_vfs_error)?;
+
+    let mode = mode_from_meta(stat.kind);
+    let stat = LinuxStat::from_meta(mode, stat.size);
+    let dst = VirtAddr::new(stat_ptr as usize);
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, stat.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
+    Ok(0)
+}
+
 fn handle_lseek(invocation: &SyscallInvocation) -> SysResult {
     let pid = current_pid()?;
     let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
@@ -558,6 +788,62 @@ fn handle_getcwd(invocation: &SyscallInvocation) -> SysResult {
     Ok((bytes.len() + 1) as u64)
 }
 
+fn handle_sendto(invocation: &SyscallInvocation) -> SysResult {
+    const MAX_WRITE: usize = 4096;
+
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let len = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(3).unwrap_or(0) as u32;
+    let dest = invocation.arg(4).unwrap_or(0);
+    let addrlen = invocation.arg(5).unwrap_or(0);
+
+    if flags & !MSG_NOSIGNAL != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    if dest != 0 || addrlen != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let len = usize::try_from(len).map_err(|_| SysError::InvalidArgument)?;
+    if len == 0 {
+        return Ok(0);
+    }
+    let read_len = len.min(MAX_WRITE);
+    let mut buf = [0u8; MAX_WRITE];
+    let user_ptr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf[..read_len], user_ptr).map_err(|_| SysError::InvalidArgument)?;
+    let written = proc_fs::write_fd(pid, fd as u32, &buf[..read_len])
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(written as u64)
+}
+
+fn handle_setsockopt(invocation: &SyscallInvocation) -> SysResult {
+    let _pid = current_pid()?;
+    let _fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let level = invocation.arg(1).ok_or(SysError::InvalidArgument)? as u32;
+    let optname = invocation.arg(2).ok_or(SysError::InvalidArgument)? as u32;
+    let optval = invocation.arg(3).unwrap_or(0);
+    let optlen = invocation.arg(4).unwrap_or(0) as u32;
+
+    let supported = match level {
+        SOL_SOCKET => optname == SO_REUSEADDR || optname == SO_REUSEPORT,
+        IPPROTO_TCP => optname == TCP_NODELAY,
+        _ => false,
+    };
+    if !supported {
+        return Err(SysError::InvalidArgument);
+    }
+
+    if optval != 0 {
+        if optlen < 4 {
+            return Err(SysError::InvalidArgument);
+        }
+        let _ = read_u32(optval)?;
+    }
+    Ok(0)
+}
 /// Encode directory entries for `getdents64` using the per-fd cursor in `FdTable`.
 ///
 /// Implicit dependencies:
@@ -1339,13 +1625,25 @@ fn rollback_mapped<T: PageTableOps, A: FrameAllocator>(
     }
 }
 
+fn map_vfs_error(err: crate::fs::VfsError) -> SysError {
+    match err {
+        crate::fs::VfsError::NotFound => SysError::NotFound,
+        crate::fs::VfsError::BadFd => SysError::BadFileDescriptor,
+        crate::fs::VfsError::NotDirectory => SysError::NotDirectory,
+        crate::fs::VfsError::InvalidPath => SysError::InvalidArgument,
+        _ => SysError::InvalidArgument,
+    }
+}
+
 fn errno_for(err: SysError) -> u16 {
     match err {
         SysError::NotImplemented => LinuxErrno::NoSys as u16,
         SysError::InvalidArgument => LinuxErrno::InvalidArgument as u16,
         SysError::NotFound => LinuxErrno::NoEntry as u16,
+        SysError::BadFileDescriptor => LinuxErrno::BadFileDescriptor as u16,
         SysError::BadAddress => LinuxErrno::BadAddress as u16,
         SysError::NotTty => LinuxErrno::NotTty as u16,
+        SysError::NotDirectory => LinuxErrno::NotDirectory as u16,
         SysError::IllegalSeek => LinuxErrno::IllegalSeek as u16,
     }
 }
@@ -1391,6 +1689,50 @@ fn read_u64_with_user<T: PageTableOps>(
 ) -> Result<u64, SysError> {
     let addr = VirtAddr::new(ptr as usize);
     user.read_u64(addr).map_err(|_| SysError::BadAddress)
+}
+
+fn read_u32(ptr: u64) -> Result<u32, SysError> {
+    let mut buf = [0u8; 4];
+    let addr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf, addr).map_err(|_| SysError::BadAddress)?;
+    Ok(u32::from_ne_bytes(buf))
+}
+
+fn write_u32(ptr: u64, value: u32) -> Result<(), SysError> {
+    let addr = VirtAddr::new(ptr as usize);
+    copy_to_user(addr, &value.to_ne_bytes()).map_err(|_| SysError::BadAddress)
+}
+
+fn read_sockaddr_in(ptr: u64, len: usize) -> Result<SocketAddr, SysError> {
+    if len < SOCKADDR_IN_LEN {
+        return Err(SysError::InvalidArgument);
+    }
+    let mut buf = [0u8; SOCKADDR_IN_LEN];
+    let addr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf, addr).map_err(|_| SysError::BadAddress)?;
+
+    let family = u16::from_ne_bytes([buf[0], buf[1]]);
+    if family != AF_INET {
+        return Err(SysError::InvalidArgument);
+    }
+    let port = u16::from_be_bytes([buf[2], buf[3]]);
+    let ip = Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
+    Ok(SocketAddr::new(IpAddr::V4(ip), port))
+}
+
+fn write_sockaddr_in(addr: SocketAddr, ptr: u64) -> Result<(), SysError> {
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(_) => return Err(SysError::InvalidArgument),
+    };
+    let port = addr.port();
+    let mut buf = [0u8; SOCKADDR_IN_LEN];
+    buf[0..2].copy_from_slice(&AF_INET.to_ne_bytes());
+    buf[2..4].copy_from_slice(&port.to_be_bytes());
+    let octets = ip.octets();
+    buf[4..8].copy_from_slice(&octets);
+    let dst = VirtAddr::new(ptr as usize);
+    copy_to_user(dst, &buf).map_err(|_| SysError::BadAddress)
 }
 
 fn read_cstring_array_with_user<T: PageTableOps>(

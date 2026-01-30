@@ -236,8 +236,9 @@ pub fn run_qemu(image: &Path, test: bool, block_images: &[PathBuf]) -> Result<Ex
         "user,id=net0"
     } else {
         // Implicit dependency: hostfwd exposes the kernel web server on the host.
+        // Host access: tcp://127.0.0.1:8080 -> guest 0.0.0.0:8080.
         // Host access: tcp://127.0.0.1:12345 -> guest 0.0.0.0:12345.
-        "user,id=net0,hostfwd=tcp::12345-:12345"
+        "user,id=net0,hostfwd=tcp::8080-:8080,hostfwd=tcp::12345-:12345"
     };
     qemu.args([
         "-netdev",
@@ -709,6 +710,8 @@ fn ensure_xtask_assets_dir() -> Result<PathBuf> {
         .with_context(|| format!("ensure linux syscall adv elf in {}", assets_dir.display()))?;
     xtask_assets::ensure_linux_syscall_child_elf(&assets_dir)
         .with_context(|| format!("ensure linux syscall child elf in {}", assets_dir.display()))?;
+    xtask_assets::ensure_linux_syscall_net_elf(&assets_dir)
+        .with_context(|| format!("ensure linux syscall net elf in {}", assets_dir.display()))?;
     xtask_assets::ensure_linux_page_fault_elf(&assets_dir)
         .with_context(|| format!("ensure linux page fault elf in {}", assets_dir.display()))?;
     xtask_assets::run_linux_syscall_host_test(&assets_dir)

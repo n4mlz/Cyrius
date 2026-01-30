@@ -15,6 +15,8 @@ enum {
     SYS_close = 3,
     SYS_stat = 4,
     SYS_lstat = 6,
+    SYS_openat = 257,
+    SYS_newfstatat = 262,
     SYS_mmap = 9,
     SYS_munmap = 11,
     SYS_brk = 12,
@@ -30,6 +32,11 @@ enum {
 
 enum {
     ARCH_SET_FS = 0x1002,
+};
+
+enum {
+    AT_FDCWD = -100,
+    AT_SYMLINK_NOFOLLOW = 0x100,
 };
 
 struct iovec {
@@ -68,9 +75,11 @@ isize sys_call6(isize num, isize arg1, isize arg2, isize arg3, isize arg4, isize
 isize sys_write(int fd, const void *buf, usize len);
 isize sys_writev(int fd, const struct iovec *iov, int iovcnt);
 isize sys_open(const char *path, int flags, int mode);
+isize sys_openat(int dirfd, const char *path, int flags, int mode);
 isize sys_close(int fd);
 isize sys_stat(const char *path, struct linux_stat *statbuf);
 isize sys_lstat(const char *path, struct linux_stat *statbuf);
+isize sys_newfstatat(int dirfd, const char *path, struct linux_stat *statbuf, int flags);
 isize sys_ioctl(int fd, isize request, void *argp);
 isize sys_mmap(void *addr, usize len, int prot, int flags, int fd, isize offset);
 isize sys_munmap(void *addr, usize len);

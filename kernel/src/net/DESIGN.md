@@ -17,6 +17,7 @@
 - The runtime is intentionally monomorphic by wrapping devices in a `NetDevice` enum, keeping the smoltcp type stable while still allowing test-only injection.
 - Default IPv4 configuration targets QEMU user networking (`10.0.2.15/24` with gateway `10.0.2.2`).
 - `net::spawn_background_tasks` creates a dedicated kernel process/thread that continuously polls the runtime once the scheduler is ready.
+- TCP socket handles are not removed immediately on close. `runtime` keeps a small “closing” list and reaps handles only after the smoltcp socket reaches `Closed` or `TimeWait` (and has no pending send queue), providing a best-effort drain before teardown.
 
 ## TCP Wrapper
 - `tcp.rs` maps smoltcp TCP sockets to a std-like blocking interface:
@@ -24,6 +25,12 @@
 - `TcpListener::accept` is built on `try_accept`, which performs a single poll step and enables cooperative testing without threads.
 - `TcpStream::{read, write_all}` spin using corresponding `try_*` methods to avoid monopolising the runtime lock.
 - Accepting a connection replaces the listener’s socket handle with a fresh listening socket, mirroring std’s “accept returns a stream while the listener keeps listening” contract.
+
+## Socket Files
+- `socket.rs` bridges Linux TCP socket syscalls into the VFS by exposing `TcpSocketFile`, a `File`
+  implementation with a small state machine (init → bound → listening → stream).
+- `socket/bind/listen/accept` operate on the per-FD `TcpSocketFile` instance; accepted streams are
+  wrapped in a fresh `TcpSocketFile` so read/write can reuse the existing FD table paths.
 
 ## Test Strategy
 - TCP integration tests use a test-only virtual wire device pair (`runtime::TestNetworkDevice`) to drive both client and server stacks deterministically inside QEMU.

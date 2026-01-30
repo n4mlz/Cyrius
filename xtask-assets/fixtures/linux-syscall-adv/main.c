@@ -100,7 +100,29 @@ void _start(void) {
         write_str("LSTAT:BAD\n");
     }
 
+    int at_fd = (int)sys_openat(AT_FDCWD, stat_path, 0, 0);
+    if (at_fd >= 0) {
+        sys_close(at_fd);
+        write_str("OPENAT:OK\n");
+    } else {
+        write_str("OPENAT:BAD\n");
+    }
+
     int dir_fd = (int)sys_open("/", 0, 0);
+    int fstat_ok = 0;
+    if (dir_fd >= 0 &&
+        sys_newfstatat(dir_fd, stat_path, &st, 0) == 0 &&
+        st.st_size == 8 &&
+        sys_newfstatat(dir_fd, lstat_path, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+        (st.st_mode & 0170000) == 0120000) {
+        fstat_ok = 1;
+    }
+    if (fstat_ok) {
+        write_str("FSTATAT:OK\n");
+    } else {
+        write_str("FSTATAT:BAD\n");
+    }
+
     if (dir_fd < 0) {
         write_str("DENTS:BAD\n");
     } else {

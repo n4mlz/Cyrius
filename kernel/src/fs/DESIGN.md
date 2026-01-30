@@ -11,6 +11,9 @@
 - Each process owns its own `FdTable` and current working directory; `open` resolves a `Node`,
   calls `Node::open`, and binds the resulting `File` to an FD in the process table. Container
   processes route path resolution through the container VFS instead of the global VFS.
+- Directory FDs expose their backing `Node` so `openat`/`newfstatat` can resolve relative paths
+  against the directory handle itself. Directory nodes track parent/name metadata so the kernel
+  can reconstruct a mount-aware absolute path when needed (e.g. for mount-point resolution).
 - Common filesystem helpers that operate directly on `Node` live in `fs::ops`; any process-aware
   path handling stays in `process::fs`.
 - The VFS differentiates node kinds via `NodeKind` (regular/dir/symlink/device/etc.); device nodes

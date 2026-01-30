@@ -1,10 +1,11 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
+use core::any::Any;
 
-use super::{DirEntry, VfsError};
+use super::{DirEntry, Node, VfsError};
 use crate::util::stream::{ControlError, ControlRequest};
 
 /// Per-open handle that performs I/O and control operations.
-pub trait File: Send + Sync {
+pub trait File: Send + Sync + Any {
     fn read(&self, buf: &mut [u8]) -> Result<usize, VfsError>;
 
     fn write(&self, _data: &[u8]) -> Result<usize, VfsError> {
@@ -22,4 +23,10 @@ pub trait File: Send + Sync {
     fn ioctl(&self, _request: &ControlRequest<'_>) -> Result<u64, ControlError> {
         Err(ControlError::Unsupported)
     }
+
+    fn dir_node(&self) -> Option<Arc<dyn Node>> {
+        None
+    }
+
+    fn as_any(&self) -> &dyn Any;
 }

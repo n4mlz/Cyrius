@@ -15,6 +15,7 @@ use crate::mem::dma::{DmaError, DmaRegion, DmaRegionProvider};
 use crate::trap::{CurrentTrapFrame, TrapInfo};
 use crate::util::lazylock::LazyLock;
 use crate::util::spinlock::SpinLock;
+
 use core::sync::atomic::fence;
 use core::sync::atomic::{AtomicBool, Ordering};
 

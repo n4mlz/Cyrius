@@ -64,6 +64,19 @@ impl FdTable {
         Ok(fd)
     }
 
+    pub fn open_file_with_flags(
+        &self,
+        file: Arc<dyn File>,
+        close_on_exec: bool,
+    ) -> Result<Fd, VfsError> {
+        let mut guard = self.inner.lock();
+        let fd = guard.allocate_fd(self.next_fd.fetch_add(1, Ordering::AcqRel));
+        let mut entry = FdEntry::new(file);
+        entry.set_close_on_exec(close_on_exec);
+        guard.set(fd, entry)?;
+        Ok(fd)
+    }
+
     pub fn open_fixed(&self, fd: Fd, file: Arc<dyn File>) -> Result<(), VfsError> {
         let mut guard = self.inner.lock();
         if guard.exists(fd) {
