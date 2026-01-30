@@ -17,6 +17,7 @@
 - The runtime is intentionally monomorphic by wrapping devices in a `NetDevice` enum, keeping the smoltcp type stable while still allowing test-only injection.
 - Default IPv4 configuration targets QEMU user networking (`10.0.2.15/24` with gateway `10.0.2.2`).
 - `net::spawn_background_tasks` creates a dedicated kernel process/thread that continuously polls the runtime once the scheduler is ready.
+- TCP socket handles are not removed immediately on close. `runtime` keeps a small “closing” list and reaps handles only after the smoltcp socket reaches `Closed` or `TimeWait` (and has no pending send queue), providing a best-effort drain before teardown.
 
 ## TCP Wrapper
 - `tcp.rs` maps smoltcp TCP sockets to a std-like blocking interface:
