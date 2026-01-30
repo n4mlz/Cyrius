@@ -28,6 +28,11 @@ void _start(void) {
         sys_exit(1);
     }
 
+    int reuse = 1;
+    if (sys_setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        sys_exit(6);
+    }
+
     if (sys_bind(fd, &addr, sizeof(addr)) < 0) {
         sys_exit(2);
     }
@@ -37,7 +42,7 @@ void _start(void) {
     }
 
     u32 addrlen = sizeof(addr);
-    int client = (int)sys_accept(fd, &addr, &addrlen);
+    int client = (int)sys_accept4(fd, &addr, &addrlen, SOCK_CLOEXEC);
     if (client < 0) {
         sys_exit(4);
     }
@@ -45,7 +50,7 @@ void _start(void) {
     char buf[16];
     isize n = sys_read(client, buf, sizeof(buf));
     if (n > 0) {
-        sys_write(client, pong_msg, sizeof(pong_msg) - 1);
+        sys_sendto(client, pong_msg, sizeof(pong_msg) - 1, MSG_NOSIGNAL, 0, 0);
     }
 
     sys_close(client);

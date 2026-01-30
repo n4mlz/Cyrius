@@ -76,6 +76,10 @@ isize sys_open(const char *path, int flags, int mode) {
     return sys_call3(SYS_open, (isize)path, flags, mode);
 }
 
+isize sys_openat(int dirfd, const char *path, int flags, int mode) {
+    return sys_call4(SYS_openat, dirfd, (isize)path, flags, mode);
+}
+
 isize sys_close(int fd) {
     return sys_call1(SYS_close, fd);
 }
@@ -86,6 +90,10 @@ isize sys_stat(const char *path, struct linux_stat *statbuf) {
 
 isize sys_lstat(const char *path, struct linux_stat *statbuf) {
     return sys_call3(SYS_lstat, (isize)path, (isize)statbuf, 0);
+}
+
+isize sys_newfstatat(int dirfd, const char *path, struct linux_stat *statbuf, int flags) {
+    return sys_call4(SYS_newfstatat, dirfd, (isize)path, (isize)statbuf, flags);
 }
 
 isize sys_ioctl(int fd, isize request, void *argp) {

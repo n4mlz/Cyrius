@@ -47,6 +47,7 @@ pub enum LinuxSyscall {
     Close = 3,
     Stat = 4,
     Lstat = 6,
+    SendTo = 44,
     Poll = 7,
     Lseek = 8,
     Mmap = 9,
@@ -86,11 +87,25 @@ pub enum LinuxSyscall {
     Bind = 49,
     Listen = 50,
     Accept = 43,
+    Accept4 = 288,
+    SetSockOpt = 54,
+    OpenAt = 257,
+    NewFstatAt = 262,
 }
 
 const AF_INET: u16 = 2;
 const SOCK_STREAM: u32 = 1;
 const SOCKADDR_IN_LEN: usize = 16;
+const AT_FDCWD: i32 = -100;
+const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+const MSG_NOSIGNAL: u32 = 0x4000;
+const SOL_SOCKET: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const SO_REUSEPORT: u32 = 15;
+const IPPROTO_TCP: u32 = 6;
+const TCP_NODELAY: u32 = 1;
+const SOCK_NONBLOCK: u32 = 0x800;
+const SOCK_CLOEXEC: u32 = 0x80000;
 
 impl LinuxSyscall {
     pub fn from_raw(value: u64) -> Option<Self> {
@@ -112,6 +127,7 @@ impl LinuxSyscall {
             16 => Some(Self::Ioctl),
             20 => Some(Self::Writev),
             39 => Some(Self::GetPid),
+            44 => Some(Self::SendTo),
             63 => Some(Self::Uname),
             96 => Some(Self::GetTimeOfDay),
             72 => Some(Self::Fcntl),
@@ -139,17 +155,18 @@ impl LinuxSyscall {
             228 => Some(Self::ClockGetTime),
             41 => Some(Self::Socket),
             43 => Some(Self::Accept),
+            54 => Some(Self::SetSockOpt),
             49 => Some(Self::Bind),
             50 => Some(Self::Listen),
+            257 => Some(Self::OpenAt),
+            262 => Some(Self::NewFstatAt),
+            288 => Some(Self::Accept4),
             _ => None,
         }
     }
 }
 
 /// Minimal Linux syscall table supporting write/getpid/exit placeholders.
-///
-/// NOTE: `openat` and related syscalls are not implemented yet; userland that
-/// relies on them will see ENOSYS.
 pub fn dispatch(
     invocation: &SyscallInvocation,
     frame: Option<&mut CurrentTrapFrame>,
@@ -158,10 +175,12 @@ pub fn dispatch(
         Some(LinuxSyscall::Read) => DispatchResult::Completed(handle_read(invocation)),
         Some(LinuxSyscall::Write) => DispatchResult::Completed(handle_write(invocation)),
         Some(LinuxSyscall::Open) => DispatchResult::Completed(handle_open(invocation)),
+        Some(LinuxSyscall::OpenAt) => DispatchResult::Completed(handle_openat(invocation)),
         Some(LinuxSyscall::Close) => DispatchResult::Completed(handle_close(invocation)),
         Some(LinuxSyscall::Writev) => DispatchResult::Completed(handle_writev(invocation)),
         Some(LinuxSyscall::Stat) => DispatchResult::Completed(handle_stat(invocation)),
         Some(LinuxSyscall::Lstat) => DispatchResult::Completed(handle_lstat(invocation)),
+        Some(LinuxSyscall::NewFstatAt) => DispatchResult::Completed(handle_newfstatat(invocation)),
         Some(LinuxSyscall::Poll) => DispatchResult::Completed(handle_poll(invocation)),
         Some(LinuxSyscall::Lseek) => DispatchResult::Completed(handle_lseek(invocation)),
         Some(LinuxSyscall::Mmap) => DispatchResult::Completed(handle_mmap(invocation)),
@@ -201,10 +220,13 @@ pub fn dispatch(
         Some(LinuxSyscall::ClockGetTime) => {
             DispatchResult::Completed(handle_clock_gettime(invocation))
         }
+        Some(LinuxSyscall::SendTo) => DispatchResult::Completed(handle_sendto(invocation)),
         Some(LinuxSyscall::Socket) => DispatchResult::Completed(handle_socket(invocation)),
         Some(LinuxSyscall::Bind) => DispatchResult::Completed(handle_bind(invocation)),
         Some(LinuxSyscall::Listen) => DispatchResult::Completed(handle_listen(invocation)),
         Some(LinuxSyscall::Accept) => DispatchResult::Completed(handle_accept(invocation)),
+        Some(LinuxSyscall::Accept4) => DispatchResult::Completed(handle_accept4(invocation)),
+        Some(LinuxSyscall::SetSockOpt) => DispatchResult::Completed(handle_setsockopt(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
         None => DispatchResult::Completed(Err(SysError::NotImplemented)),
@@ -271,6 +293,40 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
         .ok_or(SysError::InvalidArgument)?;
     let ptr = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
     let flags = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, ptr)
+    })?;
+
+    let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
+    let result = if create {
+        proc_fs::open_path_with_create(pid, &path, flags)
+    } else {
+        proc_fs::open_path(pid, &path, flags)
+    };
+
+    let fd = result.map_err(|_| SysError::InvalidArgument)?;
+    if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
+        process.set_controlling_tty(ControllingTty::Global);
+    }
+    Ok(fd as u64)
+}
+
+fn handle_openat(invocation: &SyscallInvocation) -> SysResult {
+    let pid = SCHEDULER
+        .current_process_id()
+        .ok_or(SysError::InvalidArgument)?;
+    let dirfd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as i32;
+    let ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+
+    if dirfd != AT_FDCWD {
+        return Err(SysError::InvalidArgument);
+    }
+
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
@@ -442,7 +498,34 @@ fn handle_accept(invocation: &SyscallInvocation) -> SysResult {
     let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
     let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let addrlen_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    handle_accept_raw(pid, fd, addr_ptr, addrlen_ptr)
+}
 
+fn handle_accept4(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let addrlen_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(3).ok_or(SysError::InvalidArgument)? as u32;
+
+    let allowed = SOCK_NONBLOCK | SOCK_CLOEXEC;
+    if flags & !allowed != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let new_fd = handle_accept_raw(pid, fd, addr_ptr, addrlen_ptr)?;
+    if (flags & SOCK_CLOEXEC) != 0 {
+        proc_fs::set_fd_flags(pid, new_fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
+    }
+    Ok(new_fd as u64)
+}
+
+fn handle_accept_raw(
+    pid: ProcessId,
+    fd: u32,
+    addr_ptr: u64,
+    addrlen_ptr: u64,
+) -> Result<u64, SysError> {
     let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
     let socket = file
         .as_ref()
@@ -621,6 +704,50 @@ fn handle_lstat(invocation: &SyscallInvocation) -> SysResult {
     Ok(0)
 }
 
+fn handle_newfstatat(invocation: &SyscallInvocation) -> SysResult {
+    let dirfd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as i32;
+    let path_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let stat_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(3).unwrap_or(0) as u32;
+
+    if dirfd != AT_FDCWD {
+        return Err(SysError::InvalidArgument);
+    }
+    let allowed = AT_SYMLINK_NOFOLLOW;
+    if flags & !allowed != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let pid = current_pid()?;
+    let process = PROCESS_TABLE
+        .process_handle(pid)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let path = process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        read_cstring_with_user(&user, path_ptr)
+    })?;
+    let stat = if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
+        proc_fs::stat_path_no_follow(pid, &path)
+    } else {
+        proc_fs::stat_path(pid, &path)
+    }
+    .map_err(|err| match err {
+        crate::fs::VfsError::NotFound => SysError::NotFound,
+        _ => SysError::InvalidArgument,
+    })?;
+
+    let mode = mode_from_meta(stat.kind);
+    let stat = LinuxStat::from_meta(mode, stat.size);
+    let dst = VirtAddr::new(stat_ptr as usize);
+    process.address_space().with_page_table(|table, _| {
+        let user = UserMemoryAccess::new(table);
+        user.write_bytes(dst, stat.as_bytes())
+            .map_err(|_| SysError::BadAddress)?;
+        Ok::<(), SysError>(())
+    })?;
+    Ok(0)
+}
+
 fn handle_lseek(invocation: &SyscallInvocation) -> SysResult {
     let pid = current_pid()?;
     let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
@@ -660,6 +787,62 @@ fn handle_getcwd(invocation: &SyscallInvocation) -> SysResult {
     Ok((bytes.len() + 1) as u64)
 }
 
+fn handle_sendto(invocation: &SyscallInvocation) -> SysResult {
+    const MAX_WRITE: usize = 4096;
+
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)?;
+    let ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let len = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let flags = invocation.arg(3).unwrap_or(0) as u32;
+    let dest = invocation.arg(4).unwrap_or(0);
+    let addrlen = invocation.arg(5).unwrap_or(0);
+
+    if flags & !MSG_NOSIGNAL != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    if dest != 0 || addrlen != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let len = usize::try_from(len).map_err(|_| SysError::InvalidArgument)?;
+    if len == 0 {
+        return Ok(0);
+    }
+    let read_len = len.min(MAX_WRITE);
+    let mut buf = [0u8; MAX_WRITE];
+    let user_ptr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf[..read_len], user_ptr).map_err(|_| SysError::InvalidArgument)?;
+    let written = proc_fs::write_fd(pid, fd as u32, &buf[..read_len])
+        .map_err(|_| SysError::InvalidArgument)?;
+    Ok(written as u64)
+}
+
+fn handle_setsockopt(invocation: &SyscallInvocation) -> SysResult {
+    let _pid = current_pid()?;
+    let _fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let level = invocation.arg(1).ok_or(SysError::InvalidArgument)? as u32;
+    let optname = invocation.arg(2).ok_or(SysError::InvalidArgument)? as u32;
+    let optval = invocation.arg(3).unwrap_or(0);
+    let optlen = invocation.arg(4).unwrap_or(0) as u32;
+
+    let supported = match level {
+        SOL_SOCKET => optname == SO_REUSEADDR || optname == SO_REUSEPORT,
+        IPPROTO_TCP => optname == TCP_NODELAY,
+        _ => false,
+    };
+    if !supported {
+        return Err(SysError::InvalidArgument);
+    }
+
+    if optval != 0 {
+        if optlen < 4 {
+            return Err(SysError::InvalidArgument);
+        }
+        let _ = read_u32(optval)?;
+    }
+    Ok(0)
+}
 /// Encode directory entries for `getdents64` using the per-fd cursor in `FdTable`.
 ///
 /// Implicit dependencies:

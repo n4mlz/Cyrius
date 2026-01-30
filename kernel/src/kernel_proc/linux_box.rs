@@ -312,7 +312,7 @@ mod tests {
         let output = tty.drain_output();
         assert_eq!(
             output,
-            b"WRITEV\nSTAT:OK\nLSTAT:OK\nDENTS:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
+            b"WRITEV\nSTAT:OK\nLSTAT:OK\nOPENAT:OK\nFSTATAT:OK\nDENTS:OK\nIOCTL:OK\nMMAP:OK\nBRK:OK\nARCH:OK\nFORK:CHILD\nEXEC:CHILD\nWAIT:42\n"
         );
 
         if started {
