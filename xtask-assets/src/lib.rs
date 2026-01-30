@@ -108,6 +108,30 @@ pub fn ensure_linux_syscall_child_elf(out_dir: &Path) -> io::Result<PathBuf> {
     Ok(out_path)
 }
 
+pub fn ensure_linux_syscall_net_elf(out_dir: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(out_dir)?;
+    let out_path = out_dir.join("linux-syscall-net.elf");
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let src_dir = manifest_dir.join("fixtures").join("linux-syscall-net");
+    let src = src_dir.join("main.c");
+    let lib = src_dir.join("libsyscall.c");
+    if !src.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "linux-syscall-net fixture missing",
+        ));
+    }
+
+    if !needs_rebuild_multi(&[&src, &lib], &out_path)? {
+        return Ok(out_path);
+    }
+
+    build_linux_syscall_elf(&[&src, &lib], &out_path)?;
+
+    Ok(out_path)
+}
+
 pub fn ensure_linux_page_fault_elf(out_dir: &Path) -> io::Result<PathBuf> {
     fs::create_dir_all(out_dir)?;
     let out_path = out_dir.join("linux-page-fault.elf");

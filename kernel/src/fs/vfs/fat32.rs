@@ -396,6 +396,10 @@ impl<D: BlockDevice + Send + 'static> File for FatDirFile<D> {
     fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
         self.node.read_dir()
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 impl<D: BlockDevice + Send + 'static> Node for FatDirectory<D> {
@@ -528,6 +532,10 @@ impl<D: BlockDevice + Send + 'static> File for FatFileHandle<D> {
         let next = usize::try_from(next).map_err(|_| VfsError::Corrupted)?;
         *guard = next;
         Ok(next as u64)
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

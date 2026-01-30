@@ -16,6 +16,7 @@ use crate::mem::paging::{FrameAllocator, MapError, PageTableOps, PhysMapper};
 use crate::mem::user::{
     UserMemoryAccess, copy_from_user, copy_to_user, with_user_slice, with_user_slice_mut,
 };
+use crate::net::{IpAddr, Ipv4Addr, SocketAddr, TcpSocketFile};
 use crate::process::fs as proc_fs;
 use crate::process::{ControllingTty, PROCESS_TABLE, ProcessHandle, ProcessId};
 use crate::thread::SCHEDULER;
@@ -81,7 +82,15 @@ pub enum LinuxSyscall {
     GetDents64 = 217,
     SetTidAddress = 218,
     ClockGetTime = 228,
+    Socket = 41,
+    Bind = 49,
+    Listen = 50,
+    Accept = 43,
 }
+
+const AF_INET: u16 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCKADDR_IN_LEN: usize = 16;
 
 impl LinuxSyscall {
     pub fn from_raw(value: u64) -> Option<Self> {
@@ -128,6 +137,10 @@ impl LinuxSyscall {
             217 => Some(Self::GetDents64),
             218 => Some(Self::SetTidAddress),
             228 => Some(Self::ClockGetTime),
+            41 => Some(Self::Socket),
+            43 => Some(Self::Accept),
+            49 => Some(Self::Bind),
+            50 => Some(Self::Listen),
             _ => None,
         }
     }
@@ -188,6 +201,10 @@ pub fn dispatch(
         Some(LinuxSyscall::ClockGetTime) => {
             DispatchResult::Completed(handle_clock_gettime(invocation))
         }
+        Some(LinuxSyscall::Socket) => DispatchResult::Completed(handle_socket(invocation)),
+        Some(LinuxSyscall::Bind) => DispatchResult::Completed(handle_bind(invocation)),
+        Some(LinuxSyscall::Listen) => DispatchResult::Completed(handle_listen(invocation)),
+        Some(LinuxSyscall::Accept) => DispatchResult::Completed(handle_accept(invocation)),
         Some(LinuxSyscall::Exit) => handle_exit(invocation),
         Some(LinuxSyscall::ExitGroup) => handle_exit(invocation),
         None => DispatchResult::Completed(Err(SysError::NotImplemented)),
@@ -364,6 +381,91 @@ fn handle_ioctl(invocation: &SyscallInvocation) -> SysResult {
         let request = crate::util::stream::ControlRequest::new(cmd, arg, &user);
         proc_fs::control_fd(pid, fd as u32, &request).map_err(map_control_error)
     })
+}
+
+fn handle_socket(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let domain = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let socket_type = invocation.arg(1).ok_or(SysError::InvalidArgument)? as u32;
+    let protocol = invocation.arg(2).ok_or(SysError::InvalidArgument)? as u32;
+
+    if domain != AF_INET as u32 {
+        return Err(SysError::InvalidArgument);
+    }
+    if socket_type & 0xff != SOCK_STREAM {
+        return Err(SysError::InvalidArgument);
+    }
+    if protocol != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+
+    let file = TcpSocketFile::new();
+    let fd = proc_fs::open_file(pid, file).map_err(|_| SysError::InvalidArgument)?;
+    Ok(fd as u64)
+}
+
+fn handle_bind(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let addr_len = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+    let addr_len = usize::try_from(addr_len).map_err(|_| SysError::InvalidArgument)?;
+
+    let addr = read_sockaddr_in(addr_ptr, addr_len)?;
+    let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
+    let socket = file
+        .as_ref()
+        .as_any()
+        .downcast_ref::<TcpSocketFile>()
+        .ok_or(SysError::InvalidArgument)?;
+    socket.bind(addr).map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
+}
+
+fn handle_listen(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let _backlog = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+
+    let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
+    let socket = file
+        .as_ref()
+        .as_any()
+        .downcast_ref::<TcpSocketFile>()
+        .ok_or(SysError::InvalidArgument)?;
+    socket.listen().map_err(|_| SysError::InvalidArgument)?;
+    Ok(0)
+}
+
+fn handle_accept(invocation: &SyscallInvocation) -> SysResult {
+    let pid = current_pid()?;
+    let fd = invocation.arg(0).ok_or(SysError::InvalidArgument)? as u32;
+    let addr_ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
+    let addrlen_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
+
+    let file = proc_fs::fd_file(pid, fd).map_err(|_| SysError::InvalidArgument)?;
+    let socket = file
+        .as_ref()
+        .as_any()
+        .downcast_ref::<TcpSocketFile>()
+        .ok_or(SysError::InvalidArgument)?;
+    let (stream, remote) = socket.accept().map_err(|_| SysError::InvalidArgument)?;
+    let new_socket = TcpSocketFile::new();
+    new_socket
+        .set_stream(stream)
+        .map_err(|_| SysError::InvalidArgument)?;
+    let new_fd = proc_fs::open_file(pid, new_socket).map_err(|_| SysError::InvalidArgument)?;
+
+    if addr_ptr != 0 && addrlen_ptr != 0 {
+        let len = read_u32(addrlen_ptr)? as usize;
+        if len < SOCKADDR_IN_LEN {
+            return Err(SysError::InvalidArgument);
+        }
+        write_sockaddr_in(remote, addr_ptr)?;
+        write_u32(addrlen_ptr, SOCKADDR_IN_LEN as u32)?;
+    }
+
+    Ok(new_fd as u64)
 }
 
 fn handle_getpid(_invocation: &SyscallInvocation) -> SysResult {
@@ -1391,6 +1493,50 @@ fn read_u64_with_user<T: PageTableOps>(
 ) -> Result<u64, SysError> {
     let addr = VirtAddr::new(ptr as usize);
     user.read_u64(addr).map_err(|_| SysError::BadAddress)
+}
+
+fn read_u32(ptr: u64) -> Result<u32, SysError> {
+    let mut buf = [0u8; 4];
+    let addr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf, addr).map_err(|_| SysError::BadAddress)?;
+    Ok(u32::from_ne_bytes(buf))
+}
+
+fn write_u32(ptr: u64, value: u32) -> Result<(), SysError> {
+    let addr = VirtAddr::new(ptr as usize);
+    copy_to_user(addr, &value.to_ne_bytes()).map_err(|_| SysError::BadAddress)
+}
+
+fn read_sockaddr_in(ptr: u64, len: usize) -> Result<SocketAddr, SysError> {
+    if len < SOCKADDR_IN_LEN {
+        return Err(SysError::InvalidArgument);
+    }
+    let mut buf = [0u8; SOCKADDR_IN_LEN];
+    let addr = VirtAddr::new(ptr as usize);
+    copy_from_user(&mut buf, addr).map_err(|_| SysError::BadAddress)?;
+
+    let family = u16::from_ne_bytes([buf[0], buf[1]]);
+    if family != AF_INET {
+        return Err(SysError::InvalidArgument);
+    }
+    let port = u16::from_be_bytes([buf[2], buf[3]]);
+    let ip = Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
+    Ok(SocketAddr::new(IpAddr::V4(ip), port))
+}
+
+fn write_sockaddr_in(addr: SocketAddr, ptr: u64) -> Result<(), SysError> {
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(_) => return Err(SysError::InvalidArgument),
+    };
+    let port = addr.port();
+    let mut buf = [0u8; SOCKADDR_IN_LEN];
+    buf[0..2].copy_from_slice(&AF_INET.to_ne_bytes());
+    buf[2..4].copy_from_slice(&port.to_be_bytes());
+    let octets = ip.octets();
+    buf[4..8].copy_from_slice(&octets);
+    let dst = VirtAddr::new(ptr as usize);
+    copy_to_user(dst, &buf).map_err(|_| SysError::BadAddress)
 }
 
 fn read_cstring_array_with_user<T: PageTableOps>(

@@ -67,4 +67,8 @@ where
     fn ioctl(&self, request: &ControlRequest<'_>) -> Result<u64, ControlError> {
         self.device.control(request)
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }

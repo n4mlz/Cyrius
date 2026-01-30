@@ -15,7 +15,6 @@ const EPHEMERAL_START: u16 = 49_152;
 const EPHEMERAL_END: u16 = 65_535;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(EPHEMERAL_START);
-
 #[derive(Debug)]
 pub enum TcpError {
     Net(NetError),

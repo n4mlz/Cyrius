@@ -130,6 +130,10 @@ impl File for MemFileHandle {
         *guard = next;
         Ok(next as u64)
     }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
 
 struct MemDirFile {
@@ -153,6 +157,10 @@ impl File for MemDirFile {
 
     fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
         self.node.read_dir()
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
     }
 }
 

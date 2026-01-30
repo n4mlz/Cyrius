@@ -1,8 +1,9 @@
 use alloc::string::ToString;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::{
-    DirEntry, Fd, NodeKind, OpenOptions, Path, Vfs, VfsError, read_to_end_with_vfs, with_vfs,
+    DirEntry, Fd, File, NodeKind, OpenOptions, Path, Vfs, VfsError, read_to_end_with_vfs, with_vfs,
 };
 use crate::util::stream::{ControlError, ControlRequest};
 
@@ -33,6 +34,11 @@ pub fn open_path(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsEr
     let file = with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     })?;
+    process.fd_table().open_file(file)
+}
+
+pub fn open_file(pid: ProcessId, file: Arc<dyn File>) -> Result<Fd, VfsError> {
+    let process = process_handle(pid)?;
     process.fd_table().open_file(file)
 }
 
@@ -126,6 +132,12 @@ pub fn control_fd(
         }
     };
     entry.file().ioctl(request)
+}
+
+pub fn fd_file(pid: ProcessId, fd: Fd) -> Result<Arc<dyn File>, VfsError> {
+    let process = process_handle(pid)?;
+    let entry = process.fd_table().entry(fd)?;
+    Ok(entry.file().clone())
 }
 
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {

@@ -1,12 +1,14 @@
 pub mod consts;
 pub mod runtime;
 pub mod smoltcp;
+pub mod socket;
 pub mod tcp;
 
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub use no_std_net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+pub use socket::{SocketError, TcpSocketFile};
 pub use tcp::{TcpError, TcpListener, TcpStream};
 
 /// IP address with CIDR prefix length.

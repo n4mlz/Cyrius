@@ -25,6 +25,12 @@
 - `TcpStream::{read, write_all}` spin using corresponding `try_*` methods to avoid monopolising the runtime lock.
 - Accepting a connection replaces the listener’s socket handle with a fresh listening socket, mirroring std’s “accept returns a stream while the listener keeps listening” contract.
 
+## Socket Files
+- `socket.rs` bridges Linux TCP socket syscalls into the VFS by exposing `TcpSocketFile`, a `File`
+  implementation with a small state machine (init → bound → listening → stream).
+- `socket/bind/listen/accept` operate on the per-FD `TcpSocketFile` instance; accepted streams are
+  wrapped in a fresh `TcpSocketFile` so read/write can reuse the existing FD table paths.
+
 ## Test Strategy
 - TCP integration tests use a test-only virtual wire device pair (`runtime::TestNetworkDevice`) to drive both client and server stacks deterministically inside QEMU.
 - The server side uses the public TCP wrapper while the client side drives a raw smoltcp socket, with explicit interleaved polling on both stacks.
