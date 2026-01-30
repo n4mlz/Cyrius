@@ -1,7 +1,7 @@
 use alloc::{
     collections::BTreeMap,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
 
@@ -15,6 +15,9 @@ use crate::fs::{
 /// Simple in-memory writable filesystem backed by a tree of nodes.
 pub struct MemDirectory {
     inner: SpinLock<DirInner>,
+    parent: Option<Weak<MemDirectory>>,
+    name: Option<String>,
+    self_ref: Weak<MemDirectory>,
 }
 
 struct DirInner {
@@ -23,10 +26,17 @@ struct DirInner {
 
 impl MemDirectory {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
+        Self::new_with_parent(None, None)
+    }
+
+    fn new_with_parent(parent: Option<Weak<MemDirectory>>, name: Option<String>) -> Arc<Self> {
+        Arc::new_cyclic(|self_ref| Self {
             inner: SpinLock::new(DirInner {
                 entries: BTreeMap::new(),
             }),
+            parent,
+            name,
+            self_ref: self_ref.clone(),
         })
     }
 }
@@ -159,6 +169,10 @@ impl File for MemDirFile {
         self.node.read_dir()
     }
 
+    fn dir_node(&self) -> Option<Arc<dyn Node>> {
+        Some(self.node.clone())
+    }
+
     fn as_any(&self) -> &dyn core::any::Any {
         self
     }
@@ -224,6 +238,17 @@ impl DirNode for MemDirectory {
             .ok_or(VfsError::NotFound)
     }
 
+    fn parent(&self) -> Option<Arc<dyn Node>> {
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent as Arc<dyn Node>)
+    }
+
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     fn create_file(&self, name: &str) -> Result<Arc<dyn Node>, VfsError> {
         let mut inner = self.inner.lock();
         if inner.entries.contains_key(name) {
@@ -239,7 +264,9 @@ impl DirNode for MemDirectory {
         if inner.entries.contains_key(name) {
             return Err(VfsError::AlreadyExists);
         }
-        let dir = MemDirectory::new();
+        let parent = self.self_ref.upgrade().ok_or(VfsError::Corrupted)?;
+        let dir =
+            MemDirectory::new_with_parent(Some(Arc::downgrade(&parent)), Some(name.to_string()));
         inner.entries.insert(name.to_string(), dir.clone());
         Ok(dir)
     }

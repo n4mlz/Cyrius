@@ -3,11 +3,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::fs::{
-    DirEntry, Fd, File, NodeKind, OpenOptions, Path, Vfs, VfsError, read_to_end_with_vfs, with_vfs,
+    DirEntry, Fd, File, Node, NodeKind, OpenOptions, Path, PathComponent, Vfs, VfsError,
+    read_to_end_with_vfs, with_vfs,
 };
 use crate::util::stream::{ControlError, ControlRequest};
 
 use super::{PROCESS_TABLE, ProcessHandle, ProcessId, ProcessVfs};
+
+pub const AT_FDCWD: i32 = -100;
 
 fn process_handle(pid: ProcessId) -> Result<ProcessHandle, VfsError> {
     PROCESS_TABLE
@@ -29,12 +32,21 @@ fn with_process_vfs<R>(
 }
 
 pub fn open_path(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsError> {
+    open_path_with_options(pid, raw_path, flags, false)
+}
+
+pub fn open_path_with_options(
+    pid: ProcessId,
+    raw_path: &str,
+    flags: u64,
+    close_on_exec: bool,
+) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
     let abs = Path::resolve(raw_path, &process.cwd())?;
     let file = with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     })?;
-    process.fd_table().open_file_with_path(file, abs)
+    process.fd_table().open_file_with_flags(file, close_on_exec)
 }
 
 pub fn open_file(pid: ProcessId, file: Arc<dyn File>) -> Result<Fd, VfsError> {
@@ -42,13 +54,31 @@ pub fn open_file(pid: ProcessId, file: Arc<dyn File>) -> Result<Fd, VfsError> {
     process.fd_table().open_file(file)
 }
 
+pub fn open_file_with_flags(
+    pid: ProcessId,
+    file: Arc<dyn File>,
+    close_on_exec: bool,
+) -> Result<Fd, VfsError> {
+    let process = process_handle(pid)?;
+    process.fd_table().open_file_with_flags(file, close_on_exec)
+}
+
 pub fn open_path_with_create(pid: ProcessId, raw_path: &str, flags: u64) -> Result<Fd, VfsError> {
+    open_path_with_create_and_options(pid, raw_path, flags, false)
+}
+
+pub fn open_path_with_create_and_options(
+    pid: ProcessId,
+    raw_path: &str,
+    flags: u64,
+    close_on_exec: bool,
+) -> Result<Fd, VfsError> {
     let process = process_handle(pid)?;
     let abs = Path::resolve(raw_path, &process.cwd())?;
     match with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     }) {
-        Ok(file) => process.fd_table().open_file_with_path(file, abs),
+        Ok(file) => process.fd_table().open_file_with_flags(file, close_on_exec),
         Err(VfsError::NotFound) => {
             let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
             let name = abs
@@ -61,7 +91,7 @@ pub fn open_path_with_create(pid: ProcessId, raw_path: &str, flags: u64) -> Resu
             let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
             let file_node = dir_view.create_file(&name)?;
             let file = file_node.clone().open(OpenOptions::new(flags))?;
-            process.fd_table().open_file_with_path(file, abs)
+            process.fd_table().open_file_with_flags(file, close_on_exec)
         }
         Err(err) => Err(err),
     }
@@ -73,12 +103,22 @@ pub fn open_path_at(
     raw_path: &str,
     flags: u64,
 ) -> Result<Fd, VfsError> {
+    open_path_at_with_options(pid, dirfd, raw_path, flags, false)
+}
+
+pub fn open_path_at_with_options(
+    pid: ProcessId,
+    dirfd: i32,
+    raw_path: &str,
+    flags: u64,
+    close_on_exec: bool,
+) -> Result<Fd, VfsError> {
     let abs = resolve_path_at(pid, dirfd, raw_path)?;
     let process = process_handle(pid)?;
     let file = with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     })?;
-    process.fd_table().open_file_with_path(file, abs)
+    process.fd_table().open_file_with_flags(file, close_on_exec)
 }
 
 pub fn open_path_at_with_create(
@@ -87,12 +127,22 @@ pub fn open_path_at_with_create(
     raw_path: &str,
     flags: u64,
 ) -> Result<Fd, VfsError> {
+    open_path_at_with_create_and_options(pid, dirfd, raw_path, flags, false)
+}
+
+pub fn open_path_at_with_create_and_options(
+    pid: ProcessId,
+    dirfd: i32,
+    raw_path: &str,
+    flags: u64,
+    close_on_exec: bool,
+) -> Result<Fd, VfsError> {
     let abs = resolve_path_at(pid, dirfd, raw_path)?;
     let process = process_handle(pid)?;
     match with_process_vfs(&process, |vfs| {
         vfs.open_absolute(&abs, OpenOptions::new(flags))
     }) {
-        Ok(file) => process.fd_table().open_file_with_path(file, abs),
+        Ok(file) => process.fd_table().open_file_with_flags(file, close_on_exec),
         Err(VfsError::NotFound) => {
             let parent = abs.parent().ok_or(VfsError::InvalidPath)?;
             let name = abs
@@ -105,7 +155,7 @@ pub fn open_path_at_with_create(
             let dir_view = dir.as_dir().ok_or(VfsError::NotDirectory)?;
             let file_node = dir_view.create_file(&name)?;
             let file = file_node.clone().open(OpenOptions::new(flags))?;
-            process.fd_table().open_file_with_path(file, abs)
+            process.fd_table().open_file_with_flags(file, close_on_exec)
         }
         Err(err) => Err(err),
     }
@@ -182,19 +232,6 @@ pub fn fd_file(pid: ProcessId, fd: Fd) -> Result<Arc<dyn File>, VfsError> {
     let process = process_handle(pid)?;
     let entry = process.fd_table().entry(fd)?;
     Ok(entry.file().clone())
-}
-
-/// Fetch the absolute path recorded at open time.
-///
-/// Implicit dependency: only VFS-backed `open_path*` calls record paths; sockets
-/// and other synthetic files opened via `open_file` return `InvalidPath`.
-pub fn fd_path(pid: ProcessId, fd: Fd) -> Result<Path, VfsError> {
-    let process = process_handle(pid)?;
-    let entry = process.fd_table().entry(fd)?;
-    entry
-        .path()
-        .cloned()
-        .ok_or(VfsError::InvalidPath)
 }
 
 pub fn change_dir(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {
@@ -277,18 +314,50 @@ fn resolve_path_at(pid: ProcessId, dirfd: i32, raw_path: &str) -> Result<Path, V
     if raw_path.starts_with('/') {
         return Path::resolve(raw_path, &process.cwd());
     }
-    if dirfd == -100 {
+    if dirfd == AT_FDCWD {
         return Path::resolve(raw_path, &process.cwd());
     }
     if dirfd < 0 {
         return Err(VfsError::InvalidPath);
     }
-    let base = fd_path(pid, dirfd as u32)?;
-    let stat = with_process_vfs(&process, |vfs| vfs.stat_absolute(&base))?;
-    if stat.kind != NodeKind::Directory {
-        return Err(VfsError::NotDirectory);
-    }
+
+    let base = dirfd_base_path(pid, dirfd as u32)?;
     Path::resolve(raw_path, &base)
+}
+
+fn dirfd_base_path(pid: ProcessId, fd: Fd) -> Result<Path, VfsError> {
+    let process = process_handle(pid)?;
+    let entry = process.fd_table().entry(fd).map_err(|_| VfsError::BadFd)?;
+    let file = entry.file().clone();
+    let node = file.dir_node().ok_or(VfsError::NotDirectory)?;
+    with_process_vfs(&process, |vfs| dir_node_base_path(vfs, node))
+}
+
+fn dir_node_base_path(vfs: &Vfs, node: Arc<dyn Node>) -> Result<Path, VfsError> {
+    let mut components = Vec::new();
+    let mut current = node;
+    loop {
+        if let Some(mount_path) = vfs.mount_path_for_node(&current) {
+            let mut base_components = mount_path.components().to_vec();
+            components.reverse();
+            base_components.extend(components);
+            return Ok(Path::from_components(true, base_components));
+        }
+        let current_dir = current.as_dir().ok_or(VfsError::NotDirectory)?;
+        if let Some(name) = current_dir.name() {
+            components.push(PathComponent::new(name));
+        } else if current_dir.parent().is_some() {
+            return Err(VfsError::InvalidPath);
+        }
+        match current_dir.parent() {
+            Some(parent) => {
+                current = parent;
+            }
+            None => break,
+        }
+    }
+    components.reverse();
+    Ok(Path::from_components(true, components))
 }
 
 pub fn remove_path(pid: ProcessId, raw_path: &str) -> Result<(), VfsError> {

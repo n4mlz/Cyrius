@@ -30,6 +30,7 @@ pub enum VfsError {
     AlreadyMounted,
     AlreadyExists,
     InvalidPath,
+    BadFd,
     NotFound,
     NotDirectory,
     NotFile,
@@ -114,6 +115,13 @@ impl Vfs {
 
     pub fn resolve_node(&self, path: &Path) -> Result<Arc<dyn Node>, VfsError> {
         self.resolve_absolute(path, 0)
+    }
+
+    pub fn mount_path_for_node(&self, node: &Arc<dyn Node>) -> Option<Path> {
+        self.mounts
+            .iter()
+            .find(|mount| Arc::ptr_eq(&mount.root, node))
+            .map(|mount| mount.path.clone())
     }
 
     fn inject_mount_points(&self, path: &Path, entries: &mut Vec<DirEntry>) {

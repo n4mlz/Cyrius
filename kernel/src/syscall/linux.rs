@@ -31,6 +31,8 @@ use crate::util::stream::{ControlAccess, ControlError, ControlRequest};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxErrno {
     NoEntry = 2,
+    BadFileDescriptor = 9,
+    NotDirectory = 20,
     NoSys = 38,
     InvalidArgument = 22,
     BadAddress = 14,
@@ -96,7 +98,6 @@ pub enum LinuxSyscall {
 const AF_INET: u16 = 2;
 const SOCK_STREAM: u32 = 1;
 const SOCKADDR_IN_LEN: usize = 16;
-const AT_FDCWD: i32 = -100;
 const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
 const LINUX_O_CLOEXEC: u64 = 0x80000;
 const MSG_NOSIGNAL: u32 = 0x4000;
@@ -303,16 +304,14 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
     })?;
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
+    let cloexec = (flags & LINUX_O_CLOEXEC) != 0;
     let result = if create {
-        proc_fs::open_path_with_create(pid, &path, flags)
+        proc_fs::open_path_with_create_and_options(pid, &path, flags, cloexec)
     } else {
-        proc_fs::open_path(pid, &path, flags)
+        proc_fs::open_path_with_options(pid, &path, flags, cloexec)
     };
 
-    let fd = result.map_err(|_| SysError::InvalidArgument)?;
-    if flags & LINUX_O_CLOEXEC != 0 {
-        proc_fs::set_fd_flags(pid, fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
-    }
+    let fd = result.map_err(map_vfs_error)?;
     if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
         process.set_controlling_tty(ControllingTty::Global);
     }
@@ -336,16 +335,14 @@ fn handle_openat(invocation: &SyscallInvocation) -> SysResult {
     })?;
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
+    let cloexec = (flags & LINUX_O_CLOEXEC) != 0;
     let result = if create {
-        proc_fs::open_path_at_with_create(pid, dirfd, &path, flags)
+        proc_fs::open_path_at_with_create_and_options(pid, dirfd, &path, flags, cloexec)
     } else {
-        proc_fs::open_path_at(pid, dirfd, &path, flags)
+        proc_fs::open_path_at_with_options(pid, dirfd, &path, flags, cloexec)
     };
 
-    let fd = result.map_err(|_| SysError::InvalidArgument)?;
-    if flags & LINUX_O_CLOEXEC != 0 {
-        proc_fs::set_fd_flags(pid, fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
-    }
+    let fd = result.map_err(map_vfs_error)?;
     if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
         process.set_controlling_tty(ControllingTty::Global);
     }
@@ -465,10 +462,8 @@ fn handle_socket(invocation: &SyscallInvocation) -> SysResult {
     }
 
     let file = TcpSocketFile::new();
-    let fd = proc_fs::open_file(pid, file).map_err(|_| SysError::InvalidArgument)?;
-    if socket_type & SOCK_CLOEXEC != 0 {
-        proc_fs::set_fd_flags(pid, fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
-    }
+    let fd = proc_fs::open_file_with_flags(pid, file, socket_type & SOCK_CLOEXEC != 0)
+        .map_err(|_| SysError::InvalidArgument)?;
     Ok(fd as u64)
 }
 
@@ -740,10 +735,7 @@ fn handle_newfstatat(invocation: &SyscallInvocation) -> SysResult {
     } else {
         proc_fs::stat_path_at(pid, dirfd, &path)
     }
-    .map_err(|err| match err {
-        crate::fs::VfsError::NotFound => SysError::NotFound,
-        _ => SysError::InvalidArgument,
-    })?;
+    .map_err(map_vfs_error)?;
 
     let mode = mode_from_meta(stat.kind);
     let stat = LinuxStat::from_meta(mode, stat.size);
@@ -1633,13 +1625,25 @@ fn rollback_mapped<T: PageTableOps, A: FrameAllocator>(
     }
 }
 
+fn map_vfs_error(err: crate::fs::VfsError) -> SysError {
+    match err {
+        crate::fs::VfsError::NotFound => SysError::NotFound,
+        crate::fs::VfsError::BadFd => SysError::BadFileDescriptor,
+        crate::fs::VfsError::NotDirectory => SysError::NotDirectory,
+        crate::fs::VfsError::InvalidPath => SysError::InvalidArgument,
+        _ => SysError::InvalidArgument,
+    }
+}
+
 fn errno_for(err: SysError) -> u16 {
     match err {
         SysError::NotImplemented => LinuxErrno::NoSys as u16,
         SysError::InvalidArgument => LinuxErrno::InvalidArgument as u16,
         SysError::NotFound => LinuxErrno::NoEntry as u16,
+        SysError::BadFileDescriptor => LinuxErrno::BadFileDescriptor as u16,
         SysError::BadAddress => LinuxErrno::BadAddress as u16,
         SysError::NotTty => LinuxErrno::NotTty as u16,
+        SysError::NotDirectory => LinuxErrno::NotDirectory as u16,
         SysError::IllegalSeek => LinuxErrno::IllegalSeek as u16,
     }
 }

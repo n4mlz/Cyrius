@@ -10,7 +10,7 @@ use alloc::{
     boxed::Box,
     format,
     string::{String, ToString},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec,
     vec::Vec,
 };
@@ -79,9 +79,12 @@ impl<D: BlockDevice + Send> FatFileSystem<D> {
         }
         let volume = Arc::new(FatVolume::new(device, bpb)?);
         let chain = volume.cluster_chain(volume.bpb.root_cluster)?;
-        let root = Arc::new(FatDirectory {
+        let root = Arc::new_cyclic(|self_ref| FatDirectory {
             volume: volume.clone(),
             chain,
+            parent: None,
+            name: None,
+            self_ref: self_ref.clone(),
         });
         Ok(Self { root })
     }
@@ -376,6 +379,9 @@ impl BiosParameterBlock {
 pub struct FatDirectory<D: BlockDevice + Send> {
     volume: Arc<FatVolume<D>>,
     chain: Vec<u32>,
+    parent: Option<Weak<FatDirectory<D>>>,
+    name: Option<String>,
+    self_ref: Weak<FatDirectory<D>>,
 }
 
 struct FatDirFile<D: BlockDevice + Send> {
@@ -395,6 +401,10 @@ impl<D: BlockDevice + Send + 'static> File for FatDirFile<D> {
 
     fn readdir(&self) -> Result<Vec<DirEntry>, VfsError> {
         self.node.read_dir()
+    }
+
+    fn dir_node(&self) -> Option<Arc<dyn Node>> {
+        Some(self.node.clone())
     }
 
     fn as_any(&self) -> &dyn core::any::Any {
@@ -465,13 +475,20 @@ impl<D: BlockDevice + Send + 'static> DirNode for FatDirectory<D> {
                 }
                 if entry.cmp_name == target {
                     return match entry.kind {
-                        NodeKind::Directory => Ok(Arc::new(FatDirectory {
-                            volume: self.volume.clone(),
-                            chain: self
+                        NodeKind::Directory => {
+                            let chain = self
                                 .volume
                                 .cluster_chain(entry.first_cluster)
-                                .map_err(|_| VfsError::Corrupted)?,
-                        })),
+                                .map_err(|_| VfsError::Corrupted)?;
+                            let parent = self.self_ref.upgrade().ok_or(VfsError::Corrupted)?;
+                            Ok(Arc::new_cyclic(|self_ref| FatDirectory {
+                                volume: self.volume.clone(),
+                                chain,
+                                parent: Some(Arc::downgrade(&parent)),
+                                name: Some(entry.name.clone()),
+                                self_ref: self_ref.clone(),
+                            }))
+                        }
                         NodeKind::Regular => Ok(Arc::new(FatFileNode {
                             volume: self.volume.clone(),
                             clusters: self
@@ -486,6 +503,17 @@ impl<D: BlockDevice + Send + 'static> DirNode for FatDirectory<D> {
             }
         }
         Err(VfsError::NotFound)
+    }
+
+    fn parent(&self) -> Option<Arc<dyn Node>> {
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.upgrade())
+            .map(|parent| parent as Arc<dyn Node>)
+    }
+
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 }
 

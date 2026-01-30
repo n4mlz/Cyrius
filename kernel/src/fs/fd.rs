@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::{File, Path, VfsError};
+use super::{File, VfsError};
 use crate::util::spinlock::SpinLock;
 
 pub type Fd = u32;
@@ -12,7 +12,6 @@ pub struct FdEntry {
     file: Arc<dyn File>,
     close_on_exec: bool,
     dir_offset: u64,
-    path: Option<Path>,
 }
 
 impl FdEntry {
@@ -21,16 +20,6 @@ impl FdEntry {
             file,
             close_on_exec: false,
             dir_offset: 0,
-            path: None,
-        }
-    }
-
-    pub fn new_with_path(file: Arc<dyn File>, path: Path) -> Self {
-        Self {
-            file,
-            close_on_exec: false,
-            dir_offset: 0,
-            path: Some(path),
         }
     }
 
@@ -52,10 +41,6 @@ impl FdEntry {
 
     pub fn set_dir_offset(&mut self, value: u64) {
         self.dir_offset = value;
-    }
-
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_ref()
     }
 }
 
@@ -79,10 +64,16 @@ impl FdTable {
         Ok(fd)
     }
 
-    pub fn open_file_with_path(&self, file: Arc<dyn File>, path: Path) -> Result<Fd, VfsError> {
+    pub fn open_file_with_flags(
+        &self,
+        file: Arc<dyn File>,
+        close_on_exec: bool,
+    ) -> Result<Fd, VfsError> {
         let mut guard = self.inner.lock();
         let fd = guard.allocate_fd(self.next_fd.fetch_add(1, Ordering::AcqRel));
-        guard.set(fd, FdEntry::new_with_path(file, path))?;
+        let mut entry = FdEntry::new(file);
+        entry.set_close_on_exec(close_on_exec);
+        guard.set(fd, entry)?;
         Ok(fd)
     }
 

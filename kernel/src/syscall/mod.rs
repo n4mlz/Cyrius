@@ -26,8 +26,10 @@ pub enum SysError {
     NotImplemented,
     InvalidArgument,
     NotFound,
+    BadFileDescriptor,
     BadAddress,
     NotTty,
+    NotDirectory,
     IllegalSeek,
 }
 
