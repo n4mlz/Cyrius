@@ -98,6 +98,7 @@ const SOCK_STREAM: u32 = 1;
 const SOCKADDR_IN_LEN: usize = 16;
 const AT_FDCWD: i32 = -100;
 const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+const LINUX_O_CLOEXEC: u64 = 0x80000;
 const MSG_NOSIGNAL: u32 = 0x4000;
 const SOL_SOCKET: u32 = 1;
 const SO_REUSEADDR: u32 = 2;
@@ -309,6 +310,9 @@ fn handle_open(invocation: &SyscallInvocation) -> SysResult {
     };
 
     let fd = result.map_err(|_| SysError::InvalidArgument)?;
+    if flags & LINUX_O_CLOEXEC != 0 {
+        proc_fs::set_fd_flags(pid, fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
+    }
     if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
         process.set_controlling_tty(ControllingTty::Global);
     }
@@ -323,10 +327,6 @@ fn handle_openat(invocation: &SyscallInvocation) -> SysResult {
     let ptr = invocation.arg(1).ok_or(SysError::InvalidArgument)?;
     let flags = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
 
-    if dirfd != AT_FDCWD {
-        return Err(SysError::InvalidArgument);
-    }
-
     let process = PROCESS_TABLE
         .process_handle(pid)
         .map_err(|_| SysError::InvalidArgument)?;
@@ -337,12 +337,15 @@ fn handle_openat(invocation: &SyscallInvocation) -> SysResult {
 
     let create = (flags & LinuxOpenFlags::Creat as u64) != 0;
     let result = if create {
-        proc_fs::open_path_with_create(pid, &path, flags)
+        proc_fs::open_path_at_with_create(pid, dirfd, &path, flags)
     } else {
-        proc_fs::open_path(pid, &path, flags)
+        proc_fs::open_path_at(pid, dirfd, &path, flags)
     };
 
     let fd = result.map_err(|_| SysError::InvalidArgument)?;
+    if flags & LINUX_O_CLOEXEC != 0 {
+        proc_fs::set_fd_flags(pid, fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
+    }
     if path == "/dev/tty" && process.session_id() == pid && !process.has_controlling_tty() {
         process.set_controlling_tty(ControllingTty::Global);
     }
@@ -448,7 +451,13 @@ fn handle_socket(invocation: &SyscallInvocation) -> SysResult {
     if domain != AF_INET as u32 {
         return Err(SysError::InvalidArgument);
     }
-    if socket_type & 0xff != SOCK_STREAM {
+    let base_type = socket_type & 0xff;
+    let type_flags = socket_type & !0xff;
+    let allowed = SOCK_NONBLOCK | SOCK_CLOEXEC;
+    if type_flags & !allowed != 0 {
+        return Err(SysError::InvalidArgument);
+    }
+    if base_type != SOCK_STREAM {
         return Err(SysError::InvalidArgument);
     }
     if protocol != 0 {
@@ -457,6 +466,9 @@ fn handle_socket(invocation: &SyscallInvocation) -> SysResult {
 
     let file = TcpSocketFile::new();
     let fd = proc_fs::open_file(pid, file).map_err(|_| SysError::InvalidArgument)?;
+    if socket_type & SOCK_CLOEXEC != 0 {
+        proc_fs::set_fd_flags(pid, fd as u32, 1).map_err(|_| SysError::InvalidArgument)?;
+    }
     Ok(fd as u64)
 }
 
@@ -710,9 +722,6 @@ fn handle_newfstatat(invocation: &SyscallInvocation) -> SysResult {
     let stat_ptr = invocation.arg(2).ok_or(SysError::InvalidArgument)?;
     let flags = invocation.arg(3).unwrap_or(0) as u32;
 
-    if dirfd != AT_FDCWD {
-        return Err(SysError::InvalidArgument);
-    }
     let allowed = AT_SYMLINK_NOFOLLOW;
     if flags & !allowed != 0 {
         return Err(SysError::InvalidArgument);
@@ -727,9 +736,9 @@ fn handle_newfstatat(invocation: &SyscallInvocation) -> SysResult {
         read_cstring_with_user(&user, path_ptr)
     })?;
     let stat = if (flags & AT_SYMLINK_NOFOLLOW) != 0 {
-        proc_fs::stat_path_no_follow(pid, &path)
+        proc_fs::stat_path_no_follow_at(pid, dirfd, &path)
     } else {
-        proc_fs::stat_path(pid, &path)
+        proc_fs::stat_path_at(pid, dirfd, &path)
     }
     .map_err(|err| match err {
         crate::fs::VfsError::NotFound => SysError::NotFound,
