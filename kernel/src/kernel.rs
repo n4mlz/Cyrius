@@ -61,6 +61,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     println!("[kernel] scheduler started");
 
+    println!("   _____           _           ");
+    println!("  / ____|         (_)          ");
+    println!(" | |    _   _ _ __ _ _   _ ___ ");
+    println!(" | |   | | | | '__| | | | / __|");
+    println!(" | |___| |_| | |  | | |_| \\__ \\");
+    println!(" \\_____|\\__, |_|  |_|\\__,_|___/");
+    println!("         __/ |                 ");
+    println!("        |___/                  \n");
+
     loop {
         core::hint::spin_loop()
     }
