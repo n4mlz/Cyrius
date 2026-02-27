@@ -1,5 +1,5 @@
 <h1 align="center">
-<img src="assets/cyrius.png" alt="cyrius" width="300"/>
+<img src="assets/cyrius.png" alt="cyrius" width="420"/>
 </h1>
 
 <p align="center" style="display: flex; gap: 10px; justify-content: center; align-items: center;">
